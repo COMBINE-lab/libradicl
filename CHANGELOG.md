@@ -7,6 +7,13 @@
 
 * release 0.4.6 ([a442420](https://github.com/COMBINE-lab/libradicl/commit/a442420e92650d614ca16401214842735e0b2a51))
 
+### [0.4.6](https://github.com/COMBINE-lab/libradicl/compare/v0.4.6...v0.4.6) (2022-06-01)
+
+
+### Miscellaneous Chores
+
+* release 0.4.6 ([a442420](https://github.com/COMBINE-lab/libradicl/commit/a442420e92650d614ca16401214842735e0b2a51))
+
 ### [0.4.6](https://github.com/COMBINE-lab/libradicl/compare/v0.1.0...v0.4.6) (2022-06-01)
 
 
