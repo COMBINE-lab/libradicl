@@ -2,6 +2,7 @@
 
 ## 0.4.6 (2022-06-01)
 
+* add release-please ([9b9eb99](https://github.com/COMBINE-lab/libradicl/commit/9b9eb9980d74c0f9e9958bb5d1ac7d679e434ac4))
 
 ### Bug Fixes
 
