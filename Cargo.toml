@@ -29,12 +29,12 @@ categories = ["command-line-utilities", "science"]
 snap = "1"
 scroll = "0.11.0"
 num = "0.4.0"
-ahash = "0.7.6"
-serde = { version = "1.0.136", features = ["derive"] }
-dashmap = "^5.1.0"
-bio-types = "0.12.1"
-smallvec = "1.8.0"
-rust-htslib = { version = "0.39.5", default-features = false, features = [
+ahash = "0.8.1"
+serde = { version = "1.0.147", features = ["derive"] }
+dashmap = "^5.4.0"
+bio-types = "0.13.0"
+smallvec = "1.10.0"
+rust-htslib = { version = "0.40.2", default-features = false, features = [
   "bzip2",
   "lzma",
 ] }
