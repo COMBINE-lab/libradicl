@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/COMBINE-lab/libradicl/compare/v0.5.0...v0.6.0) (2023-01-12)
+
+
+### Features
+
+* bump dependencies ([dd477dc](https://github.com/COMBINE-lab/libradicl/commit/dd477dc38485dbfec2385df85cf9724976cc5ffb))
+
 ## [0.5.0](https://github.com/COMBINE-lab/libradicl/compare/v0.4.6...v0.5.0) (2022-11-08)
 
 
