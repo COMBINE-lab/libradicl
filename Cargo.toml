@@ -29,8 +29,8 @@ categories = ["command-line-utilities", "science"]
 snap = "1"
 scroll = "0.11.0"
 num = "0.4.0"
-ahash = "0.8.1"
-serde = { version = "1.0.147", features = ["derive"] }
+ahash = "0.8.2"
+serde = { version = "1.0.152", features = ["derive"] }
 dashmap = "^5.4.0"
 bio-types = "0.13.0"
 smallvec = "1.10.0"
