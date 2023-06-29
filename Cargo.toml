@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.5.1"
+version = "0.6.0"
 authors = [
   "Avi Srivastava <avi.srivastava@nyu.edu>",
   "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
@@ -29,12 +29,12 @@ categories = ["command-line-utilities", "science"]
 snap = "1"
 scroll = "0.11.0"
 num = "0.4.0"
-ahash = "0.8.2"
-serde = { version = "1.0.152", features = ["derive"] }
+ahash = "0.8.3"
+serde = { version = "1.0.164", features = ["derive"] }
 dashmap = "^5.4.0"
-bio-types = "0.13.0"
+bio-types = "1.0.0"
 smallvec = "1.10.0"
-rust-htslib = { version = "0.40.2", default-features = false, features = [
+rust-htslib = { version = "0.44.1", default-features = false, features = [
   "bzip2",
   "lzma",
 ] }
