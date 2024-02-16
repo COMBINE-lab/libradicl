@@ -12,7 +12,7 @@ use crate as libradicl;
 use self::libradicl::utils;
 use bio_types::strand::*;
 use num::cast::AsPrimitive;
-use rust_htslib::bam::HeaderView;
+use noodles_sam as sam;
 use scroll::Pread;
 use std::io::Write;
 use std::io::{Cursor, Read};
@@ -471,7 +471,8 @@ impl RadHeader {
         rh.num_chunks = buf.pread::<u64>(0).unwrap();
         rh
     }
-    pub fn from_bam_header(header: &HeaderView) -> RadHeader {
+
+    pub fn from_bam_header(header: &sam::Header) -> RadHeader {
         let mut rh = RadHeader {
             is_paired: 0,
             ref_count: 0,
@@ -479,19 +480,16 @@ impl RadHeader {
             num_chunks: 0,
         };
 
-        rh.ref_count = header.target_count() as u64;
+        let ref_seqs = header.reference_sequences();
+        rh.ref_count = ref_seqs.len() as u64;
         // we know how many names we will read in.
         rh.ref_names.reserve_exact(rh.ref_count as usize);
-        for (_i, t) in header
-            .target_names()
-            .iter()
-            .map(|a| std::str::from_utf8(a).unwrap())
-            .enumerate()
-        {
-            rh.ref_names.push(t.to_owned());
+        for (k, _v) in ref_seqs.iter() {
+            rh.ref_names.push(k.to_string());
         }
         rh
     }
+
     pub fn get_size(&self) -> usize {
         let mut tot_size = 0usize;
         tot_size += std::mem::size_of::<u8>() + std::mem::size_of::<u64>();
