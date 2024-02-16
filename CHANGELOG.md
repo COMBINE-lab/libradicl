@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/COMBINE-lab/libradicl/compare/v0.6.0...v0.7.0) (2024-02-16)
+
+
+### Features
+
+* drop htslib dependency, update deps ([ff4940f](https://github.com/COMBINE-lab/libradicl/commit/ff4940f4f778c3527c0099a7055b79c9c303d10d))
+
 ## [0.6.0](https://github.com/COMBINE-lab/libradicl/compare/v0.5.1...v0.6.0) (2023-06-29)
 
 
