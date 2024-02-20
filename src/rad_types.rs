@@ -419,6 +419,11 @@ impl TagSection {
         Self::from_bytes_with_label(reader, TagSectionLabel::Unlabeled)
     }
 
+    /// Attempts to read a [TagSection] from the provided `reader`. If the
+    /// `reader` is positioned at the start of a valid [TagSection], then this
+    /// [TagSection] is returned.  Otherwise, a description of the error is returned
+    /// via an [anyhow::Error]. The returned [TagSection] will be labeled with the 
+    /// provided `label`.
     pub fn from_bytes_with_label<T: Read>(
         reader: &mut T,
         label: TagSectionLabel,
