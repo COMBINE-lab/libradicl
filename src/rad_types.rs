@@ -7,9 +7,11 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
-use crate as libradicl;
+use crate::{self as libradicl, constants};
 
 use self::libradicl::utils;
+
+use anyhow;
 use bio_types::strand::*;
 use num::cast::AsPrimitive;
 use noodles_sam as sam;
@@ -25,11 +27,13 @@ pub struct RadHeader {
     pub num_chunks: u64,
 }
 
+#[derive(Debug)]
 pub struct TagDesc {
     pub name: String,
     pub typeid: u8,
 }
 
+#[derive(Debug)]
 pub struct TagSection {
     pub tags: Vec<TagDesc>,
 }
@@ -404,74 +408,97 @@ impl FileTags {
 }
 
 impl TagDesc {
-    pub fn from_bytes<T: Read>(reader: &mut T) -> TagDesc {
+    /// Attempts to read a [TagDesc] from the provided `reader`. If the 
+    /// `reader` is positioned at the start of a valid [TagDesc], then this 
+    /// [TagDesc] is returned.  Otherwise, a description of the error is returned 
+    /// via an [anyhow::Error].
+    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<TagDesc> {
         // space for the string length (1 byte)
         // the longest string possible (255 char)
         // and the typeid
         let mut buf = [0u8; 257];
-        reader.read_exact(&mut buf[0..2]).unwrap();
-        let str_len = buf.pread::<u16>(0).unwrap() as usize;
+        reader.read_exact(&mut buf[0..2])?;
+        let str_len = buf.pread::<u16>(0)? as usize;
 
         // read str_len + 1 to get the type id that follows the string
-        reader.read_exact(&mut buf[0..str_len + 1]).unwrap();
-        TagDesc {
-            name: std::str::from_utf8(&buf[0..str_len]).unwrap().to_string(),
-            typeid: buf.pread(str_len).unwrap(),
-        }
+        reader.read_exact(&mut buf[0..str_len + 1])?;
+        Ok(TagDesc {
+            name: std::str::from_utf8(&buf[0..str_len])?.to_string(),
+            typeid: buf.pread(str_len)?,
+        })
     }
 }
 
 impl TagSection {
-    pub fn from_bytes<T: Read>(reader: &mut T) -> TagSection {
+    /// Attempts to read a [TagSection] from the provided `reader`. If the 
+    /// `reader` is positioned at the start of a valid [TagSection], then this 
+    /// [TagSection] is returned.  Otherwise, a description of the error is returned 
+    /// via an [anyhow::Error].
+    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<TagSection> {
         let mut buf = [0u8; 2];
-        reader.read_exact(&mut buf).unwrap();
-        let num_tags = buf.pread::<u16>(0).unwrap() as usize;
+        reader.read_exact(&mut buf)?;
+        let num_tags = buf.pread::<u16>(0)? as usize;
 
         let mut ts = TagSection {
             tags: Vec::with_capacity(num_tags),
         };
 
         for _ in 0..num_tags {
-            ts.tags.push(TagDesc::from_bytes(reader));
+            ts.tags.push(TagDesc::from_bytes(reader)?);
         }
-
-        ts
+        Ok(ts)
     }
 }
 
 impl RadHeader {
-    pub fn from_bytes<T: Read>(reader: &mut T) -> RadHeader {
-        let mut rh = RadHeader {
+    /// Create a new empty [RadHeader]
+    pub fn new() -> Self {
+        Self {
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
-            num_chunks: 0,
-        };
+            num_chunks: 0
+        }
+    }
+
+    /// Create and return a new [RadHeader] by reading the contents of the 
+    /// `reader`. If the reader is positioned such that a valid [RadHeader] comes 
+    /// next, then this function returns [Ok(RadHeader)], otherwise, it returns 
+    /// an [anyhow::Error] explaining the failure to parse the [RadHeader].
+    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<RadHeader> {
+        let mut rh = RadHeader::new();
 
         // size of the longest allowable string.
-        let mut buf = [0u8; 65536];
-        reader.read_exact(&mut buf[0..9]).unwrap();
-        rh.is_paired = buf.pread(0).unwrap();
-        rh.ref_count = buf.pread::<u64>(1).unwrap();
+        let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
+        reader.read_exact(&mut buf[0..9])?;
+        rh.is_paired = buf.pread(0)?;
+        rh.ref_count = buf.pread::<u64>(1)?;
 
         // we know how many names we will read in.
         rh.ref_names.reserve_exact(rh.ref_count as usize);
 
         let mut num_read = 0u64;
         while num_read < rh.ref_count {
-            reader.read_exact(&mut buf[0..2]).unwrap();
-            let l: usize = buf.pread::<u16>(0).unwrap() as usize;
-            reader.read_exact(&mut buf[0..l]).unwrap();
+            // the length of the string
+            reader.read_exact(&mut buf[0..2])?;
+            let l: usize = buf.pread::<u16>(0)? as usize;
+            // the string itself
+            reader.read_exact(&mut buf[0..l])?;
             rh.ref_names
-                .push(std::str::from_utf8(&buf[0..l]).unwrap().to_string());
+                .push(std::str::from_utf8(&buf[0..l])?.to_string());
             num_read += 1;
         }
 
-        reader.read_exact(&mut buf[0..8]).unwrap();
-        rh.num_chunks = buf.pread::<u64>(0).unwrap();
-        rh
+        reader.read_exact(&mut buf[0..8])?;
+        rh.num_chunks = buf.pread::<u64>(0)?;
+        Ok(rh)
     }
 
+    /// Create and return a [RadHeader] from the provided BAM/SAM header 
+    /// (represented by the noodles [sam::Header] `header`).  
+    /// **Note**: The returned [RadHeader] will *not* have a value for the `num_chunks`
+    /// field, which will remain set at 0, nor will it set a meaningful value for the 
+    /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
     pub fn from_bam_header(header: &sam::Header) -> RadHeader {
         let mut rh = RadHeader {
             is_paired: 0,
@@ -490,14 +517,41 @@ impl RadHeader {
         rh
     }
 
+    /// Returns the size, in bytes, that this [RadHeader] will take 
+    /// if written to an output stream.
     pub fn get_size(&self) -> usize {
         let mut tot_size = 0usize;
-        tot_size += std::mem::size_of::<u8>() + std::mem::size_of::<u64>();
+        tot_size += std::mem::size_of_val(&self.is_paired) + 
+            std::mem::size_of_val(&self.ref_count);
+        // each name takes 2 bytes for the length, plus the actual 
+        // number of bytes required by the string itself.
         for (_i, t) in self.ref_names.iter().map(|a| a.len()).enumerate() {
-            tot_size += t;
+            tot_size += std::mem::size_of::<u16>() + t;
         }
-        tot_size += std::mem::size_of::<u64>();
+        tot_size += std::mem::size_of_val(&self.num_chunks);
         tot_size
+    }
+
+    pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        writeln!(&mut s, "RadHeader {{")?;
+        writeln!(&mut s, "is_paired: {}", self.is_paired)?;
+        writeln!(&mut s, "ref_count: {}", self.ref_count)?;
+        
+        let refs_to_print = match num_refs {
+            Some(rcount) => rcount.min(self.ref_count as usize),
+            None => (self.ref_count as usize).min(10_usize) 
+        };
+
+        for rn in self.ref_names.iter().take(refs_to_print) {
+            writeln!(&mut s, "  ref: {}", rn)?;
+        }
+        writeln!(&mut s, "  ...")?;
+
+        writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
+        writeln!(&mut s, "}}")?;
+        Ok(s)
     }
 }
 
