@@ -297,7 +297,7 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
     owriter.lock().unwrap().write_all(v.data.get_ref()).unwrap();
 }
 
-/// Given a [BufReader<T>] from which to read a set of records that
+/// Given a [BufReader]`<T>` from which to read a set of records that
 /// should reside in the same collated bucket, this function will
 /// collate the records by cell barcode, filling them into a chunk of
 /// memory exactly as they will reside on disk.  If `compress` is true
