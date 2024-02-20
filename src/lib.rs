@@ -28,11 +28,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
+pub mod constants;
 pub mod exit_codes;
+pub mod io;
 pub mod rad_types;
 pub mod schema;
 pub mod utils;
-pub mod constants;
 
 // Name of the program, to be used in diagnostic messages.
 static LIB_NAME: &str = "libradicl";
