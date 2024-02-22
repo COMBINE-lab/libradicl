@@ -10,7 +10,7 @@
 use crate::{self as libradicl, constants, io as rad_io};
 
 use self::libradicl::utils;
-use anyhow;
+use anyhow::{self, bail};
 use bio_types::strand::*;
 use noodles_sam as sam;
 use num::cast::AsPrimitive;
@@ -43,7 +43,7 @@ pub struct RadHeader {
 #[derive(Debug)]
 pub struct TagDesc {
     pub name: String,
-    pub typeid: u8,
+    pub typeid: RadType,
 }
 
 #[derive(Debug)]
@@ -97,12 +97,18 @@ pub struct CorrectedCbChunk {
                                       */
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum RadIntId {
     U8,
     U16,
     U32,
     U64,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum RadFloatId {
+    F32,
+    F64,
 }
 
 pub trait PrimitiveInteger:
@@ -182,27 +188,37 @@ pub struct ChunkConfig {
     pub umi_type: u8,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum RadType {
     Bool,
+    Int(RadIntId),
+    Float(RadFloatId),
+    // holds length type and value type, but not length
+    // and data themselves
+    Array(RadIntId, RadIntId),
+    // does not hold length, just a marker for the type
+    String,
+    /*
     U8,
     U16,
     U32,
     U64,
     F32,
     F64,
+    */
 }
 
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
-        RadType::U8 => Some(1),
-        RadType::U16 => Some(2),
-        RadType::U32 => Some(3),
-        RadType::U64 => Some(4),
-        RadType::F32 => Some(5),
-        RadType::F64 => Some(6),
-        //_ => None,
+        RadType::Int(RadIntId::U8) => Some(1),
+        RadType::Int(RadIntId::U16) => Some(2),
+        RadType::Int(RadIntId::U32) => Some(3),
+        RadType::Int(RadIntId::U64) => Some(4),
+        RadType::Float(RadFloatId::F32) => Some(5),
+        RadType::Float(RadFloatId::F64) => Some(6),
+        RadType::Array(_, _) => Some(7),
+        RadType::String => Some(8), //_ => None,
     }
 }
 
@@ -388,6 +404,21 @@ impl FileTags {
     }
 }
 
+impl From<u8> for RadType {
+    fn from(x: u8) -> Self {
+        match x {
+            0 => RadType::Bool,
+            1 => RadType::Int(RadIntId::U8),
+            2 => RadType::Int(RadIntId::U16),
+            3 => RadType::Int(RadIntId::U32),
+            4 => RadType::Int(RadIntId::U64),
+            5 => RadType::Float(RadFloatId::F32),
+            6 => RadType::Float(RadFloatId::F64),
+            _ => panic!("Should not happen"),
+        }
+    }
+}
+
 impl TagDesc {
     /// Attempts to read a [TagDesc] from the provided `reader`. If the
     /// `reader` is positioned at the start of a valid [TagDesc], then this
@@ -403,9 +434,27 @@ impl TagDesc {
 
         // read str_len + 1 to get the type id that follows the string
         reader.read_exact(&mut buf[0..str_len + 1])?;
+        let name = std::str::from_utf8(&buf[0..str_len])?.to_string();
+        let typeid = buf.pread(str_len)?;
+        let rad_t = match typeid {
+            0..=6 | 8 => typeid.into(),
+            7 => {
+                reader.read_exact(&mut buf[0..2])?;
+                let t1 = buf.pread(0)?;
+                let t2 = buf.pread(1)?;
+                RadType::Array(
+                    decode_int_type_tag(t1).unwrap(),
+                    decode_int_type_tag(t2).unwrap(),
+                )
+            }
+            _ => {
+                bail!("{typeid} is an unrecognized RAD type id")
+            }
+        };
+
         Ok(TagDesc {
-            name: std::str::from_utf8(&buf[0..str_len])?.to_string(),
-            typeid: buf.pread(str_len)?,
+            name: name,
+            typeid: rad_t,
         })
     }
 }
@@ -422,7 +471,7 @@ impl TagSection {
     /// Attempts to read a [TagSection] from the provided `reader`. If the
     /// `reader` is positioned at the start of a valid [TagSection], then this
     /// [TagSection] is returned.  Otherwise, a description of the error is returned
-    /// via an [anyhow::Error]. The returned [TagSection] will be labeled with the 
+    /// via an [anyhow::Error]. The returned [TagSection] will be labeled with the
     /// provided `label`.
     pub fn from_bytes_with_label<T: Read>(
         reader: &mut T,
