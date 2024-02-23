@@ -97,7 +97,7 @@ pub struct CorrectedCbChunk {
                                       */
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RadIntId {
     U8,
     U16,
@@ -105,7 +105,19 @@ pub enum RadIntId {
     U64,
 }
 
-#[derive(Copy, Clone, Debug)]
+impl From<u8> for RadIntId {
+    fn from(x: u8) -> Self {
+        match x {
+            1 => Self::U8,
+            2 => Self::U16,
+            3 => Self::U32,
+            4 => Self::U64,
+            _ => panic!("Should not happen"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RadFloatId {
     F32,
     F64,
@@ -188,7 +200,7 @@ pub struct ChunkConfig {
     pub umi_type: u8,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RadType {
     Bool,
     Int(RadIntId),
@@ -198,14 +210,6 @@ pub enum RadType {
     Array(RadIntId, RadIntId),
     // does not hold length, just a marker for the type
     String,
-    /*
-    U8,
-    U16,
-    U32,
-    U64,
-    F32,
-    F64,
-    */
 }
 
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
@@ -428,7 +432,7 @@ impl TagDesc {
         // space for the string length (1 byte)
         // the longest string possible (255 char)
         // and the typeid
-        let mut buf = [0u8; 257];
+        let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
         reader.read_exact(&mut buf[0..2])?;
         let str_len = buf.pread::<u16>(0)? as usize;
 
@@ -436,16 +440,16 @@ impl TagDesc {
         reader.read_exact(&mut buf[0..str_len + 1])?;
         let name = std::str::from_utf8(&buf[0..str_len])?.to_string();
         let typeid = buf.pread(str_len)?;
+        // if the type id is 7, need to read the types of
+        // the length and element type, otherwise just turn the
+        // id into a proper RatType and we're done.
         let rad_t = match typeid {
             0..=6 | 8 => typeid.into(),
             7 => {
                 reader.read_exact(&mut buf[0..2])?;
-                let t1 = buf.pread(0)?;
-                let t2 = buf.pread(1)?;
-                RadType::Array(
-                    decode_int_type_tag(t1).unwrap(),
-                    decode_int_type_tag(t2).unwrap(),
-                )
+                let t1: RadIntId = buf.pread::<u8>(0)?.into();
+                let t2: RadIntId = buf.pread::<u8>(1)?.into();
+                RadType::Array(t1, t2)
             }
             _ => {
                 bail!("{typeid} is an unrecognized RAD type id")
@@ -453,7 +457,7 @@ impl TagDesc {
         };
 
         Ok(TagDesc {
-            name: name,
+            name,
             typeid: rad_t,
         })
     }
@@ -490,6 +494,12 @@ impl TagSection {
             ts.tags.push(TagDesc::from_bytes(reader)?);
         }
         Ok(ts)
+    }
+}
+
+impl Default for RadHeader {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -567,7 +577,7 @@ impl RadHeader {
         tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
         // each name takes 2 bytes for the length, plus the actual
         // number of bytes required by the string itself.
-        for (_i, t) in self.ref_names.iter().map(|a| a.len()).enumerate() {
+        for t in self.ref_names.iter().map(|a| a.len()) {
             tot_size += std::mem::size_of::<u16>() + t;
         }
         tot_size += std::mem::size_of_val(&self.num_chunks);
@@ -614,9 +624,49 @@ impl RadPrelude {
     pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
         use std::fmt::Write as _;
         let mut s = self.hdr.summary(num_refs)?;
-        writeln!(&mut s, "[[{:?}]]", self.file_tags)?;
-        writeln!(&mut s, "[[{:?}]]", self.read_tags)?;
-        writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
+        writeln!(&mut s, "[[{:#?}]]", self.file_tags)?;
+        writeln!(&mut s, "[[{:#?}]]", self.read_tags)?;
+        writeln!(&mut s, "[[{:#?}]]", self.aln_tags)?;
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rad_types::RadIntId;
+    use crate::rad_types::RadType;
+    use std::io::Write;
+
+    use super::TagDesc;
+    #[test]
+    fn can_parse_tag_desc() {
+        let mut buf = Vec::<u8>::new();
+        let tag_name = b"mytag";
+        let _ = buf.write_all(&5_u16.to_ne_bytes());
+        let _ = buf.write_all(tag_name);
+        let tag_type = 4_u8;
+        let _ = buf.write_all(&tag_type.to_ne_bytes());
+
+        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(desc.name, "mytag");
+        assert_eq!(desc.typeid, RadType::Int(RadIntId::U64));
+    }
+
+    #[test]
+    fn can_parse_array_tag_desc() {
+        let mut buf = Vec::<u8>::new();
+        let tag_name = b"mytag";
+        let _ = buf.write_all(&5_u16.to_ne_bytes());
+        let _ = buf.write_all(tag_name);
+        let tag_type = 7_u8;
+        let _ = buf.write_all(&tag_type.to_ne_bytes());
+        // length type
+        let _ = buf.write_all(&1_u8.to_ne_bytes());
+        // element type
+        let _ = buf.write_all(&2_u8.to_ne_bytes());
+
+        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(desc.name, "mytag");
+        assert_eq!(desc.typeid, RadType::Array(RadIntId::U8, RadIntId::U16));
     }
 }

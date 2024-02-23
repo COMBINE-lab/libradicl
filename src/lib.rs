@@ -110,7 +110,7 @@ impl BarcodeLookupMap {
             end: self.offsets[(query_pref + 1) as usize],
         };
 
-        let qs = qrange.start as usize;
+        let qs = qrange.start;
 
         // if we can, then we return the found barcode and that there was 1 best hit
         if let Ok(res) = self.barcodes[qrange].binary_search(&query) {
@@ -145,7 +145,7 @@ impl BarcodeLookupMap {
             end: self.offsets[(query_pref + 1) as usize],
         };
 
-        let qs = qrange.start as usize;
+        let qs = qrange.start;
 
         if try_exact {
             // first, we try to find exactly.
@@ -166,7 +166,7 @@ impl BarcodeLookupMap {
         // that are 1 mismatch off in the suffix.
         if !(std::ops::Range::<usize>::is_empty(&qrange)) {
             // the initial offset of suffixes for this prefix
-            let qs = qrange.start as usize;
+            let qs = qrange.start;
 
             // for each position in the suffix
             for i in (0..suffix_bits).step_by(2) {
@@ -207,7 +207,7 @@ impl BarcodeLookupMap {
                         start: self.offsets[query_pref as usize],
                         end: self.offsets[(query_pref + 1) as usize],
                     };
-                    let qs = qrange.start as usize;
+                    let qs = qrange.start;
                     if let Ok(res) = self.barcodes[qrange].binary_search(&nquery) {
                         ret = Some(qs + res);
                         num_neighbors += 1;
@@ -346,10 +346,10 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
         // compute the total number of bytes this record requires
         let nbytes = calc_record_bytes(na);
-        (*v).offset += nbytes as u64;
-        (*v).nbytes += nbytes as u32;
-        (*v).nrec += 1;
-        total_bytes += nbytes as usize;
+        v.offset += nbytes as u64;
+        v.nbytes += nbytes as u32;
+        v.nrec += 1;
+        total_bytes += nbytes;
     }
 
     // each cell will have a header (8 bytes each)
@@ -365,14 +365,14 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         // jump to the position where this chunk should start
         // and write the header
         output_buffer.set_position(next_offset);
-        let cell_bytes = (*v).nbytes as u32;
-        let cell_rec = (*v).nrec as u32;
+        let cell_bytes = v.nbytes;
+        let cell_rec = v.nrec;
         output_buffer.write_all(&cell_bytes.to_le_bytes()).unwrap();
         output_buffer.write_all(&cell_rec.to_le_bytes()).unwrap();
         // where we will start writing records for this cell
-        (*v).offset = output_buffer.position();
+        v.offset = output_buffer.position();
         // the number of bytes allocated to this chunk
-        let nbytes = (*v).nbytes as u64;
+        let nbytes = v.nbytes as u64;
         // the next record will start after this one
         next_offset += nbytes;
     }
@@ -405,15 +405,13 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
             umit.write_to(tup.1, &mut output_buffer).unwrap();
 
             // read the alignment records
-            reader
-                .read_exact(&mut tbuf[0..(size_of_u32 as usize * na)])
-                .unwrap();
+            reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
             // write them
             output_buffer
-                .write_all(&tbuf[..(size_of_u32 as usize * na)])
+                .write_all(&tbuf[..(size_of_u32 * na)])
                 .unwrap();
 
-            (*v).offset = output_buffer.position();
+            v.offset = output_buffer.position();
         } else {
             panic!("should not have any barcodes we can't find");
         }
@@ -471,17 +469,17 @@ pub fn collate_temporary_bucket<T: Read>(
             .or_insert_with(|| CorrectedCbChunk::from_label_and_counter(tup.0, est_num_rec));
 
         // keep track of the number of records we're writing
-        (*v).nrec += 1;
+        v.nrec += 1;
         // write the num align
         let na = tup.2;
-        (*v).data.write_all(&na.to_le_bytes()).unwrap();
+        v.data.write_all(&na.to_le_bytes()).unwrap();
         // write the corrected barcode
-        bct.write_to(tup.0, &mut (*v).data).unwrap();
-        umit.write_to(tup.1, &mut (*v).data).unwrap();
+        bct.write_to(tup.0, &mut v.data).unwrap();
+        umit.write_to(tup.1, &mut v.data).unwrap();
         // read the alignment records
         reader.read_exact(&mut tbuf[0..(4 * na as usize)]).unwrap();
         // write them
-        (*v).data.write_all(&tbuf[..(4 * na as usize)]).unwrap();
+        v.data.write_all(&tbuf[..(4 * na as usize)]).unwrap();
     }
 }
 
@@ -564,7 +562,7 @@ impl TempBucket {
             bucket_id,
             bucket_writer: Arc::new(Mutex::new(BufWriter::with_capacity(
                 4096_usize,
-                File::create(parent.join(&format!("bucket_{}.tmp", bucket_id))).unwrap(),
+                File::create(parent.join(format!("bucket_{}.tmp", bucket_id))).unwrap(),
             ))),
             num_chunks: 0u32,
             num_records: 0u32,
@@ -643,9 +641,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
                 // then first flush the buffer to file.
                 if len + nb as usize >= flush_limit {
                     let mut filebuf = v.bucket_writer.lock().unwrap();
-                    filebuf
-                        .write_all(&bcursor.get_ref()[0..len as usize])
-                        .unwrap();
+                    filebuf.write_all(&bcursor.get_ref()[0..len]).unwrap();
                     // and reset the local buffer cursor
                     bcursor.set_position(0);
                 }
@@ -686,17 +682,13 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 }
 
 pub fn as_u8_slice(v: &[u32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            v.as_ptr() as *const u8,
-            v.len() * std::mem::size_of::<u32>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::BarcodeLookupMap;
+    use needletail;
 
     #[test]
     fn test_barcode_lookup_map() {
