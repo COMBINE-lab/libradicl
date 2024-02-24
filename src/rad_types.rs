@@ -40,6 +40,116 @@ pub struct RadHeader {
     pub num_chunks: u64,
 }
 
+impl Default for RadHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RadHeader {
+    /// Create a new empty [RadHeader]
+    pub fn new() -> Self {
+        Self {
+            is_paired: 0,
+            ref_count: 0,
+            ref_names: vec![],
+            num_chunks: 0,
+        }
+    }
+
+    /// Create and return a new [RadHeader] by reading the contents of the
+    /// `reader`. If the reader is positioned such that a valid [RadHeader] comes
+    /// next, then this function returns [Ok(RadHeader)], otherwise, it returns
+    /// an [anyhow::Error] explaining the failure to parse the [RadHeader].
+    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<RadHeader> {
+        let mut rh = RadHeader::new();
+
+        // size of the longest allowable string.
+        let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
+        reader.read_exact(&mut buf[0..9])?;
+        rh.is_paired = buf.pread(0)?;
+        rh.ref_count = buf.pread::<u64>(1)?;
+
+        // we know how many names we will read in.
+        rh.ref_names.reserve_exact(rh.ref_count as usize);
+
+        let mut num_read = 0u64;
+        while num_read < rh.ref_count {
+            // the length of the string
+            reader.read_exact(&mut buf[0..2])?;
+            let l: usize = buf.pread::<u16>(0)? as usize;
+            // the string itself
+            reader.read_exact(&mut buf[0..l])?;
+            rh.ref_names
+                .push(std::str::from_utf8(&buf[0..l])?.to_string());
+            num_read += 1;
+        }
+
+        reader.read_exact(&mut buf[0..8])?;
+        rh.num_chunks = buf.pread::<u64>(0)?;
+        Ok(rh)
+    }
+
+    /// Create and return a [RadHeader] from the provided BAM/SAM header
+    /// (represented by the noodles [sam::Header] `header`).  
+    /// **Note**: The returned [RadHeader] will *not* have a value for the `num_chunks`
+    /// field, which will remain set at 0, nor will it set a meaningful value for the
+    /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
+    pub fn from_bam_header(header: &sam::Header) -> RadHeader {
+        let mut rh = RadHeader {
+            is_paired: 0,
+            ref_count: 0,
+            ref_names: vec![],
+            num_chunks: 0,
+        };
+
+        let ref_seqs = header.reference_sequences();
+        rh.ref_count = ref_seqs.len() as u64;
+        // we know how many names we will read in.
+        rh.ref_names.reserve_exact(rh.ref_count as usize);
+        for (k, _v) in ref_seqs.iter() {
+            rh.ref_names.push(k.to_string());
+        }
+        rh
+    }
+
+    /// Returns the size, in bytes, that this [RadHeader] will take
+    /// if written to an output stream.
+    pub fn get_size(&self) -> usize {
+        let mut tot_size = 0usize;
+        tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
+        // each name takes 2 bytes for the length, plus the actual
+        // number of bytes required by the string itself.
+        for t in self.ref_names.iter().map(|a| a.len()) {
+            tot_size += std::mem::size_of::<u16>() + t;
+        }
+        tot_size += std::mem::size_of_val(&self.num_chunks);
+        tot_size
+    }
+
+    pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        writeln!(&mut s, "RadHeader {{")?;
+        writeln!(&mut s, "is_paired: {}", self.is_paired)?;
+        writeln!(&mut s, "ref_count: {}", self.ref_count)?;
+
+        let refs_to_print = match num_refs {
+            Some(rcount) => rcount.min(self.ref_count as usize),
+            None => (self.ref_count as usize).min(10_usize),
+        };
+
+        for rn in self.ref_names.iter().take(refs_to_print) {
+            writeln!(&mut s, "  ref: {}", rn)?;
+        }
+        writeln!(&mut s, "  ...")?;
+
+        writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
+        writeln!(&mut s, "}}")?;
+        Ok(s)
+    }
+}
+
 #[derive(Debug)]
 pub struct TagDesc {
     pub name: String,
@@ -70,6 +180,7 @@ pub struct FileTags {
     pub bclen: u16,
     pub umilen: u16,
 }
+
 #[derive(Debug)]
 pub struct ReadRecord {
     pub bc: u64,
@@ -77,6 +188,7 @@ pub struct ReadRecord {
     pub dirs: Vec<bool>,
     pub refs: Vec<u32>,
 }
+
 #[derive(Debug)]
 pub struct Chunk {
     pub nbytes: u32,
@@ -105,6 +217,18 @@ pub enum RadIntId {
     U64,
 }
 
+impl RadIntId {
+    #[inline]
+    pub fn size_of(&self) -> usize {
+        match self {
+            Self::U8 => mem::size_of::<u8>(),
+            Self::U16 => mem::size_of::<u16>(),
+            Self::U32 => mem::size_of::<u32>(),
+            Self::U64 => mem::size_of::<u64>(),
+        }
+    }
+}
+
 impl From<u8> for RadIntId {
     fn from(x: u8) -> Self {
         match x {
@@ -121,6 +245,16 @@ impl From<u8> for RadIntId {
 pub enum RadFloatId {
     F32,
     F64,
+}
+
+impl RadFloatId {
+    #[inline]
+    pub fn size_of(&self) -> usize {
+        match self {
+            Self::F32 => mem::size_of::<f32>(),
+            Self::F64 => mem::size_of::<f64>(),
+        }
+    }
 }
 
 pub trait PrimitiveInteger:
@@ -153,13 +287,9 @@ impl<
 }
 
 impl RadIntId {
+    #[inline]
     pub fn bytes_for_type(&self) -> usize {
-        match self {
-            Self::U8 => std::mem::size_of::<u8>(),
-            Self::U16 => std::mem::size_of::<u16>(),
-            Self::U32 => std::mem::size_of::<u32>(),
-            Self::U64 => std::mem::size_of::<u64>(),
-        }
+        self.size_of()
     }
 
     /// Based on the variant of the current enum, write the value `v`
@@ -192,6 +322,15 @@ impl RadIntId {
             }
         }
     }
+
+    pub fn read_into_usize(&self, buf: &[u8]) -> usize {
+        match self {
+            Self::U8 => buf.pread::<u8>(0).unwrap() as usize,
+            Self::U16 => buf.pread::<u16>(0).unwrap() as usize,
+            Self::U32 => buf.pread::<u32>(0).unwrap() as usize,
+            Self::U64 => buf.pread::<u64>(0).unwrap() as usize,
+        }
+    }
 }
 
 pub struct ChunkConfig {
@@ -201,13 +340,42 @@ pub struct ChunkConfig {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum RadType {
-    Bool,
+pub enum RadNumId {
     Int(RadIntId),
     Float(RadFloatId),
+}
+
+impl RadNumId {
+    #[inline]
+    pub fn size_of(&self) -> usize {
+        match self {
+            Self::Int(x) => x.size_of(),
+            Self::Float(x) => x.size_of(),
+        }
+    }
+}
+
+impl From<u8> for RadNumId {
+    fn from(x: u8) -> Self {
+        match x {
+            1 => Self::Int(RadIntId::U8),
+            2 => Self::Int(RadIntId::U16),
+            3 => Self::Int(RadIntId::U32),
+            4 => Self::Int(RadIntId::U64),
+            5 => Self::Float(RadFloatId::F32),
+            6 => Self::Float(RadFloatId::F64),
+            _ => panic!("Should not happen"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RadType {
+    Bool,
+    Num(RadNumId),
     // holds length type and value type, but not length
     // and data themselves
-    Array(RadIntId, RadIntId),
+    Array(RadIntId, RadNumId),
     // does not hold length, just a marker for the type
     String,
 }
@@ -215,12 +383,12 @@ pub enum RadType {
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
-        RadType::Int(RadIntId::U8) => Some(1),
-        RadType::Int(RadIntId::U16) => Some(2),
-        RadType::Int(RadIntId::U32) => Some(3),
-        RadType::Int(RadIntId::U64) => Some(4),
-        RadType::Float(RadFloatId::F32) => Some(5),
-        RadType::Float(RadFloatId::F64) => Some(6),
+        RadType::Num(RadNumId::Int(RadIntId::U8)) => Some(1),
+        RadType::Num(RadNumId::Int(RadIntId::U16)) => Some(2),
+        RadType::Num(RadNumId::Int(RadIntId::U32)) => Some(3),
+        RadType::Num(RadNumId::Int(RadIntId::U64)) => Some(4),
+        RadType::Num(RadNumId::Float(RadFloatId::F32)) => Some(5),
+        RadType::Num(RadNumId::Float(RadFloatId::F64)) => Some(6),
         RadType::Array(_, _) => Some(7),
         RadType::String => Some(8), //_ => None,
     }
@@ -374,6 +542,7 @@ impl Chunk {
     /// Peeks to the first [ReadRecord] in the buffer `buf`, and returns
     /// the barcode and umi associated with this record.  It is assumed
     /// that there is at least one [ReadRecord] present in the buffer.
+    #[inline]
     pub fn peek_record(buf: &[u8], bct: &RadIntId, umit: &RadIntId) -> (u64, u64) {
         let na_size = mem::size_of::<u32>();
         let bc_size = bct.bytes_for_type();
@@ -397,6 +566,8 @@ impl Chunk {
 }
 
 impl FileTags {
+    /// Reads the FileTags from the provided `reader` and return the
+    /// barcode length and umi length
     pub fn from_bytes<T: Read>(reader: &mut T) -> Self {
         let mut buf = [0u8; 4];
         reader.read_exact(&mut buf).unwrap();
@@ -412,15 +583,72 @@ impl From<u8> for RadType {
     fn from(x: u8) -> Self {
         match x {
             0 => RadType::Bool,
-            1 => RadType::Int(RadIntId::U8),
-            2 => RadType::Int(RadIntId::U16),
-            3 => RadType::Int(RadIntId::U32),
-            4 => RadType::Int(RadIntId::U64),
-            5 => RadType::Float(RadFloatId::F32),
-            6 => RadType::Float(RadFloatId::F64),
+            1 => RadType::Num(RadNumId::Int(RadIntId::U8)),
+            2 => RadType::Num(RadNumId::Int(RadIntId::U16)),
+            3 => RadType::Num(RadNumId::Int(RadIntId::U32)),
+            4 => RadType::Num(RadNumId::Int(RadIntId::U64)),
+            5 => RadType::Num(RadNumId::Float(RadFloatId::F32)),
+            6 => RadType::Num(RadNumId::Float(RadFloatId::F64)),
             _ => panic!("Should not happen"),
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum TagValue {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    ArrayU8(Vec<u8>),
+    ArrayU16(Vec<u16>),
+    ArrayU32(Vec<u32>),
+    ArrayU64(Vec<u64>),
+    ArrayF32(Vec<f32>),
+    ArrayF64(Vec<f64>),
+}
+
+fn u8_to_u16_vec(v: &[u8]) -> Vec<u16> {
+    v.chunks_exact(std::mem::size_of::<u16>())
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(u16::from_le_bytes)
+        .collect()
+}
+
+fn u8_to_u32_vec(v: &[u8]) -> Vec<u32> {
+    v.chunks_exact(std::mem::size_of::<u32>())
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(u32::from_le_bytes)
+        .collect()
+}
+
+fn u8_to_u64_vec(v: &[u8]) -> Vec<u64> {
+    v.chunks_exact(std::mem::size_of::<u64>())
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(u64::from_le_bytes)
+        .collect()
+}
+
+fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
+    v.chunks_exact(std::mem::size_of::<f32>())
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(f32::from_le_bytes)
+        .collect()
+}
+
+fn u8_to_f64_vec(v: &[u8]) -> Vec<f64> {
+    v.chunks_exact(std::mem::size_of::<f64>())
+        .map(TryInto::try_into)
+        .map(Result::unwrap)
+        .map(f64::from_le_bytes)
+        .collect()
 }
 
 impl TagDesc {
@@ -448,7 +676,7 @@ impl TagDesc {
             7 => {
                 reader.read_exact(&mut buf[0..2])?;
                 let t1: RadIntId = buf.pread::<u8>(0)?.into();
-                let t2: RadIntId = buf.pread::<u8>(1)?.into();
+                let t2: RadNumId = buf.pread::<u8>(1)?.into();
                 RadType::Array(t1, t2)
             }
             _ => {
@@ -461,7 +689,67 @@ impl TagDesc {
             typeid: rad_t,
         })
     }
+
+    pub fn value_from_bytes<T: Read>(&self, reader: &mut T) -> TagValue {
+        let mut small_buf = [0u8; 8];
+        match self.typeid {
+            // u8 sized types
+            RadType::Bool => {
+                let _ = reader.read_exact(&mut small_buf[0..1]);
+                TagValue::Bool(small_buf[0] > 1)
+            }
+            RadType::Num(RadNumId::Int(RadIntId::U8)) => {
+                let _ = reader.read_exact(&mut small_buf[0..1]);
+                TagValue::U8(small_buf[0])
+            }
+            RadType::Num(RadNumId::Int(RadIntId::U16)) => {
+                let _ = reader.read_exact(&mut small_buf[0..2]);
+                TagValue::U16(small_buf.pread::<u16>(0).unwrap())
+            }
+            RadType::Num(RadNumId::Int(RadIntId::U32)) => {
+                let _ = reader.read_exact(&mut small_buf[0..4]);
+                TagValue::U32(small_buf.pread::<u32>(0).unwrap())
+            }
+            RadType::Num(RadNumId::Int(RadIntId::U64)) => {
+                let _ = reader.read_exact(&mut small_buf[0..8]);
+                TagValue::U64(small_buf.pread::<u64>(0).unwrap())
+            }
+            RadType::Num(RadNumId::Float(RadFloatId::F32)) => {
+                let _ = reader.read_exact(&mut small_buf[0..4]);
+                TagValue::F32(small_buf.pread::<f32>(0).unwrap())
+            }
+            RadType::Num(RadNumId::Float(RadFloatId::F64)) => {
+                let _ = reader.read_exact(&mut small_buf[0..8]);
+                TagValue::F64(small_buf.pread::<f64>(0).unwrap())
+            }
+            RadType::Array(len_t, val_t) => {
+                let _ = reader.read_exact(&mut small_buf[0..len_t.size_of()]);
+                let vec_len = len_t.read_into_usize(&small_buf);
+                let num_bytes = val_t.size_of() * vec_len;
+                let mut data = vec![0u8; num_bytes];
+                let _ = reader.read_exact(data.as_mut_slice());
+                match val_t {
+                    RadNumId::Int(RadIntId::U8) => TagValue::ArrayU8(data),
+                    RadNumId::Int(RadIntId::U16) => TagValue::ArrayU16(u8_to_u16_vec(&data)),
+                    RadNumId::Int(RadIntId::U32) => TagValue::ArrayU32(u8_to_u32_vec(&data)),
+                    RadNumId::Int(RadIntId::U64) => TagValue::ArrayU64(u8_to_u64_vec(&data)),
+                    RadNumId::Float(RadFloatId::F32) => TagValue::ArrayF32(u8_to_f32_vec(&data)),
+                    RadNumId::Float(RadFloatId::F64) => TagValue::ArrayF64(u8_to_f64_vec(&data)),
+                }
+            }
+            _ => unimplemented!(""),
+        }
+    }
 }
+
+/*
+struct TagMap {
+
+}
+impl TagMap {
+    pub fn add<T>(x: T) {}
+}
+*/
 
 impl TagSection {
     /// Attempts to read a [TagSection] from the provided `reader`. If the
@@ -495,115 +783,15 @@ impl TagSection {
         }
         Ok(ts)
     }
-}
 
-impl Default for RadHeader {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RadHeader {
-    /// Create a new empty [RadHeader]
-    pub fn new() -> Self {
-        Self {
-            is_paired: 0,
-            ref_count: 0,
-            ref_names: vec![],
-            num_chunks: 0,
+    pub fn parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<Vec<TagValue>> {
+        // loop over all of the tag descriptions in this section, and parse a
+        // tag value for each.
+        let mut tv = Vec::<TagValue>::new();
+        for tag_desc in &self.tags {
+            tv.push(tag_desc.value_from_bytes(reader));
         }
-    }
-
-    /// Create and return a new [RadHeader] by reading the contents of the
-    /// `reader`. If the reader is positioned such that a valid [RadHeader] comes
-    /// next, then this function returns [Ok(RadHeader)], otherwise, it returns
-    /// an [anyhow::Error] explaining the failure to parse the [RadHeader].
-    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<RadHeader> {
-        let mut rh = RadHeader::new();
-
-        // size of the longest allowable string.
-        let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
-        reader.read_exact(&mut buf[0..9])?;
-        rh.is_paired = buf.pread(0)?;
-        rh.ref_count = buf.pread::<u64>(1)?;
-
-        // we know how many names we will read in.
-        rh.ref_names.reserve_exact(rh.ref_count as usize);
-
-        let mut num_read = 0u64;
-        while num_read < rh.ref_count {
-            // the length of the string
-            reader.read_exact(&mut buf[0..2])?;
-            let l: usize = buf.pread::<u16>(0)? as usize;
-            // the string itself
-            reader.read_exact(&mut buf[0..l])?;
-            rh.ref_names
-                .push(std::str::from_utf8(&buf[0..l])?.to_string());
-            num_read += 1;
-        }
-
-        reader.read_exact(&mut buf[0..8])?;
-        rh.num_chunks = buf.pread::<u64>(0)?;
-        Ok(rh)
-    }
-
-    /// Create and return a [RadHeader] from the provided BAM/SAM header
-    /// (represented by the noodles [sam::Header] `header`).  
-    /// **Note**: The returned [RadHeader] will *not* have a value for the `num_chunks`
-    /// field, which will remain set at 0, nor will it set a meaningful value for the
-    /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
-    pub fn from_bam_header(header: &sam::Header) -> RadHeader {
-        let mut rh = RadHeader {
-            is_paired: 0,
-            ref_count: 0,
-            ref_names: vec![],
-            num_chunks: 0,
-        };
-
-        let ref_seqs = header.reference_sequences();
-        rh.ref_count = ref_seqs.len() as u64;
-        // we know how many names we will read in.
-        rh.ref_names.reserve_exact(rh.ref_count as usize);
-        for (k, _v) in ref_seqs.iter() {
-            rh.ref_names.push(k.to_string());
-        }
-        rh
-    }
-
-    /// Returns the size, in bytes, that this [RadHeader] will take
-    /// if written to an output stream.
-    pub fn get_size(&self) -> usize {
-        let mut tot_size = 0usize;
-        tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
-        // each name takes 2 bytes for the length, plus the actual
-        // number of bytes required by the string itself.
-        for t in self.ref_names.iter().map(|a| a.len()) {
-            tot_size += std::mem::size_of::<u16>() + t;
-        }
-        tot_size += std::mem::size_of_val(&self.num_chunks);
-        tot_size
-    }
-
-    pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
-        use std::fmt::Write as _;
-        let mut s = String::new();
-        writeln!(&mut s, "RadHeader {{")?;
-        writeln!(&mut s, "is_paired: {}", self.is_paired)?;
-        writeln!(&mut s, "ref_count: {}", self.ref_count)?;
-
-        let refs_to_print = match num_refs {
-            Some(rcount) => rcount.min(self.ref_count as usize),
-            None => (self.ref_count as usize).min(10_usize),
-        };
-
-        for rn in self.ref_names.iter().take(refs_to_print) {
-            writeln!(&mut s, "  ref: {}", rn)?;
-        }
-        writeln!(&mut s, "  ...")?;
-
-        writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
-        writeln!(&mut s, "}}")?;
-        Ok(s)
+        Ok(tv)
     }
 }
 
@@ -613,6 +801,10 @@ impl RadPrelude {
         let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
         let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
         let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
+
+        let file_vals = file_tags.parse_tags_from_bytes(reader);
+        println!("{:?}", file_vals);
+
         Ok(Self {
             hdr,
             file_tags,
@@ -624,22 +816,22 @@ impl RadPrelude {
     pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
         use std::fmt::Write as _;
         let mut s = self.hdr.summary(num_refs)?;
-        writeln!(&mut s, "[[{:#?}]]", self.file_tags)?;
-        writeln!(&mut s, "[[{:#?}]]", self.read_tags)?;
-        writeln!(&mut s, "[[{:#?}]]", self.aln_tags)?;
+        writeln!(&mut s, "[[{:?}]]", self.file_tags)?;
+        writeln!(&mut s, "[[{:?}]]", self.read_tags)?;
+        writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
         Ok(s)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::rad_types::RadIntId;
     use crate::rad_types::RadType;
+    use crate::rad_types::{RadIntId, RadNumId, TagSection, TagSectionLabel, TagValue};
     use std::io::Write;
 
     use super::TagDesc;
     #[test]
-    fn can_parse_tag_desc() {
+    fn can_parse_simple_tag_desc() {
         let mut buf = Vec::<u8>::new();
         let tag_name = b"mytag";
         let _ = buf.write_all(&5_u16.to_ne_bytes());
@@ -649,7 +841,7 @@ mod tests {
 
         let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
         assert_eq!(desc.name, "mytag");
-        assert_eq!(desc.typeid, RadType::Int(RadIntId::U64));
+        assert_eq!(desc.typeid, RadType::Num(RadNumId::Int(RadIntId::U64)));
     }
 
     #[test]
@@ -667,6 +859,22 @@ mod tests {
 
         let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
         assert_eq!(desc.name, "mytag");
-        assert_eq!(desc.typeid, RadType::Array(RadIntId::U8, RadIntId::U16));
+        assert_eq!(
+            desc.typeid,
+            RadType::Array(RadIntId::U8, RadNumId::Int(RadIntId::U16))
+        );
+
+        let tag_sec = TagSection {
+            label: TagSectionLabel::FileTags,
+            tags: vec![desc],
+        };
+        buf.clear();
+        let _ = buf.write_all(&3_u8.to_ne_bytes());
+        let _ = buf.write_all(&1_u16.to_ne_bytes());
+        let _ = buf.write_all(&2_u16.to_ne_bytes());
+        let _ = buf.write_all(&3_u16.to_ne_bytes());
+
+        let vals = tag_sec.parse_tags_from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(vals[0], TagValue::ArrayU16(vec![1, 2, 3]));
     }
 }
