@@ -150,13 +150,13 @@ impl RadHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TagDesc {
     pub name: String,
     pub typeid: RadType,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum TagSectionLabel {
     FileTags,
     ReadTags,
@@ -166,7 +166,7 @@ pub enum TagSectionLabel {
 
 /// A [TagSection] consists of a series of [TagDesc]s that are
 /// logically grouped together as tags for a specific unit
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TagSection {
     pub label: TagSectionLabel,
     pub tags: Vec<TagDesc>,
@@ -372,7 +372,8 @@ impl From<u8> for RadNumId {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RadType {
     Bool,
-    Num(RadNumId),
+    Int(RadIntId),
+    Float(RadFloatId),
     // holds length type and value type, but not length
     // and data themselves
     Array(RadIntId, RadNumId),
@@ -383,12 +384,12 @@ pub enum RadType {
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
-        RadType::Num(RadNumId::Int(RadIntId::U8)) => Some(1),
-        RadType::Num(RadNumId::Int(RadIntId::U16)) => Some(2),
-        RadType::Num(RadNumId::Int(RadIntId::U32)) => Some(3),
-        RadType::Num(RadNumId::Int(RadIntId::U64)) => Some(4),
-        RadType::Num(RadNumId::Float(RadFloatId::F32)) => Some(5),
-        RadType::Num(RadNumId::Float(RadFloatId::F64)) => Some(6),
+        RadType::Int(RadIntId::U8) => Some(1),
+        RadType::Int(RadIntId::U16) => Some(2),
+        RadType::Int(RadIntId::U32) => Some(3),
+        RadType::Int(RadIntId::U64) => Some(4),
+        RadType::Float(RadFloatId::F32) => Some(5),
+        RadType::Float(RadFloatId::F64) => Some(6),
         RadType::Array(_, _) => Some(7),
         RadType::String => Some(8), //_ => None,
     }
@@ -583,12 +584,14 @@ impl From<u8> for RadType {
     fn from(x: u8) -> Self {
         match x {
             0 => RadType::Bool,
-            1 => RadType::Num(RadNumId::Int(RadIntId::U8)),
-            2 => RadType::Num(RadNumId::Int(RadIntId::U16)),
-            3 => RadType::Num(RadNumId::Int(RadIntId::U32)),
-            4 => RadType::Num(RadNumId::Int(RadIntId::U64)),
-            5 => RadType::Num(RadNumId::Float(RadFloatId::F32)),
-            6 => RadType::Num(RadNumId::Float(RadFloatId::F64)),
+            1 => RadType::Int(RadIntId::U8),
+            2 => RadType::Int(RadIntId::U16),
+            3 => RadType::Int(RadIntId::U32),
+            4 => RadType::Int(RadIntId::U64),
+            5 => RadType::Float(RadFloatId::F32),
+            6 => RadType::Float(RadFloatId::F64),
+            7 => panic!("Should not happen"),
+            8 => RadType::String,
             _ => panic!("Should not happen"),
         }
     }
@@ -609,46 +612,19 @@ pub enum TagValue {
     ArrayU64(Vec<u64>),
     ArrayF32(Vec<f32>),
     ArrayF64(Vec<f64>),
+    String(String),
 }
 
-fn u8_to_u16_vec(v: &[u8]) -> Vec<u16> {
-    v.chunks_exact(std::mem::size_of::<u16>())
-        .map(TryInto::try_into)
-        .map(Result::unwrap)
-        .map(u16::from_le_bytes)
-        .collect()
-}
-
-fn u8_to_u32_vec(v: &[u8]) -> Vec<u32> {
-    v.chunks_exact(std::mem::size_of::<u32>())
-        .map(TryInto::try_into)
-        .map(Result::unwrap)
-        .map(u32::from_le_bytes)
-        .collect()
-}
-
-fn u8_to_u64_vec(v: &[u8]) -> Vec<u64> {
-    v.chunks_exact(std::mem::size_of::<u64>())
-        .map(TryInto::try_into)
-        .map(Result::unwrap)
-        .map(u64::from_le_bytes)
-        .collect()
-}
-
-fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
-    v.chunks_exact(std::mem::size_of::<f32>())
-        .map(TryInto::try_into)
-        .map(Result::unwrap)
-        .map(f32::from_le_bytes)
-        .collect()
-}
-
-fn u8_to_f64_vec(v: &[u8]) -> Vec<f64> {
-    v.chunks_exact(std::mem::size_of::<f64>())
-        .map(TryInto::try_into)
-        .map(Result::unwrap)
-        .map(f64::from_le_bytes)
-        .collect()
+// macro generalizing solution from
+// https://stackoverflow.com/questions/77388769/convert-vecu8-to-vecfloat-in-rust
+macro_rules! u8_to_vec_of {
+    ($a:expr, $b:ty) => {
+        $a.chunks_exact(std::mem::size_of::<$b>())
+            .map(TryInto::try_into)
+            .map(Result::unwrap)
+            .map(<$b>::from_le_bytes)
+            .collect()
+    };
 }
 
 impl TagDesc {
@@ -698,27 +674,27 @@ impl TagDesc {
                 let _ = reader.read_exact(&mut small_buf[0..1]);
                 TagValue::Bool(small_buf[0] > 1)
             }
-            RadType::Num(RadNumId::Int(RadIntId::U8)) => {
+            RadType::Int(RadIntId::U8) => {
                 let _ = reader.read_exact(&mut small_buf[0..1]);
                 TagValue::U8(small_buf[0])
             }
-            RadType::Num(RadNumId::Int(RadIntId::U16)) => {
+            RadType::Int(RadIntId::U16) => {
                 let _ = reader.read_exact(&mut small_buf[0..2]);
                 TagValue::U16(small_buf.pread::<u16>(0).unwrap())
             }
-            RadType::Num(RadNumId::Int(RadIntId::U32)) => {
+            RadType::Int(RadIntId::U32) => {
                 let _ = reader.read_exact(&mut small_buf[0..4]);
                 TagValue::U32(small_buf.pread::<u32>(0).unwrap())
             }
-            RadType::Num(RadNumId::Int(RadIntId::U64)) => {
+            RadType::Int(RadIntId::U64) => {
                 let _ = reader.read_exact(&mut small_buf[0..8]);
                 TagValue::U64(small_buf.pread::<u64>(0).unwrap())
             }
-            RadType::Num(RadNumId::Float(RadFloatId::F32)) => {
+            RadType::Float(RadFloatId::F32) => {
                 let _ = reader.read_exact(&mut small_buf[0..4]);
                 TagValue::F32(small_buf.pread::<f32>(0).unwrap())
             }
-            RadType::Num(RadNumId::Float(RadFloatId::F64)) => {
+            RadType::Float(RadFloatId::F64) => {
                 let _ = reader.read_exact(&mut small_buf[0..8]);
                 TagValue::F64(small_buf.pread::<f64>(0).unwrap())
             }
@@ -730,26 +706,94 @@ impl TagDesc {
                 let _ = reader.read_exact(data.as_mut_slice());
                 match val_t {
                     RadNumId::Int(RadIntId::U8) => TagValue::ArrayU8(data),
-                    RadNumId::Int(RadIntId::U16) => TagValue::ArrayU16(u8_to_u16_vec(&data)),
-                    RadNumId::Int(RadIntId::U32) => TagValue::ArrayU32(u8_to_u32_vec(&data)),
-                    RadNumId::Int(RadIntId::U64) => TagValue::ArrayU64(u8_to_u64_vec(&data)),
-                    RadNumId::Float(RadFloatId::F32) => TagValue::ArrayF32(u8_to_f32_vec(&data)),
-                    RadNumId::Float(RadFloatId::F64) => TagValue::ArrayF64(u8_to_f64_vec(&data)),
+                    RadNumId::Int(RadIntId::U16) => TagValue::ArrayU16(u8_to_vec_of!(data, u16)),
+                    RadNumId::Int(RadIntId::U32) => TagValue::ArrayU32(u8_to_vec_of!(data, u32)),
+                    RadNumId::Int(RadIntId::U64) => TagValue::ArrayU64(u8_to_vec_of!(data, u64)),
+                    RadNumId::Float(RadFloatId::F32) => {
+                        TagValue::ArrayF32(u8_to_vec_of!(data, f32))
+                    }
+                    RadNumId::Float(RadFloatId::F64) => {
+                        TagValue::ArrayF64(u8_to_vec_of!(data, f64))
+                    }
                 }
             }
-            _ => unimplemented!(""),
+            RadType::String => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u16>()]);
+                let slen = small_buf.pread::<u16>(0).unwrap();
+                let mut dat: Vec<u8> = vec![0_u8; slen as usize];
+                let _ = reader.read_exact(dat.as_mut_slice());
+                let s = unsafe { String::from_utf8_unchecked(dat) };
+                TagValue::String(s)
+            }
+        }
+    }
+
+    #[inline]
+    pub fn matches_value_type(&self, o: &TagValue) -> bool {
+        match (&self.typeid, o) {
+            (RadType::Bool, TagValue::Bool(_)) => true,
+            (RadType::Int(RadIntId::U8), TagValue::U8(_)) => true,
+            (RadType::Int(RadIntId::U16), TagValue::U16(_)) => true,
+            (RadType::Int(RadIntId::U32), TagValue::U32(_)) => true,
+            (RadType::Int(RadIntId::U64), TagValue::U64(_)) => true,
+            (RadType::Float(RadFloatId::F32), TagValue::F32(_)) => true,
+            (RadType::Float(RadFloatId::F64), TagValue::F64(_)) => true,
+            (RadType::Array(_, RadNumId::Int(RadIntId::U8)), TagValue::ArrayU8(_)) => true,
+            (RadType::Array(_, RadNumId::Int(RadIntId::U16)), TagValue::ArrayU16(_)) => true,
+            (RadType::Array(_, RadNumId::Int(RadIntId::U32)), TagValue::ArrayU32(_)) => true,
+            (RadType::Array(_, RadNumId::Int(RadIntId::U64)), TagValue::ArrayU64(_)) => true,
+            (RadType::Array(_, RadNumId::Float(RadFloatId::F32)), TagValue::ArrayF32(_)) => true,
+            (RadType::Array(_, RadNumId::Float(RadFloatId::F64)), TagValue::ArrayF64(_)) => true,
+            (RadType::String, TagValue::String(_)) => true,
+            (_, _) => false,
         }
     }
 }
 
-/*
-struct TagMap {
+#[derive(Debug)]
+pub struct TagMap<'a> {
+    keys: &'a [TagDesc],
+    dat: Vec<TagValue>
+}
 
+impl<'a> TagMap<'a> {
+    pub fn with_keyset(keyset: &'a [TagDesc]) -> Self {
+        Self {
+            keys: keyset,
+            dat: Vec::with_capacity(keyset.len())
+        }
+    } 
+    
+    pub fn add_checked(&mut self, val: TagValue) -> bool {
+        let next_idx = self.dat.len();
+        if next_idx >= self.keys.len()  { 
+            false
+        } else if !self.keys[next_idx].matches_value_type(&val) {
+            false
+        } else {
+            self.dat.push(val);
+            true
+        }
+    }
+
+
+    pub fn add(&mut self, val: TagValue) {
+        self.dat.push(val);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&TagValue> {
+        for (k, val) in self.keys.iter().zip(self.dat.iter()) {
+            if k.name == key {
+                return Some(&val);
+            }
+        }
+        return None
+    }
+
+    pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
+        self.dat.get(idx)
+    }
 }
-impl TagMap {
-    pub fn add<T>(x: T) {}
-}
-*/
 
 impl TagSection {
     /// Attempts to read a [TagSection] from the provided `reader`. If the
@@ -784,14 +828,28 @@ impl TagSection {
         Ok(ts)
     }
 
-    pub fn parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<Vec<TagValue>> {
+    pub fn parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
-        let mut tv = Vec::<TagValue>::new();
+        //let mut tv = Vec::<TagValue>::new();
+        let mut tm = TagMap::with_keyset(&self.tags);
         for tag_desc in &self.tags {
-            tv.push(tag_desc.value_from_bytes(reader));
+            tm.add(tag_desc.value_from_bytes(reader));
         }
-        Ok(tv)
+        Ok(tm)
+    }
+
+    pub fn parse_tags_from_bytes_checked<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
+        // loop over all of the tag descriptions in this section, and parse a
+        // tag value for each.
+        //let mut tv = Vec::<TagValue>::new();
+        let mut tm = TagMap::with_keyset(&self.tags);
+        for tag_desc in &self.tags {
+            if !tm.add_checked(tag_desc.value_from_bytes(reader)) {
+                panic!("Tried to read value for non-matching type");
+            }
+        }
+        Ok(tm)
     }
 }
 
@@ -801,9 +859,8 @@ impl RadPrelude {
         let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
         let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
         let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
-
-        let file_vals = file_tags.parse_tags_from_bytes(reader);
-        println!("{:?}", file_vals);
+        let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
+        println!("file-level tag values: {:?}", file_tag_vals);
 
         Ok(Self {
             hdr,
@@ -819,6 +876,7 @@ impl RadPrelude {
         writeln!(&mut s, "[[{:?}]]", self.file_tags)?;
         writeln!(&mut s, "[[{:?}]]", self.read_tags)?;
         writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
+        //writeln!(&mut s, "file-level tag values [{:?}]", self.file_tag_vals)?;
         Ok(s)
     }
 }
@@ -826,7 +884,7 @@ impl RadPrelude {
 #[cfg(test)]
 mod tests {
     use crate::rad_types::RadType;
-    use crate::rad_types::{RadIntId, RadNumId, TagSection, TagSectionLabel, TagValue};
+    use crate::rad_types::{RadIntId, RadNumId, TagSection, TagSectionLabel, TagValue, TagMap};
     use std::io::Write;
 
     use super::TagDesc;
@@ -841,7 +899,7 @@ mod tests {
 
         let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
         assert_eq!(desc.name, "mytag");
-        assert_eq!(desc.typeid, RadType::Num(RadNumId::Int(RadIntId::U64)));
+        assert_eq!(desc.typeid, RadType::Int(RadIntId::U64));
     }
 
     #[test]
@@ -863,18 +921,62 @@ mod tests {
             desc.typeid,
             RadType::Array(RadIntId::U8, RadNumId::Int(RadIntId::U16))
         );
+    }
+
+    #[test]
+    fn can_parse_tag_values_from_section() {
+        let mut buf = Vec::<u8>::new();
+        let tag_name = b"mytag";
+        let _ = buf.write_all(&5_u16.to_ne_bytes());
+        let _ = buf.write_all(tag_name);
+        let tag_type = 7_u8;
+        let _ = buf.write_all(&tag_type.to_ne_bytes());
+        // length type
+        let _ = buf.write_all(&1_u8.to_ne_bytes());
+        // element type
+        let _ = buf.write_all(&2_u8.to_ne_bytes());
+
+        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(desc.name, "mytag");
+        assert_eq!(
+            desc.typeid,
+            RadType::Array(RadIntId::U8, RadNumId::Int(RadIntId::U16))
+        );
+
+        buf.clear();
+        let tag_name = b"stringtag";
+        let _ = buf.write_all(&9_u16.to_ne_bytes());
+        let _ = buf.write_all(tag_name);
+        // type id
+        let _ = buf.write_all(&8_u8.to_ne_bytes());
+        let desc_str = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
 
         let tag_sec = TagSection {
             label: TagSectionLabel::FileTags,
-            tags: vec![desc],
+            tags: vec![desc, desc_str],
         };
+
         buf.clear();
         let _ = buf.write_all(&3_u8.to_ne_bytes());
         let _ = buf.write_all(&1_u16.to_ne_bytes());
         let _ = buf.write_all(&2_u16.to_ne_bytes());
         let _ = buf.write_all(&3_u16.to_ne_bytes());
 
-        let vals = tag_sec.parse_tags_from_bytes(&mut buf.as_slice()).unwrap();
-        assert_eq!(vals[0], TagValue::ArrayU16(vec![1, 2, 3]));
+        let _ = buf.write_all(&6_u16.to_ne_bytes());
+        let _ = buf.write_all(b"hi_rad");
+
+        let map = tag_sec.parse_tags_from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(map.get("mytag").unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
+        assert_eq!(map.get("stringtag").unwrap(), &TagValue::String(String::from("hi_rad")));
+
+        assert_eq!(map.get_at_index(0).unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
+        assert_eq!(map.get_at_index(1).unwrap(), &TagValue::String(String::from("hi_rad")));
+
+        let map = tag_sec.parse_tags_from_bytes_checked(&mut buf.as_slice()).unwrap();
+        assert_eq!(map.get("mytag").unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
+        assert_eq!(map.get("stringtag").unwrap(), &TagValue::String(String::from("hi_rad")));
+
+        assert_eq!(map.get_at_index(0).unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
+        assert_eq!(map.get_at_index(1).unwrap(), &TagValue::String(String::from("hi_rad")));
     }
 }
