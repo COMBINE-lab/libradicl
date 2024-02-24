@@ -766,9 +766,7 @@ impl<'a> TagMap<'a> {
 
     pub fn add_checked(&mut self, val: TagValue) -> bool {
         let next_idx = self.dat.len();
-        if next_idx >= self.keys.len() {
-            false
-        } else if !self.keys[next_idx].matches_value_type(&val) {
+        if next_idx >= self.keys.len() || !self.keys[next_idx].matches_value_type(&val) {
             false
         } else {
             self.dat.push(val);
@@ -783,10 +781,10 @@ impl<'a> TagMap<'a> {
     pub fn get(&self, key: &str) -> Option<&TagValue> {
         for (k, val) in self.keys.iter().zip(self.dat.iter()) {
             if k.name == key {
-                return Some(&val);
+                return Some(val);
             }
         }
-        return None;
+        None
     }
 
     pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
