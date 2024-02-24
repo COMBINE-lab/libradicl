@@ -757,6 +757,9 @@ pub struct TagMap<'a> {
 }
 
 impl<'a> TagMap<'a> {
+    /// Create a new TagMap whose set of keys is determined by 
+    /// the provided `keyset`. This will have one value slot for 
+    /// each provided key.
     pub fn with_keyset(keyset: &'a [TagDesc]) -> Self {
         Self {
             keys: keyset,
@@ -764,6 +767,8 @@ impl<'a> TagMap<'a> {
         }
     }
 
+    /// Try to add the next tag value. If there is space and the type 
+    /// matches, add it and return `true`, otherwise return `false`.
     pub fn add_checked(&mut self, val: TagValue) -> bool {
         let next_idx = self.dat.len();
         if next_idx >= self.keys.len() || !self.keys[next_idx].matches_value_type(&val) {
@@ -774,10 +779,17 @@ impl<'a> TagMap<'a> {
         }
     }
 
+    /// add the next TagValue to the data for this TagMap. 
+    /// This function doesn't check if the type is correct or
+    /// if too many tag values have been added. It should 
+    /// only be used when one is certain that the next tag value
+    /// appropriately matches the next available key.
     pub fn add(&mut self, val: TagValue) {
         self.dat.push(val);
     }
 
+    /// get the value for the tag associated with the name `key`, returns
+    /// Some(&TagValue) for the appropriate tag if it exists, and None otherwise.
     pub fn get(&self, key: &str) -> Option<&TagValue> {
         for (k, val) in self.keys.iter().zip(self.dat.iter()) {
             if k.name == key {
@@ -787,8 +799,19 @@ impl<'a> TagMap<'a> {
         None
     }
 
+    /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx` 
+    /// is in bounds and None otherwise. 
     pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
         self.dat.get(idx)
+    } 
+}
+
+impl<'a> std::ops::Index<usize> for TagMap<'a> {
+    type Output = TagValue;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.dat[index]
     }
 }
 
@@ -856,9 +879,8 @@ impl RadPrelude {
         let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
         let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
         let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
-        let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
-        println!("file-level tag values: {:?}", file_tag_vals);
-
+        //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
+        //println!("file-level tag values: {:?}", file_tag_vals);
         Ok(Self {
             hdr,
             file_tags,
@@ -881,7 +903,7 @@ impl RadPrelude {
 #[cfg(test)]
 mod tests {
     use crate::rad_types::RadType;
-    use crate::rad_types::{RadIntId, RadNumId, TagMap, TagSection, TagSectionLabel, TagValue};
+    use crate::rad_types::{RadIntId, RadNumId, TagSection, TagSectionLabel, TagValue};
     use std::io::Write;
 
     use super::TagDesc;
@@ -1000,6 +1022,15 @@ mod tests {
         assert_eq!(
             map.get_at_index(1).unwrap(),
             &TagValue::String(String::from("hi_rad"))
+        );
+
+        assert_eq!(
+            map[0],
+            TagValue::ArrayU16(vec![1, 2, 3])
+        );
+        assert_eq!(
+            map[1],
+            TagValue::String(String::from("hi_rad"))
         );
     }
 }
