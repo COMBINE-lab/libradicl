@@ -753,20 +753,20 @@ impl TagDesc {
 #[derive(Debug)]
 pub struct TagMap<'a> {
     keys: &'a [TagDesc],
-    dat: Vec<TagValue>
+    dat: Vec<TagValue>,
 }
 
 impl<'a> TagMap<'a> {
     pub fn with_keyset(keyset: &'a [TagDesc]) -> Self {
         Self {
             keys: keyset,
-            dat: Vec::with_capacity(keyset.len())
+            dat: Vec::with_capacity(keyset.len()),
         }
-    } 
-    
+    }
+
     pub fn add_checked(&mut self, val: TagValue) -> bool {
         let next_idx = self.dat.len();
-        if next_idx >= self.keys.len()  { 
+        if next_idx >= self.keys.len() {
             false
         } else if !self.keys[next_idx].matches_value_type(&val) {
             false
@@ -775,7 +775,6 @@ impl<'a> TagMap<'a> {
             true
         }
     }
-
 
     pub fn add(&mut self, val: TagValue) {
         self.dat.push(val);
@@ -787,7 +786,7 @@ impl<'a> TagMap<'a> {
                 return Some(&val);
             }
         }
-        return None
+        return None;
     }
 
     pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
@@ -884,7 +883,7 @@ impl RadPrelude {
 #[cfg(test)]
 mod tests {
     use crate::rad_types::RadType;
-    use crate::rad_types::{RadIntId, RadNumId, TagSection, TagSectionLabel, TagValue, TagMap};
+    use crate::rad_types::{RadIntId, RadNumId, TagMap, TagSection, TagSectionLabel, TagValue};
     use std::io::Write;
 
     use super::TagDesc;
@@ -966,17 +965,43 @@ mod tests {
         let _ = buf.write_all(b"hi_rad");
 
         let map = tag_sec.parse_tags_from_bytes(&mut buf.as_slice()).unwrap();
-        assert_eq!(map.get("mytag").unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
-        assert_eq!(map.get("stringtag").unwrap(), &TagValue::String(String::from("hi_rad")));
+        assert_eq!(
+            map.get("mytag").unwrap(),
+            &TagValue::ArrayU16(vec![1, 2, 3])
+        );
+        assert_eq!(
+            map.get("stringtag").unwrap(),
+            &TagValue::String(String::from("hi_rad"))
+        );
 
-        assert_eq!(map.get_at_index(0).unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
-        assert_eq!(map.get_at_index(1).unwrap(), &TagValue::String(String::from("hi_rad")));
+        assert_eq!(
+            map.get_at_index(0).unwrap(),
+            &TagValue::ArrayU16(vec![1, 2, 3])
+        );
+        assert_eq!(
+            map.get_at_index(1).unwrap(),
+            &TagValue::String(String::from("hi_rad"))
+        );
 
-        let map = tag_sec.parse_tags_from_bytes_checked(&mut buf.as_slice()).unwrap();
-        assert_eq!(map.get("mytag").unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
-        assert_eq!(map.get("stringtag").unwrap(), &TagValue::String(String::from("hi_rad")));
+        let map = tag_sec
+            .parse_tags_from_bytes_checked(&mut buf.as_slice())
+            .unwrap();
+        assert_eq!(
+            map.get("mytag").unwrap(),
+            &TagValue::ArrayU16(vec![1, 2, 3])
+        );
+        assert_eq!(
+            map.get("stringtag").unwrap(),
+            &TagValue::String(String::from("hi_rad"))
+        );
 
-        assert_eq!(map.get_at_index(0).unwrap(), &TagValue::ArrayU16(vec![1, 2, 3]));
-        assert_eq!(map.get_at_index(1).unwrap(), &TagValue::String(String::from("hi_rad")));
+        assert_eq!(
+            map.get_at_index(0).unwrap(),
+            &TagValue::ArrayU16(vec![1, 2, 3])
+        );
+        assert_eq!(
+            map.get_at_index(1).unwrap(),
+            &TagValue::String(String::from("hi_rad"))
+        );
     }
 }
