@@ -172,15 +172,19 @@ pub struct TagSection {
     pub tags: Vec<TagDesc>,
 }
 
-// The below are currently hard-coded
-// until we decide how to solve this
-// generally
+/// The below are currently hard-coded
+/// until we decide how to solve this
+/// generally
 #[derive(Debug)]
 pub struct FileTags {
     pub bclen: u16,
     pub umilen: u16,
 }
 
+/// A concrete struct representing a [MappedRecord]
+/// for reads processed upstream with `piscem` (or `salmon alevin`).
+/// This represents the set of alignments and relevant information
+/// for a basic alevin-fry record.
 #[derive(Debug)]
 pub struct AlevinFryReadRecord {
     pub bc: u64,
@@ -189,6 +193,12 @@ pub struct AlevinFryReadRecord {
     pub refs: Vec<u32>,
 }
 
+/// This trait represents a mapped read record that should be stored
+/// in the [Chunk] of a RAD file.  The [Chunk] type is parameterized on
+/// some concrete struct that must implement this [MappedRecord] trait.
+/// This trat defines the necessary functions required to be able to parse
+/// the read record from the underlying reader, as well as the associated
+/// types that are necessary to provide the context to perform this parsing.
 pub trait MappedRecord {
     type ReadTagTypes;
     type PeekResult;
@@ -246,12 +256,6 @@ impl RecordContext for AlevinFryRecordContext {
 impl AlevinFryRecordContext {
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
-    }
-}
-
-impl From<&AlevinFryRecordContext> for (RadIntId, RadIntId) {
-    fn from(item: &AlevinFryRecordContext) -> Self {
-        (item.bct, item.umit)
     }
 }
 

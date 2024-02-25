@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let tag_map = p.file_tags.parse_tags_from_bytes_checked(&mut ifile)?;
-    println!("tag map {:?}", tag_map);
+    println!("tag map {:?}\n", tag_map);
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.
     let tag_context = rad_types::AlevinFryRecordContext::get_context_from_tag_section(
@@ -23,9 +23,13 @@ fn main() -> anyhow::Result<()> {
     let first_chunk =
         rad_types::Chunk::<rad_types::AlevinFryReadRecord>::from_bytes(&mut ifile, &tag_context);
     println!(
-        "nbytes = {}, nrecs = {}",
+        "Chunk :: nbytes: {}, nrecs: {}",
         first_chunk.nbytes, first_chunk.nrec
     );
+    assert_eq!(first_chunk.nrec as usize, first_chunk.reads.len());
+    for (i, r) in first_chunk.reads.iter().take(10).enumerate() {
+        println!("record {i}: {:?}", r);
+    }
 
     Ok(())
 }
