@@ -200,10 +200,18 @@ pub struct AlevinFryReadRecord {
 /// the read record from the underlying reader, as well as the associated
 /// types that are necessary to provide the context to perform this parsing.
 pub trait MappedRecord {
-    type ReadTagTypes;
+    /// the information necessary to be able to correctly
+    /// parse a concrete instance of a struct implementing
+    /// [MappedRecord] from an input stream. This should
+    /// encapsulate any context necessary to perform such
+    /// parsing.
+    type ParsingContext;
+    /// The information that should be returned if one wishes
+    /// to peek at the next record in the input stream.
     type PeekResult;
-    fn peek_record(buf: &[u8], ctx: &Self::ReadTagTypes) -> Self::PeekResult;
-    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ReadTagTypes) -> Self;
+
+    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult;
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -486,11 +494,11 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
 }
 
 impl MappedRecord for AlevinFryReadRecord {
-    type ReadTagTypes = AlevinFryRecordContext;
+    type ParsingContext = AlevinFryRecordContext;
     type PeekResult = (u64, u64);
 
     #[inline]
-    fn peek_record(buf: &[u8], ctx: &Self::ReadTagTypes) -> Self::PeekResult {
+    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
         let bc_size = ctx.bct.bytes_for_type();
 
@@ -512,7 +520,7 @@ impl MappedRecord for AlevinFryReadRecord {
     }
 
     #[inline]
-    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ReadTagTypes) -> Self {
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
         let mut rbuf = [0u8; 255];
 
         let (bc, umi, na) = Self::from_bytes_record_header(reader, &ctx.bct, &ctx.umit);
@@ -653,7 +661,7 @@ impl<R: MappedRecord> Chunk<R> {
 
     /// Read the next [Chunk] from the provided reader and return it.
     #[inline]
-    pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ReadTagTypes) -> Self {
+    pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ParsingContext) -> Self {
         let (nbytes, nrec) = Self::read_header(reader);
         let mut c = Self {
             nbytes,
@@ -672,7 +680,7 @@ impl<R: MappedRecord> Chunk<R> {
     /// the barcode and umi associated with this record.  It is assumed
     /// that there is at least one [AlevinFryReadRecord] present in the buffer.
     #[inline]
-    pub fn peek_record(buf: &[u8], ctx: &R::ReadTagTypes) -> R::PeekResult {
+    pub fn peek_record(buf: &[u8], ctx: &R::ParsingContext) -> R::PeekResult {
         R::peek_record(buf, ctx)
     }
 }
