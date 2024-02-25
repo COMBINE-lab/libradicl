@@ -189,11 +189,17 @@ pub struct ReadRecord {
     pub refs: Vec<u32>,
 }
 
+pub trait MappedRecord {
+    type ReadTagTypes;
+    type PeekResult;
+    fn from_bytes_with_tag_types<T: Read>(reader:&mut T, bct: &RadIntId, umit: &RadIntId) -> Self;
+}
+
 #[derive(Debug)]
-pub struct Chunk {
+pub struct Chunk<T: MappedRecord> {
     pub nbytes: u32,
     pub nrec: u32,
-    pub reads: Vec<ReadRecord>,
+    pub reads: Vec<T>,
 }
 
 #[derive(Debug)]
@@ -253,6 +259,16 @@ impl RadFloatId {
         match self {
             Self::F32 => mem::size_of::<f32>(),
             Self::F64 => mem::size_of::<f64>(),
+        }
+    }
+}
+
+impl From<u8> for RadFloatId {
+    fn from(x: u8) -> Self {
+        match x {
+            5 => Self::F32,
+            6 => Self::F64,
+            _ => panic!("Should not happen"),
         }
     }
 }
@@ -405,6 +421,34 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     }
 }
 
+impl MappedRecord for ReadRecord {
+    type ReadTagTypes = (RadIntId, RadIntId);
+    type PeekResult = (u64, u64);
+    
+    #[inline]
+    fn from_bytes_with_tag_types<T: Read>(reader:&mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        let (bc, umi, na) = Self::from_bytes_record_header(reader, &bct, &umit);
+
+        let mut rec = Self {
+            bc,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+            rec.dirs.push(dir);
+            rec.refs.push(v & utils::MASK_TOP_BIT_U32);
+        }
+        rec
+    }
+}
+
 impl ReadRecord {
     /// Returns `true` if this [ReadRecord] contains no references and
     /// `false` otherwise.
@@ -508,14 +552,13 @@ impl ReadRecord {
     }
 }
 
-impl Chunk {
+impl<R: MappedRecord> Chunk<R> {
     /// Read the header of the next [Chunk] from the provided `reader`. This
     /// function returns a tuple representing the number of bytes and number of
     /// records, respectively, in the chunk.
     #[inline]
     pub fn read_header<T: Read>(reader: &mut T) -> (u32, u32) {
         let mut buf = [0u8; 8];
-
         reader.read_exact(&mut buf).unwrap();
         let nbytes = buf.pread::<u32>(0).unwrap();
         let nrec = buf.pread::<u32>(4).unwrap();
@@ -530,11 +573,11 @@ impl Chunk {
         let mut c = Self {
             nbytes,
             nrec,
-            reads: Vec::with_capacity(nrec as usize),
+            reads: Vec::<R>::with_capacity(nrec as usize),
         };
 
         for _ in 0..(nrec as usize) {
-            c.reads.push(ReadRecord::from_bytes(reader, bct, umit));
+            c.reads.push(R::from_bytes_with_tag_types(reader, &bct, &umit));
         }
 
         c
@@ -666,36 +709,39 @@ impl TagDesc {
         })
     }
 
+    /// reads a [TagValue] from `reader` based on the type encoded in the
+    /// current [TagDesc], and returns this [TagValue]. This function
+    /// will `panic` if it cannot succesfully read the [TagValue]
+    /// from `reader`.
     pub fn value_from_bytes<T: Read>(&self, reader: &mut T) -> TagValue {
         let mut small_buf = [0u8; 8];
         match self.typeid {
-            // u8 sized types
             RadType::Bool => {
-                let _ = reader.read_exact(&mut small_buf[0..1]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u8>()]);
                 TagValue::Bool(small_buf[0] > 1)
             }
             RadType::Int(RadIntId::U8) => {
-                let _ = reader.read_exact(&mut small_buf[0..1]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u8>()]);
                 TagValue::U8(small_buf[0])
             }
             RadType::Int(RadIntId::U16) => {
-                let _ = reader.read_exact(&mut small_buf[0..2]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u16>()]);
                 TagValue::U16(small_buf.pread::<u16>(0).unwrap())
             }
             RadType::Int(RadIntId::U32) => {
-                let _ = reader.read_exact(&mut small_buf[0..4]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u32>()]);
                 TagValue::U32(small_buf.pread::<u32>(0).unwrap())
             }
             RadType::Int(RadIntId::U64) => {
-                let _ = reader.read_exact(&mut small_buf[0..8]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u64>()]);
                 TagValue::U64(small_buf.pread::<u64>(0).unwrap())
             }
             RadType::Float(RadFloatId::F32) => {
-                let _ = reader.read_exact(&mut small_buf[0..4]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<f32>()]);
                 TagValue::F32(small_buf.pread::<f32>(0).unwrap())
             }
             RadType::Float(RadFloatId::F64) => {
-                let _ = reader.read_exact(&mut small_buf[0..8]);
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<f64>()]);
                 TagValue::F64(small_buf.pread::<f64>(0).unwrap())
             }
             RadType::Array(len_t, val_t) => {
@@ -728,6 +774,8 @@ impl TagDesc {
         }
     }
 
+    /// Returns `true` if the [RadType] component of the current [TagDesc] matches
+    /// the type of the provided [TagValue] of `o` and `false` otherwise.
     #[inline]
     pub fn matches_value_type(&self, o: &TagValue) -> bool {
         match (&self.typeid, o) {
@@ -750,6 +798,10 @@ impl TagDesc {
     }
 }
 
+/// This type represents a mapping from [TagDesc]s to a corresponding set of
+/// values conforming to these descriptions (i.e. in terms of types). The
+/// [TagMap] allows you to fetch the value for a specific tag by name or index, or
+/// to add values to a corresponding set of descriptions.
 #[derive(Debug)]
 pub struct TagMap<'a> {
     keys: &'a [TagDesc],
@@ -757,8 +809,8 @@ pub struct TagMap<'a> {
 }
 
 impl<'a> TagMap<'a> {
-    /// Create a new TagMap whose set of keys is determined by 
-    /// the provided `keyset`. This will have one value slot for 
+    /// Create a new TagMap whose set of keys is determined by
+    /// the provided `keyset`. This will have one value slot for
     /// each provided key.
     pub fn with_keyset(keyset: &'a [TagDesc]) -> Self {
         Self {
@@ -767,7 +819,7 @@ impl<'a> TagMap<'a> {
         }
     }
 
-    /// Try to add the next tag value. If there is space and the type 
+    /// Try to add the next tag value. If there is space and the type
     /// matches, add it and return `true`, otherwise return `false`.
     pub fn add_checked(&mut self, val: TagValue) -> bool {
         let next_idx = self.dat.len();
@@ -779,9 +831,9 @@ impl<'a> TagMap<'a> {
         }
     }
 
-    /// add the next TagValue to the data for this TagMap. 
+    /// add the next TagValue to the data for this TagMap.
     /// This function doesn't check if the type is correct or
-    /// if too many tag values have been added. It should 
+    /// if too many tag values have been added. It should
     /// only be used when one is certain that the next tag value
     /// appropriately matches the next available key.
     pub fn add(&mut self, val: TagValue) {
@@ -799,16 +851,17 @@ impl<'a> TagMap<'a> {
         None
     }
 
-    /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx` 
-    /// is in bounds and None otherwise. 
+    /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx`
+    /// is in bounds and None otherwise.
     pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
         self.dat.get(idx)
-    } 
+    }
 }
 
 impl<'a> std::ops::Index<usize> for TagMap<'a> {
     type Output = TagValue;
-
+    /// Returns a reference to the [TagValue] in the [TagMap] at the 
+    /// provided `index`, panics if `index` is out of bounds.
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         &self.dat[index]
@@ -879,8 +932,10 @@ impl RadPrelude {
         let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
         let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
         let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
+
         //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
         //println!("file-level tag values: {:?}", file_tag_vals);
+        
         Ok(Self {
             hdr,
             file_tags,
@@ -1024,13 +1079,7 @@ mod tests {
             &TagValue::String(String::from("hi_rad"))
         );
 
-        assert_eq!(
-            map[0],
-            TagValue::ArrayU16(vec![1, 2, 3])
-        );
-        assert_eq!(
-            map[1],
-            TagValue::String(String::from("hi_rad"))
-        );
+        assert_eq!(map[0], TagValue::ArrayU16(vec![1, 2, 3]));
+        assert_eq!(map[1], TagValue::String(String::from("hi_rad")));
     }
 }
