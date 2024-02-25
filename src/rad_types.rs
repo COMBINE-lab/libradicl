@@ -182,7 +182,7 @@ pub struct FileTags {
 }
 
 #[derive(Debug)]
-pub struct ReadRecord {
+pub struct AlevinFryReadRecord {
     pub bc: u64,
     pub umi: u64,
     pub dirs: Vec<bool>,
@@ -192,8 +192,53 @@ pub struct ReadRecord {
 pub trait MappedRecord {
     type ReadTagTypes;
     type PeekResult;
-    fn from_bytes_with_tag_types<T: Read>(reader:&mut T, bct: &RadIntId, umit: &RadIntId) -> Self;
+    fn peek_record(buf: &[u8], ctx: &Self::ReadTagTypes) -> Self::PeekResult;
+    fn from_bytes_with_context<T: Read>(reader:&mut T, ctx: &Self::ReadTagTypes) -> Self;
 }
+
+
+/// context needed to read an alevin-fry record 
+/// (the types of the barcode and umi)
+#[derive(Debug)]
+pub struct AlevinFryRecordContext {
+    pub bct: RadIntId,
+    pub umit: RadIntId,
+}
+
+pub trait RecordContext {
+    type Context;
+    fn get_context_from_tag_section(ts: &TagSection) -> Self;
+}
+
+impl RecordContext for AlevinFryRecordContext {
+    type Context = Self;
+    fn get_context_from_tag_section(ts: &TagSection) -> Self { 
+        let bct = ts.get_tag_type("b").expect("alevin-fry record context requires a \'b\' read-level tag");
+        let umit = ts.get_tag_type("b").expect("alevin-fry record context requires a \'u\' read-level tag");
+        if let (RadType::Int(x), RadType::Int(y)) = (bct, umit) {
+            Self {
+                bct: x,
+                umit: y
+            }
+        } else {
+            panic!("alevin-fry record context requires that b and u tags are of type RadType::Int");
+        }
+    }
+
+}
+
+impl AlevinFryRecordContext {
+    pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
+        Self{ bct, umit }
+    }
+}
+
+impl From<&AlevinFryRecordContext> for (RadIntId, RadIntId) {
+    fn from(item: &AlevinFryRecordContext) -> Self {
+        (item.bct, item.umit)
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Chunk<T: MappedRecord> {
@@ -421,15 +466,37 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     }
 }
 
-impl MappedRecord for ReadRecord {
-    type ReadTagTypes = (RadIntId, RadIntId);
+impl MappedRecord for AlevinFryReadRecord {
+    type ReadTagTypes = AlevinFryRecordContext;
     type PeekResult = (u64, u64);
-    
+         
     #[inline]
-    fn from_bytes_with_tag_types<T: Read>(reader:&mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
+    fn peek_record(buf: &[u8], ctx: &Self::ReadTagTypes) -> Self::PeekResult {
+        let na_size = mem::size_of::<u32>();
+        let bc_size = ctx.bct.bytes_for_type();
+
+        let _na = buf.pread::<u32>(0).unwrap();
+
+        let bc = match ctx.bct {
+            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
+        };
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+        };
+        (bc, umi)
+    }
+   
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader:&mut T, ctx: &Self::ReadTagTypes) -> Self {
         let mut rbuf = [0u8; 255];
 
-        let (bc, umi, na) = Self::from_bytes_record_header(reader, &bct, &umit);
+        let (bc, umi, na) = Self::from_bytes_record_header(reader, &ctx.bct, &ctx.umit);
 
         let mut rec = Self {
             bc,
@@ -449,14 +516,14 @@ impl MappedRecord for ReadRecord {
     }
 }
 
-impl ReadRecord {
-    /// Returns `true` if this [ReadRecord] contains no references and
+impl AlevinFryReadRecord {
+    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
     /// `false` otherwise.
     pub fn is_empty(&self) -> bool {
         self.refs.is_empty()
     }
 
-    /// Obtains the next [ReadRecord] in the stream from the reader `reader`.
+    /// Obtains the next [AlevinFryReadRecord] in the stream from the reader `reader`.
     /// The barcode should be encoded with the [RadIntId] type `bct` and
     /// the umi should be encoded with the [RadIntId] type `umit`.
     pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
@@ -495,7 +562,7 @@ impl ReadRecord {
         (bc, umi, na)
     }
 
-    /// Read the next [ReadRecord] from `reader`, but retain only those
+    /// Read the next [AlevinFryReadRecord] from `reader`, but retain only those
     /// alignment records that match the prescribed orientation provided in
     /// `expected_ori` (which is a [Strand]). This function assumes the
     /// read header has already been parsed, and just reads the raw
@@ -537,7 +604,7 @@ impl ReadRecord {
         rec
     }
 
-    /// Read the next [ReadRecord], including the header, from `reader`, but
+    /// Read the next [AlevinFryReadRecord], including the header, from `reader`, but
     /// retain only those alignment records that match the prescribed
     /// orientation provided in `expected_ori` (which is a [Strand]).
     #[inline]
@@ -567,9 +634,8 @@ impl<R: MappedRecord> Chunk<R> {
 
     /// Read the next [Chunk] from the provided reader and return it.
     #[inline]
-    pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
+    pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ReadTagTypes) -> Self {
         let (nbytes, nrec) = Self::read_header(reader);
-
         let mut c = Self {
             nbytes,
             nrec,
@@ -577,35 +643,18 @@ impl<R: MappedRecord> Chunk<R> {
         };
 
         for _ in 0..(nrec as usize) {
-            c.reads.push(R::from_bytes_with_tag_types(reader, &bct, &umit));
+            c.reads.push(R::from_bytes_with_context(reader, ctx));
         }
 
         c
     }
 
-    /// Peeks to the first [ReadRecord] in the buffer `buf`, and returns
+    /// Peeks to the first [AlevinFryReadRecord] in the buffer `buf`, and returns
     /// the barcode and umi associated with this record.  It is assumed
-    /// that there is at least one [ReadRecord] present in the buffer.
+    /// that there is at least one [AlevinFryReadRecord] present in the buffer.
     #[inline]
-    pub fn peek_record(buf: &[u8], bct: &RadIntId, umit: &RadIntId) -> (u64, u64) {
-        let na_size = mem::size_of::<u32>();
-        let bc_size = bct.bytes_for_type();
-
-        let _na = buf.pread::<u32>(0).unwrap();
-
-        let bc = match bct {
-            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
-            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
-            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
-            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
-        };
-        let umi = match umit {
-            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
-            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
-            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
-            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
-        };
-        (bc, umi)
+    pub fn peek_record(buf: &[u8], ctx: &R::ReadTagTypes) -> R::PeekResult { 
+        R::peek_record(buf, ctx)
     }
 }
 
@@ -923,6 +972,15 @@ impl TagSection {
             }
         }
         Ok(tm)
+    }
+
+    pub fn get_tag_type(&self, name: &str) -> Option<RadType> {
+        for td in &self.tags {
+            if name == td.name {
+                return Some(td.typeid);
+            }
+        }
+        None
     }
 }
 

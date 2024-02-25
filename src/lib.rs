@@ -11,7 +11,7 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::{CorrectedCbChunk, RadIntId, ReadRecord};
+use self::libradicl::rad_types::{CorrectedCbChunk, RadIntId, AlevinFryReadRecord};
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -328,7 +328,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
@@ -389,7 +389,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // get the entry for this chunk, or create a new one
         if let Some(v) = cb_byte_map.get_mut(&tup.0) {
@@ -461,7 +461,7 @@ pub fn collate_temporary_bucket<T: Read>(
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // get the entry for this chunk, or create a new one
         let v = output_cache
@@ -502,11 +502,10 @@ pub fn process_corrected_cb_chunk<T: Read>(
     let nrec = buf.pread::<u32>(4).unwrap();
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
-        //let rr = ReadRecord::from_bytes_keep_ori(reader, &bct, &umit, expected_ori);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.0) {
-            let rr = ReadRecord::from_bytes_with_header_keep_ori(
+            let rr = AlevinFryReadRecord::from_bytes_with_header_keep_ori(
                 reader,
                 tup.0,
                 tup.1,
@@ -606,11 +605,11 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.0) {
-            let rr = ReadRecord::from_bytes_with_header_keep_ori(
+            let rr = AlevinFryReadRecord::from_bytes_with_header_keep_ori(
                 reader,
                 tup.0,
                 tup.1,
