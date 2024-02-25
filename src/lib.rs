@@ -11,7 +11,7 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::{CorrectedCbChunk, RadIntId, AlevinFryReadRecord};
+use self::libradicl::rad_types::{AlevinFryReadRecord, CorrectedCbChunk, RadIntId};
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};

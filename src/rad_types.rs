@@ -193,11 +193,10 @@ pub trait MappedRecord {
     type ReadTagTypes;
     type PeekResult;
     fn peek_record(buf: &[u8], ctx: &Self::ReadTagTypes) -> Self::PeekResult;
-    fn from_bytes_with_context<T: Read>(reader:&mut T, ctx: &Self::ReadTagTypes) -> Self;
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ReadTagTypes) -> Self;
 }
 
-
-/// context needed to read an alevin-fry record 
+/// context needed to read an alevin-fry record
 /// (the types of the barcode and umi)
 #[derive(Debug)]
 pub struct AlevinFryRecordContext {
@@ -212,24 +211,24 @@ pub trait RecordContext {
 
 impl RecordContext for AlevinFryRecordContext {
     type Context = Self;
-    fn get_context_from_tag_section(ts: &TagSection) -> Self { 
-        let bct = ts.get_tag_type("b").expect("alevin-fry record context requires a \'b\' read-level tag");
-        let umit = ts.get_tag_type("b").expect("alevin-fry record context requires a \'u\' read-level tag");
+    fn get_context_from_tag_section(ts: &TagSection) -> Self {
+        let bct = ts
+            .get_tag_type("b")
+            .expect("alevin-fry record context requires a \'b\' read-level tag");
+        let umit = ts
+            .get_tag_type("b")
+            .expect("alevin-fry record context requires a \'u\' read-level tag");
         if let (RadType::Int(x), RadType::Int(y)) = (bct, umit) {
-            Self {
-                bct: x,
-                umit: y
-            }
+            Self { bct: x, umit: y }
         } else {
             panic!("alevin-fry record context requires that b and u tags are of type RadType::Int");
         }
     }
-
 }
 
 impl AlevinFryRecordContext {
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
-        Self{ bct, umit }
+        Self { bct, umit }
     }
 }
 
@@ -238,7 +237,6 @@ impl From<&AlevinFryRecordContext> for (RadIntId, RadIntId) {
         (item.bct, item.umit)
     }
 }
-
 
 #[derive(Debug)]
 pub struct Chunk<T: MappedRecord> {
@@ -469,7 +467,7 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
 impl MappedRecord for AlevinFryReadRecord {
     type ReadTagTypes = AlevinFryRecordContext;
     type PeekResult = (u64, u64);
-         
+
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ReadTagTypes) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -491,9 +489,9 @@ impl MappedRecord for AlevinFryReadRecord {
         };
         (bc, umi)
     }
-   
+
     #[inline]
-    fn from_bytes_with_context<T: Read>(reader:&mut T, ctx: &Self::ReadTagTypes) -> Self {
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ReadTagTypes) -> Self {
         let mut rbuf = [0u8; 255];
 
         let (bc, umi, na) = Self::from_bytes_record_header(reader, &ctx.bct, &ctx.umit);
@@ -653,7 +651,7 @@ impl<R: MappedRecord> Chunk<R> {
     /// the barcode and umi associated with this record.  It is assumed
     /// that there is at least one [AlevinFryReadRecord] present in the buffer.
     #[inline]
-    pub fn peek_record(buf: &[u8], ctx: &R::ReadTagTypes) -> R::PeekResult { 
+    pub fn peek_record(buf: &[u8], ctx: &R::ReadTagTypes) -> R::PeekResult {
         R::peek_record(buf, ctx)
     }
 }
@@ -909,7 +907,7 @@ impl<'a> TagMap<'a> {
 
 impl<'a> std::ops::Index<usize> for TagMap<'a> {
     type Output = TagValue;
-    /// Returns a reference to the [TagValue] in the [TagMap] at the 
+    /// Returns a reference to the [TagValue] in the [TagMap] at the
     /// provided `index`, panics if `index` is out of bounds.
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
@@ -993,7 +991,7 @@ impl RadPrelude {
 
         //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
         //println!("file-level tag values: {:?}", file_tag_vals);
-        
+
         Ok(Self {
             hdr,
             file_tags,
