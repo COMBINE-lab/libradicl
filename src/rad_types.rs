@@ -428,22 +428,24 @@ pub struct ChunkConfig {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum RadNumId {
+pub enum RadAtomicId {
     Int(RadIntId),
     Float(RadFloatId),
+    String,
 }
 
-impl RadNumId {
+impl RadAtomicId {
     #[inline]
     pub fn size_of(&self) -> usize {
         match self {
             Self::Int(x) => x.size_of(),
             Self::Float(x) => x.size_of(),
+            Self::String => panic!("RadAtomicId::String does not have a fixed type"),
         }
     }
 }
 
-impl From<u8> for RadNumId {
+impl From<u8> for RadAtomicId {
     fn from(x: u8) -> Self {
         match x {
             1 => Self::Int(RadIntId::U8),
@@ -452,7 +454,8 @@ impl From<u8> for RadNumId {
             4 => Self::Int(RadIntId::U64),
             5 => Self::Float(RadFloatId::F32),
             6 => Self::Float(RadFloatId::F64),
-            _ => panic!("Should not happen"),
+            8 => Self::String,
+            x => panic!("Should not happen, num is {x}"),
         }
     }
 }
@@ -464,7 +467,7 @@ pub enum RadType {
     Float(RadFloatId),
     // holds length type and value type, but not length
     // and data themselves
-    Array(RadIntId, RadNumId),
+    Array(RadIntId, RadAtomicId),
     // does not hold length, just a marker for the type
     String,
 }
@@ -699,6 +702,10 @@ impl FileTags {
     }
 }
 
+/// Convert from a u8 to the corresponding RadType.
+/// This will only work for *non-aggregate* types
+/// (i.e. it will not work for the array type, since
+/// the type requiers more than a u8 worth of information).
 impl From<u8> for RadType {
     fn from(x: u8) -> Self {
         match x {
@@ -716,6 +723,10 @@ impl From<u8> for RadType {
     }
 }
 
+/// This enum holds the different values that can be represented
+/// in a RAD tag. For the aggregate (i.e. array) types, the type
+/// of the element being stored in the array is encoded in the
+/// [TagValue] variant, but the length of the array is not.
 #[derive(Debug, PartialEq)]
 pub enum TagValue {
     Bool(bool),
@@ -731,6 +742,7 @@ pub enum TagValue {
     ArrayU64(Vec<u64>),
     ArrayF32(Vec<f32>),
     ArrayF64(Vec<f64>),
+    ArrayString(Vec<String>),
     String(String),
 }
 
@@ -771,7 +783,7 @@ impl TagDesc {
             7 => {
                 reader.read_exact(&mut buf[0..2])?;
                 let t1: RadIntId = buf.pread::<u8>(0)?.into();
-                let t2: RadNumId = buf.pread::<u8>(1)?.into();
+                let t2: RadAtomicId = buf.pread::<u8>(1)?.into();
                 RadType::Array(t1, t2)
             }
             _ => {
@@ -823,19 +835,43 @@ impl TagDesc {
             RadType::Array(len_t, val_t) => {
                 let _ = reader.read_exact(&mut small_buf[0..len_t.size_of()]);
                 let vec_len = len_t.read_into_usize(&small_buf);
-                let num_bytes = val_t.size_of() * vec_len;
-                let mut data = vec![0u8; num_bytes];
-                let _ = reader.read_exact(data.as_mut_slice());
-                match val_t {
-                    RadNumId::Int(RadIntId::U8) => TagValue::ArrayU8(data),
-                    RadNumId::Int(RadIntId::U16) => TagValue::ArrayU16(u8_to_vec_of!(data, u16)),
-                    RadNumId::Int(RadIntId::U32) => TagValue::ArrayU32(u8_to_vec_of!(data, u32)),
-                    RadNumId::Int(RadIntId::U64) => TagValue::ArrayU64(u8_to_vec_of!(data, u64)),
-                    RadNumId::Float(RadFloatId::F32) => {
-                        TagValue::ArrayF32(u8_to_vec_of!(data, f32))
+                if val_t == RadAtomicId::String {
+                    let mut strings = Vec::with_capacity(vec_len);
+                    let sl: u16 = 0;
+                    let mut buf = [0u8; 65536];
+                    for _ in 0..vec_len {
+                        let _ = reader.read_exact(&mut sl.to_ne_bytes());
+                        let l = sl as usize;
+                        let _ = reader.read_exact(&mut buf[0..l]);
+                        unsafe {
+                            strings.push(std::str::from_utf8_unchecked(&buf[0..l]).to_string());
+                        }
                     }
-                    RadNumId::Float(RadFloatId::F64) => {
-                        TagValue::ArrayF64(u8_to_vec_of!(data, f64))
+                    return TagValue::ArrayString(strings);
+                } else {
+                    let num_bytes = val_t.size_of() * vec_len;
+                    let mut data = vec![0u8; num_bytes];
+                    let _ = reader.read_exact(data.as_mut_slice());
+                    match val_t {
+                        RadAtomicId::Int(RadIntId::U8) => TagValue::ArrayU8(data),
+                        RadAtomicId::Int(RadIntId::U16) => {
+                            TagValue::ArrayU16(u8_to_vec_of!(data, u16))
+                        }
+                        RadAtomicId::Int(RadIntId::U32) => {
+                            TagValue::ArrayU32(u8_to_vec_of!(data, u32))
+                        }
+                        RadAtomicId::Int(RadIntId::U64) => {
+                            TagValue::ArrayU64(u8_to_vec_of!(data, u64))
+                        }
+                        RadAtomicId::Float(RadFloatId::F32) => {
+                            TagValue::ArrayF32(u8_to_vec_of!(data, f32))
+                        }
+                        RadAtomicId::Float(RadFloatId::F64) => {
+                            TagValue::ArrayF64(u8_to_vec_of!(data, f64))
+                        }
+                        RadAtomicId::String => {
+                            unimplemented!("match of RadAtomicId should not occur in this branch")
+                        }
                     }
                 }
             }
@@ -862,12 +898,13 @@ impl TagDesc {
             (RadType::Int(RadIntId::U64), TagValue::U64(_)) => true,
             (RadType::Float(RadFloatId::F32), TagValue::F32(_)) => true,
             (RadType::Float(RadFloatId::F64), TagValue::F64(_)) => true,
-            (RadType::Array(_, RadNumId::Int(RadIntId::U8)), TagValue::ArrayU8(_)) => true,
-            (RadType::Array(_, RadNumId::Int(RadIntId::U16)), TagValue::ArrayU16(_)) => true,
-            (RadType::Array(_, RadNumId::Int(RadIntId::U32)), TagValue::ArrayU32(_)) => true,
-            (RadType::Array(_, RadNumId::Int(RadIntId::U64)), TagValue::ArrayU64(_)) => true,
-            (RadType::Array(_, RadNumId::Float(RadFloatId::F32)), TagValue::ArrayF32(_)) => true,
-            (RadType::Array(_, RadNumId::Float(RadFloatId::F64)), TagValue::ArrayF64(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::U8)), TagValue::ArrayU8(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::U16)), TagValue::ArrayU16(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::U32)), TagValue::ArrayU32(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::U64)), TagValue::ArrayU64(_)) => true,
+            (RadType::Array(_, RadAtomicId::Float(RadFloatId::F32)), TagValue::ArrayF32(_)) => true,
+            (RadType::Array(_, RadAtomicId::Float(RadFloatId::F64)), TagValue::ArrayF64(_)) => true,
+            (RadType::Array(_, RadAtomicId::String), TagValue::ArrayString(_)) => true,
             (RadType::String, TagValue::String(_)) => true,
             (_, _) => false,
         }
@@ -1043,7 +1080,7 @@ impl RadPrelude {
 #[cfg(test)]
 mod tests {
     use crate::rad_types::RadType;
-    use crate::rad_types::{RadIntId, RadNumId, TagSection, TagSectionLabel, TagValue};
+    use crate::rad_types::{RadAtomicId, RadIntId, TagSection, TagSectionLabel, TagValue};
     use std::io::Write;
 
     use super::TagDesc;
@@ -1078,7 +1115,7 @@ mod tests {
         assert_eq!(desc.name, "mytag");
         assert_eq!(
             desc.typeid,
-            RadType::Array(RadIntId::U8, RadNumId::Int(RadIntId::U16))
+            RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16))
         );
     }
 
@@ -1099,7 +1136,7 @@ mod tests {
         assert_eq!(desc.name, "mytag");
         assert_eq!(
             desc.typeid,
-            RadType::Array(RadIntId::U8, RadNumId::Int(RadIntId::U16))
+            RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16))
         );
 
         buf.clear();
