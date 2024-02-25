@@ -196,6 +196,22 @@ pub trait MappedRecord {
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ReadTagTypes) -> Self;
 }
 
+/// This trait allows obtaining and passing along necessary information that
+/// may be required for a [MappedRecord] to be properly parsed from a file.
+/// Typically, this information will be relevant information about the tags
+/// that are used for parsing these records. It gets information about the
+/// file, read, and alignment-level [TagSection]s from the [RadPrelude] and
+/// can then copy any information that may be later necessary for parsing.
+pub trait RecordContext {
+    fn get_context_from_tag_section(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+}
+
 /// context needed to read an alevin-fry record
 /// (the types of the barcode and umi)
 #[derive(Debug)]
@@ -204,24 +220,25 @@ pub struct AlevinFryRecordContext {
     pub umit: RadIntId,
 }
 
-pub trait RecordContext {
-    type Context;
-    fn get_context_from_tag_section(ts: &TagSection) -> Self;
-}
-
 impl RecordContext for AlevinFryRecordContext {
-    type Context = Self;
-    fn get_context_from_tag_section(ts: &TagSection) -> Self {
-        let bct = ts
+    /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
+    /// correspond to the length of the barcode and the UMI. Here, these are parsed from the
+    /// corresponding [TagSection].
+    fn get_context_from_tag_section(
+        _ft: &TagSection,
+        rt: &TagSection,
+        _at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        let bct = rt
             .get_tag_type("b")
             .expect("alevin-fry record context requires a \'b\' read-level tag");
-        let umit = ts
+        let umit = rt
             .get_tag_type("b")
             .expect("alevin-fry record context requires a \'u\' read-level tag");
         if let (RadType::Int(x), RadType::Int(y)) = (bct, umit) {
-            Self { bct: x, umit: y }
+            Ok(Self { bct: x, umit: y })
         } else {
-            panic!("alevin-fry record context requires that b and u tags are of type RadType::Int");
+            bail!("alevin-fry record context requires that b and u tags are of type RadType::Int");
         }
     }
 }
