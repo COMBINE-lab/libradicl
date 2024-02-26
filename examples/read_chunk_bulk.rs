@@ -1,11 +1,8 @@
 use anyhow;
 use libradicl;
+use libradicl::chunk::Chunk;
 use libradicl::rad_types;
-use libradicl::record::{
-    PiscemBulkRecordContext,
-    PiscemBulkReadRecord,
-    RecordContext
-};
+use libradicl::record::{PiscemBulkReadRecord, PiscemBulkRecordContext, RecordContext};
 use std::io::BufReader;
 
 fn main() -> anyhow::Result<()> {
@@ -26,8 +23,7 @@ fn main() -> anyhow::Result<()> {
         &p.read_tags,
         &p.aln_tags,
     )?;
-    let first_chunk =
-        rad_types::Chunk::<PiscemBulkReadRecord>::from_bytes(&mut ifile, &tag_context);
+    let first_chunk = Chunk::<PiscemBulkReadRecord>::from_bytes(&mut ifile, &tag_context);
     println!(
         "Chunk :: nbytes: {}, nrecs: {}",
         first_chunk.nbytes, first_chunk.nrec

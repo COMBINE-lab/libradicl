@@ -1,8 +1,8 @@
 use crate::{self as libradicl, constants};
-use libradicl::rad_types::TagSection;
+use libradicl::rad_types::{TagSection, TagSectionLabel};
 use noodles_sam as sam;
-use std::io::Read;
 use scroll::Pread;
+use std::io::Read;
 
 /// The [RadPrelude] groups together the [RadHeader]
 /// as well as the relevant top-level [TagSection]s of the file.
@@ -131,6 +131,35 @@ impl RadHeader {
 
         writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
         writeln!(&mut s, "}}")?;
+        Ok(s)
+    }
+}
+
+impl RadPrelude {
+    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<Self> {
+        let hdr = RadHeader::from_bytes(reader)?;
+        let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
+        let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
+        let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
+
+        //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
+        //println!("file-level tag values: {:?}", file_tag_vals);
+
+        Ok(Self {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        })
+    }
+
+    pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
+        use std::fmt::Write as _;
+        let mut s = self.hdr.summary(num_refs)?;
+        writeln!(&mut s, "[[{:?}]]", self.file_tags)?;
+        writeln!(&mut s, "[[{:?}]]", self.read_tags)?;
+        writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
+        //writeln!(&mut s, "file-level tag values [{:?}]", self.file_tag_vals)?;
         Ok(s)
     }
 }

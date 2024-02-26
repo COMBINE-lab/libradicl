@@ -10,5 +10,3 @@ macro_rules! u8_to_vec_of {
             .collect()
     };
 }
-
-

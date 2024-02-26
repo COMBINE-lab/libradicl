@@ -7,24 +7,14 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
-use crate::{self as libradicl, constants, io as rad_io};
-use libradicl::u8_to_vec_of;
-use libradicl::record::{
-    AlevinFryReadRecord,
-    PiscemBulkReadRecord,
-    AlevinFryRecordContext,
-    PiscemBulkRecordContext,
-    MappedRecord
-};
-use self::libradicl::{utils, header::RadHeader, header::RadPrelude};
+use crate::{self as libradicl, constants};
 use anyhow::{self, bail};
-use bio_types::strand::*;
+use libradicl::u8_to_vec_of;
 use num::cast::AsPrimitive;
 use scroll::Pread;
+use std::io::Read;
 use std::io::Write;
-use std::io::{Cursor, Read};
 use std::mem;
-
 
 #[derive(Clone, Debug)]
 pub struct TagDesc {
@@ -55,26 +45,6 @@ pub struct TagSection {
 pub struct FileTags {
     pub bclen: u16,
     pub umilen: u16,
-}
-
-#[derive(Debug)]
-pub struct Chunk<T: MappedRecord> {
-    pub nbytes: u32,
-    pub nrec: u32,
-    pub reads: Vec<T>,
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct CorrectedCbChunk {
-    pub(crate) remaining_records: u32,
-    pub(crate) corrected_bc: u64,
-    pub(crate) nrec: u32,
-    pub(crate) data: Cursor<Vec<u8>>, /*,
-                                      umis: Vec<u64>,
-                                      ref_offsets: Vec<u32>,
-                                      ref_ids: Vec<u32>,
-                                      */
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -209,12 +179,6 @@ impl RadIntId {
             Self::U64 => buf.pread::<u64>(0).unwrap() as usize,
         }
     }
-}
-
-pub struct ChunkConfig {
-    pub num_chunks: u64,
-    pub bc_type: u8,
-    pub umi_type: u8,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -399,250 +363,6 @@ impl From<u32> for MappedFragmentOrientation {
             0b10 => MappedFragmentOrientation::Reverse,
             _ => MappedFragmentOrientation::Unknown,
         }
-    }
-}
-
-impl MappedRecord for PiscemBulkReadRecord {
-    type ParsingContext = PiscemBulkRecordContext;
-    type PeekResult = Option<u64>;
-
-    #[inline]
-    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
-        const MASK_LOWER_30_BITS: u32 = 0xC0000000;
-        const MASK_UPPER_2_BITS: u32 = 0x3FFFFFFF;
-        let mut rbuf = [0u8; 255];
-
-        reader.read_exact(&mut rbuf[0..4]).unwrap();
-        let na = rbuf.pread::<u32>(0).unwrap();
-        let fmt = rad_io::read_into_u64(reader, &ctx.frag_map_t);
-        let f = MappingType::from_u8(fmt as u8);
-
-        let mut rec = Self {
-            frag_type: fmt as u8,
-            dirs: Vec::with_capacity(na as usize),
-            refs: Vec::with_capacity(na as usize),
-            positions: Vec::with_capacity(na as usize),
-            frag_lengths: Vec::with_capacity(na as usize),
-        };
-
-        //println!("number of records : {:?}",na);
-
-        for _ in 0..(na as usize) {
-            reader.read_exact(&mut rbuf[0..4]).unwrap();
-            let v = rbuf.pread::<u32>(0).unwrap();
-
-            let dir_int = (v & MASK_LOWER_30_BITS) >> 30;
-            let dir = MappedFragmentOrientation::from_u32_paired_status(dir_int, f);
-            rec.dirs.push(dir);
-            rec.refs.push(v & MASK_UPPER_2_BITS);
-            // position
-            reader.read_exact(&mut rbuf[0..4]).unwrap();
-            let pos = rbuf.pread::<u32>(0).unwrap();
-            rec.positions.push(pos);
-            // length
-            reader.read_exact(&mut rbuf[0..2]).unwrap();
-            let flen = rbuf.pread::<u16>(0).unwrap();
-            rec.frag_lengths.push(flen);
-        }
-
-        rec
-    }
-
-    #[inline]
-    fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
-        unimplemented!("Currently there is no implementation for peek_record for PiscemBulkReadRecord. This should not be needed");
-    }
-}
-
-impl MappedRecord for AlevinFryReadRecord {
-    type ParsingContext = AlevinFryRecordContext;
-    type PeekResult = (u64, u64);
-
-    #[inline]
-    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
-        let na_size = mem::size_of::<u32>();
-        let bc_size = ctx.bct.bytes_for_type();
-
-        let _na = buf.pread::<u32>(0).unwrap();
-
-        let bc = match ctx.bct {
-            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
-            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
-            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
-            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
-        };
-        let umi = match ctx.umit {
-            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
-            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
-            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
-            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
-        };
-        (bc, umi)
-    }
-
-    #[inline]
-    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
-        let mut rbuf = [0u8; 255];
-
-        let (bc, umi, na) = Self::from_bytes_record_header(reader, &ctx.bct, &ctx.umit);
-
-        let mut rec = Self {
-            bc,
-            umi,
-            dirs: Vec::with_capacity(na as usize),
-            refs: Vec::with_capacity(na as usize),
-        };
-
-        for _ in 0..(na as usize) {
-            reader.read_exact(&mut rbuf[0..4]).unwrap();
-            let v = rbuf.pread::<u32>(0).unwrap();
-            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
-            rec.dirs.push(dir);
-            rec.refs.push(v & utils::MASK_TOP_BIT_U32);
-        }
-        rec
-    }
-}
-
-impl AlevinFryReadRecord {
-    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
-    /// `false` otherwise.
-    pub fn is_empty(&self) -> bool {
-        self.refs.is_empty()
-    }
-
-    /// Obtains the next [AlevinFryReadRecord] in the stream from the reader `reader`.
-    /// The barcode should be encoded with the [RadIntId] type `bct` and
-    /// the umi should be encoded with the [RadIntId] type `umit`.
-    pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
-        let mut rbuf = [0u8; 255];
-
-        let (bc, umi, na) = Self::from_bytes_record_header(reader, bct, umit);
-
-        let mut rec = Self {
-            bc,
-            umi,
-            dirs: Vec::with_capacity(na as usize),
-            refs: Vec::with_capacity(na as usize),
-        };
-
-        for _ in 0..(na as usize) {
-            reader.read_exact(&mut rbuf[0..4]).unwrap();
-            let v = rbuf.pread::<u32>(0).unwrap();
-            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
-            rec.dirs.push(dir);
-            rec.refs.push(v & utils::MASK_TOP_BIT_U32);
-        }
-        rec
-    }
-
-    #[inline]
-    pub fn from_bytes_record_header<T: Read>(
-        reader: &mut T,
-        bct: &RadIntId,
-        umit: &RadIntId,
-    ) -> (u64, u64, u32) {
-        let mut rbuf = [0u8; 4];
-        reader.read_exact(&mut rbuf).unwrap();
-        let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
-        let bc = rad_io::read_into_u64(reader, bct);
-        let umi = rad_io::read_into_u64(reader, umit);
-        (bc, umi, na)
-    }
-
-    /// Read the next [AlevinFryReadRecord] from `reader`, but retain only those
-    /// alignment records that match the prescribed orientation provided in
-    /// `expected_ori` (which is a [Strand]). This function assumes the
-    /// read header has already been parsed, and just reads the raw
-    /// record contents consisting of the references and directions.
-    #[inline]
-    pub fn from_bytes_with_header_keep_ori<T: Read>(
-        reader: &mut T,
-        bc: u64,
-        umi: u64,
-        na: u32,
-        expected_ori: &Strand,
-    ) -> Self {
-        let mut rbuf = [0u8; 255];
-        let mut rec = Self {
-            bc,
-            umi,
-            dirs: Vec::with_capacity(na as usize),
-            refs: Vec::with_capacity(na as usize),
-        };
-
-        for _ in 0..(na as usize) {
-            reader.read_exact(&mut rbuf[0..4]).unwrap();
-            let v = rbuf.pread::<u32>(0).unwrap();
-
-            // fw if the leftmost bit is 1, otherwise rc
-            let strand = if (v & utils::MASK_LOWER_31_U32) > 0 {
-                Strand::Forward
-            } else {
-                Strand::Reverse
-            };
-
-            if expected_ori.same(&strand) || expected_ori.is_unknown() {
-                rec.refs.push(v & utils::MASK_TOP_BIT_U32);
-            }
-        }
-
-        // make sure these are sorted in this step.
-        rec.refs.sort_unstable();
-        rec
-    }
-
-    /// Read the next [AlevinFryReadRecord], including the header, from `reader`, but
-    /// retain only those alignment records that match the prescribed
-    /// orientation provided in `expected_ori` (which is a [Strand]).
-    #[inline]
-    pub fn from_bytes_keep_ori<T: Read>(
-        reader: &mut T,
-        bct: &RadIntId,
-        umit: &RadIntId,
-        expected_ori: &Strand,
-    ) -> Self {
-        let (bc, umi, na) = Self::from_bytes_record_header(reader, bct, umit);
-        Self::from_bytes_with_header_keep_ori(reader, bc, umi, na, expected_ori)
-    }
-}
-
-impl<R: MappedRecord> Chunk<R> {
-    /// Read the header of the next [Chunk] from the provided `reader`. This
-    /// function returns a tuple representing the number of bytes and number of
-    /// records, respectively, in the chunk.
-    #[inline]
-    pub fn read_header<T: Read>(reader: &mut T) -> (u32, u32) {
-        let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf).unwrap();
-        let nbytes = buf.pread::<u32>(0).unwrap();
-        let nrec = buf.pread::<u32>(4).unwrap();
-        (nbytes, nrec)
-    }
-
-    /// Read the next [Chunk] from the provided reader and return it.
-    #[inline]
-    pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ParsingContext) -> Self {
-        let (nbytes, nrec) = Self::read_header(reader);
-        let mut c = Self {
-            nbytes,
-            nrec,
-            reads: Vec::<R>::with_capacity(nrec as usize),
-        };
-
-        for _ in 0..(nrec as usize) {
-            c.reads.push(R::from_bytes_with_context(reader, ctx));
-        }
-
-        c
-    }
-
-    /// Peeks to the first [AlevinFryReadRecord] in the buffer `buf`, and returns
-    /// the barcode and umi associated with this record.  It is assumed
-    /// that there is at least one [AlevinFryReadRecord] present in the buffer.
-    #[inline]
-    pub fn peek_record(buf: &[u8], ctx: &R::ParsingContext) -> R::PeekResult {
-        R::peek_record(buf, ctx)
     }
 }
 
@@ -998,39 +718,10 @@ impl TagSection {
     pub fn has_tag(&self, name: &str) -> bool {
         for td in &self.tags {
             if name == td.name {
-                return true
+                return true;
             }
         }
         false
-    }
-}
-
-impl RadPrelude {
-    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<Self> {
-        let hdr = RadHeader::from_bytes(reader)?;
-        let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
-        let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
-        let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
-
-        //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
-        //println!("file-level tag values: {:?}", file_tag_vals);
-
-        Ok(Self {
-            hdr,
-            file_tags,
-            read_tags,
-            aln_tags,
-        })
-    }
-
-    pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
-        use std::fmt::Write as _;
-        let mut s = self.hdr.summary(num_refs)?;
-        writeln!(&mut s, "[[{:?}]]", self.file_tags)?;
-        writeln!(&mut s, "[[{:?}]]", self.read_tags)?;
-        writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
-        //writeln!(&mut s, "file-level tag values [{:?}]", self.file_tag_vals)?;
-        Ok(s)
     }
 }
 

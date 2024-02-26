@@ -11,7 +11,8 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::{CorrectedCbChunk, RadIntId};
+use self::libradicl::chunk::CorrectedCbChunk;
+use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
@@ -29,15 +30,17 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
+pub mod chunk;
 pub mod constants;
 pub mod exit_codes;
+pub mod header;
 pub mod io;
 pub mod rad_types;
+pub mod record;
 pub mod schema;
 pub mod utils;
-pub mod header;
-pub mod record;
-#[macro_use] mod macros;
+#[macro_use]
+mod macros;
 
 // Name of the program, to be used in diagnostic messages.
 static LIB_NAME: &str = "libradicl";
