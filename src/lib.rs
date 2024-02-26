@@ -34,6 +34,7 @@ pub mod io;
 pub mod rad_types;
 pub mod schema;
 pub mod utils;
+#[macro_use] mod macros;
 
 // Name of the program, to be used in diagnostic messages.
 static LIB_NAME: &str = "libradicl";

@@ -8,7 +8,7 @@
  */
 
 use crate::{self as libradicl, constants, io as rad_io};
-
+use libradicl::u8_to_vec_of;
 use self::libradicl::utils;
 use anyhow::{self, bail};
 use bio_types::strand::*;
@@ -948,18 +948,6 @@ pub enum TagValue {
     String(String),
 }
 
-// macro generalizing solution from
-// https://stackoverflow.com/questions/77388769/convert-vecu8-to-vecfloat-in-rust
-macro_rules! u8_to_vec_of {
-    ($a:expr, $b:ty) => {
-        $a.chunks_exact(std::mem::size_of::<$b>())
-            .map(TryInto::try_into)
-            .map(Result::unwrap)
-            .map(<$b>::from_le_bytes)
-            .collect()
-    };
-}
-
 impl TagDesc {
     /// Attempts to read a [TagDesc] from the provided `reader`. If the
     /// `reader` is positioned at the start of a valid [TagDesc], then this
@@ -1247,6 +1235,17 @@ impl TagSection {
             }
         }
         None
+    }
+
+    /// return `true` if this [TagSection] has a [TagDesc] with a
+    /// name matching `name`, and `false` otherwise.
+    pub fn has_tag(&self, name: &str) -> bool {
+        for td in &self.tags {
+            if name == td.name {
+                return true
+            }
+        }
+        false
     }
 }
 
