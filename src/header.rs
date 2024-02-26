@@ -7,7 +7,7 @@ use std::io::Read;
 /// The [RadPrelude] groups together the [RadHeader]
 /// as well as the relevant top-level [TagSection]s of the file.
 /// It constitutes everything in the initial file prior to the
-/// start of the first [Chunk].
+/// start of the first [libradicl::chunk::Chunk].
 pub struct RadPrelude {
     pub hdr: RadHeader,
     pub file_tags: TagSection,

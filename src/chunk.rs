@@ -59,9 +59,9 @@ impl<R: MappedRecord> Chunk<R> {
         c
     }
 
-    /// Peeks to the first [AlevinFryReadRecord] in the buffer `buf`, and returns
+    /// Peeks to the first [libradicl::record::AlevinFryReadRecord] in the buffer `buf`, and returns
     /// the barcode and umi associated with this record.  It is assumed
-    /// that there is at least one [AlevinFryReadRecord] present in the buffer.
+    /// that there is at least one [libradicl::record::AlevinFryReadRecord] present in the buffer.
     #[inline]
     pub fn peek_record(buf: &[u8], ctx: &R::ParsingContext) -> R::PeekResult {
         R::peek_record(buf, ctx)

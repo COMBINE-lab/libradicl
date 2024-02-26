@@ -31,7 +31,7 @@ pub struct PiscemBulkReadRecord {
 }
 
 /// This trait represents a mapped read record that should be stored
-/// in the [Chunk] of a RAD file.  The [Chunk] type is parameterized on
+/// in the [crate::chunk::Chunk] of a RAD file.  The [crate::chunk::Chunk] type is parameterized on
 /// some concrete struct that must implement this [MappedRecord] trait.
 /// This trat defines the necessary functions required to be able to parse
 /// the read record from the underlying reader, as well as the associated
@@ -55,7 +55,7 @@ pub trait MappedRecord {
 /// may be required for a [MappedRecord] to be properly parsed from a file.
 /// Typically, this information will be relevant information about the tags
 /// that are used for parsing these records. It gets information about the
-/// file, read, and alignment-level [TagSection]s from the [RadPrelude] and
+/// file, read, and alignment-level [TagSection]s from the [crate::header::RadPrelude] and
 /// can then copy any information that may be later necessary for parsing.
 pub trait RecordContext {
     fn get_context_from_tag_section(
