@@ -193,6 +193,15 @@ pub struct AlevinFryReadRecord {
     pub refs: Vec<u32>,
 }
 
+#[derive(Debug)]
+pub struct PiscemBulkReadRecord {
+    pub frag_type: u8,
+    pub dirs: Vec<MappedFragmentOrientation>,
+    pub refs: Vec<u32>,
+    pub positions: Vec<u32>,
+    pub frag_lengths: Vec<u16>,
+}
+
 /// This trait represents a mapped read record that should be stored
 /// in the [Chunk] of a RAD file.  The [Chunk] type is parameterized on
 /// some concrete struct that must implement this [MappedRecord] trait.
@@ -264,6 +273,28 @@ impl RecordContext for AlevinFryRecordContext {
 impl AlevinFryRecordContext {
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
+    }
+}
+
+#[derive(Debug)]
+pub struct PiscemBulkRecordContext {
+    pub frag_map_t: RadIntId,
+}
+
+impl RecordContext for PiscemBulkRecordContext {
+    fn get_context_from_tag_section(
+        _ft: &TagSection,
+        rt: &TagSection,
+        _at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        let frag_map_t = rt
+            .get_tag_type("frag_map_type")
+            .expect("psicem bulk record cantext requires a \"frag_map_type\" read-level tag");
+        if let RadType::Int(x) = frag_map_t {
+            Ok(Self { frag_map_t: x })
+        } else {
+            bail!("piscem bulk record context requries that \"frag_map_type\" tag is of type RadType::Int");
+        }
     }
 }
 
@@ -493,6 +524,167 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
         3 => Some(RadIntId::U32),
         4 => Some(RadIntId::U64),
         _ => None,
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum MappingType {
+    Unmapped,
+    SingleMapped,
+    MappedFirstOrphan,
+    MappedSecondOrphan,
+    MappedPair,
+}
+
+impl MappingType {
+    pub fn from_u8(t: u8) -> Self {
+        match t {
+            0 => MappingType::Unmapped,
+            1 => MappingType::SingleMapped,
+            2 => MappingType::MappedFirstOrphan,
+            3 => MappingType::MappedSecondOrphan,
+            4 => MappingType::MappedPair,
+            _ => MappingType::Unmapped,
+        }
+    }
+
+    #[inline]
+    pub fn get_mask(&self) -> u32 {
+        match &self {
+            // if unmapped, we ignore flags all together.
+            MappingType::Unmapped => 0b00,
+            // if paired we care about both read and mate.
+            MappingType::MappedPair => 0b11,
+            // if orphan or single, we care only about read
+            // mate flag should be ignored.
+            _ => 0b10,
+        }
+    }
+
+    #[inline]
+    pub fn is_orphan(&self) -> bool {
+        matches!(
+            &self,
+            MappingType::MappedFirstOrphan | MappingType::MappedSecondOrphan
+        )
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum MappedFragmentOrientation {
+    Reverse,
+    Forward,
+    ReverseReverse,
+    ReverseForward,
+    ForwardReverse,
+    ForwardForward,
+    Unknown,
+}
+
+impl MappedFragmentOrientation {
+    pub fn from_u32_paired_status(n: u32, m: MappingType) -> Self {
+        // if not paired, then we don't care about
+        // the lowest order bit so shift it off
+        if matches!(
+            m,
+            MappingType::SingleMapped
+                | MappingType::MappedFirstOrphan
+                | MappingType::MappedSecondOrphan
+        ) {
+            if (n & 0b10) == 2 {
+                MappedFragmentOrientation::Forward
+            } else {
+                MappedFragmentOrientation::Reverse
+            }
+        } else {
+            match n {
+                0 => MappedFragmentOrientation::ReverseReverse,
+                1 => MappedFragmentOrientation::ReverseForward,
+                2 => MappedFragmentOrientation::ForwardReverse,
+                3 => MappedFragmentOrientation::ForwardForward,
+                _ => MappedFragmentOrientation::Unknown,
+            }
+        }
+    }
+}
+
+impl From<MappedFragmentOrientation> for u32 {
+    fn from(item: MappedFragmentOrientation) -> Self {
+        match item {
+            MappedFragmentOrientation::ForwardReverse => 0b011,
+            MappedFragmentOrientation::ForwardForward => 0b101,
+            MappedFragmentOrientation::ReverseReverse => 0b110,
+            MappedFragmentOrientation::ReverseForward => 0b100,
+            MappedFragmentOrientation::Forward => 0b1,
+            MappedFragmentOrientation::Reverse => 0b10,
+            MappedFragmentOrientation::Unknown => 0b0,
+        }
+    }
+}
+
+impl From<u32> for MappedFragmentOrientation {
+    fn from(item: u32) -> Self {
+        match item {
+            0b011 => MappedFragmentOrientation::ForwardReverse,
+            0b101 => MappedFragmentOrientation::ForwardForward,
+            0b110 => MappedFragmentOrientation::ReverseReverse,
+            0b100 => MappedFragmentOrientation::ReverseForward,
+            0b1 => MappedFragmentOrientation::Forward,
+            0b10 => MappedFragmentOrientation::Reverse,
+            _ => MappedFragmentOrientation::Unknown,
+        }
+    }
+}
+
+impl MappedRecord for PiscemBulkReadRecord {
+    type ParsingContext = PiscemBulkRecordContext;
+    type PeekResult = Option<u64>;
+
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
+        const MASK_LOWER_30_BITS: u32 = 0xC0000000;
+        const MASK_UPPER_2_BITS: u32 = 0x3FFFFFFF;
+        let mut rbuf = [0u8; 255];
+
+        reader.read_exact(&mut rbuf[0..4]).unwrap();
+        let na = rbuf.pread::<u32>(0).unwrap();
+        let fmt = rad_io::read_into_u64(reader, &ctx.frag_map_t);
+        let f = MappingType::from_u8(fmt as u8);
+
+        let mut rec = Self {
+            frag_type: fmt as u8,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+            positions: Vec::with_capacity(na as usize),
+            frag_lengths: Vec::with_capacity(na as usize),
+        };
+
+        //println!("number of records : {:?}",na);
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+
+            let dir_int = (v & MASK_LOWER_30_BITS) >> 30;
+            let dir = MappedFragmentOrientation::from_u32_paired_status(dir_int, f);
+            rec.dirs.push(dir);
+            rec.refs.push(v & MASK_UPPER_2_BITS);
+            // position
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let pos = rbuf.pread::<u32>(0).unwrap();
+            rec.positions.push(pos);
+            // length
+            reader.read_exact(&mut rbuf[0..2]).unwrap();
+            let flen = rbuf.pread::<u16>(0).unwrap();
+            rec.frag_lengths.push(flen);
+        }
+
+        rec
+    }
+
+    #[inline]
+    fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
+        unimplemented!("Currently there is no implementation for peek_record for PiscemBulkReadRecord. This should not be needed");
     }
 }
 

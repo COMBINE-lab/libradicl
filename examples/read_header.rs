@@ -40,6 +40,8 @@ fn main() -> anyhow::Result<()> {
                 "file tag values: {:?}",
                 v.iter().take(10).collect::<Vec<&u32>>()
             );
+        } else {
+            println!("file-level tags: {:?}", &ftmp);
         }
     }
     Ok(())
