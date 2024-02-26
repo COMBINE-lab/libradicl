@@ -1,6 +1,11 @@
 use anyhow;
 use libradicl;
-use libradicl::rad_types::{self, RecordContext};
+use libradicl::rad_types;
+use libradicl::record::{
+    PiscemBulkRecordContext,
+    PiscemBulkReadRecord,
+    RecordContext
+};
 use std::io::BufReader;
 
 fn main() -> anyhow::Result<()> {
@@ -16,13 +21,13 @@ fn main() -> anyhow::Result<()> {
 
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.
-    let tag_context = rad_types::PiscemBulkRecordContext::get_context_from_tag_section(
+    let tag_context = PiscemBulkRecordContext::get_context_from_tag_section(
         &p.file_tags,
         &p.read_tags,
         &p.aln_tags,
     )?;
     let first_chunk =
-        rad_types::Chunk::<rad_types::PiscemBulkReadRecord>::from_bytes(&mut ifile, &tag_context);
+        rad_types::Chunk::<PiscemBulkReadRecord>::from_bytes(&mut ifile, &tag_context);
     println!(
         "Chunk :: nbytes: {}, nrecs: {}",
         first_chunk.nbytes, first_chunk.nrec

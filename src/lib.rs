@@ -11,7 +11,8 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::{AlevinFryReadRecord, CorrectedCbChunk, RadIntId};
+use self::libradicl::rad_types::{CorrectedCbChunk, RadIntId};
+use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -35,6 +36,7 @@ pub mod rad_types;
 pub mod schema;
 pub mod utils;
 pub mod header;
+pub mod record;
 #[macro_use] mod macros;
 
 // Name of the program, to be used in diagnostic messages.
