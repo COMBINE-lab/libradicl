@@ -503,6 +503,16 @@ pub enum RadType {
     String,
 }
 
+impl RadType {
+    #[inline]
+    pub fn is_int_type(&self) -> bool {
+        match self {
+            Self::Int(_) => true,
+            _ => false
+        }
+    }
+}
+
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
