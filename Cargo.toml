@@ -15,7 +15,7 @@ readme = "README.md"
 repository = "https://github.com/COMBINE-lab/alevin-fry"
 homepage = "https://github.com/COMBINE-lab/alevin-fry"
 documentation = "https://alevin-fry.readthedocs.io/en/latest/"
-include = ["src/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
+include = ["src/*.rs", "examples/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
 keywords = [
   "single-cell",
   "preprocessing",
