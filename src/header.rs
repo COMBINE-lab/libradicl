@@ -1,5 +1,6 @@
 use crate::{self as libradicl, constants};
 use libradicl::rad_types::{TagSection, TagSectionLabel};
+use libradicl::record::RecordContext;
 use noodles_sam as sam;
 use scroll::Pread;
 use std::io::Read;
@@ -161,5 +162,15 @@ impl RadPrelude {
         writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
         //writeln!(&mut s, "file-level tag values [{:?}]", self.file_tag_vals)?;
         Ok(s)
+    }
+
+    /// Obtain a [RecordContext] for a record of type `R` from this prelude, by
+    /// using the associated [TagSection]s.  **Note**: Since this function
+    /// constructs the resulting `R` itself, and doesn't take any `R` parameter,
+    /// then it must always be invoked with the proper
+    /// [turbofish](https://doc.rust-lang.org/1.30.0/book/2018-edition/appendix-02-operators.html?highlight=turbofish#non-operator-symbols)
+    /// notation.
+    pub fn get_record_context<R: RecordContext>(&self) -> anyhow::Result<R> {
+        R::get_context_from_tag_section(&self.file_tags, &self.read_tags, &self.aln_tags)
     }
 }

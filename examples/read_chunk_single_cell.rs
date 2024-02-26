@@ -1,7 +1,7 @@
 use anyhow;
 use libradicl::chunk::Chunk;
 use libradicl::header;
-use libradicl::record::{AlevinFryReadRecord, AlevinFryRecordContext, RecordContext};
+use libradicl::record::{AlevinFryReadRecord, AlevinFryRecordContext};
 use std::io::BufReader;
 
 fn main() -> anyhow::Result<()> {
@@ -17,11 +17,7 @@ fn main() -> anyhow::Result<()> {
     println!("tag map {:?}\n", tag_map);
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.
-    let tag_context = AlevinFryRecordContext::get_context_from_tag_section(
-        &p.file_tags,
-        &p.read_tags,
-        &p.aln_tags,
-    )?;
+    let tag_context = p.get_record_context::<AlevinFryRecordContext>()?;
     let first_chunk = Chunk::<AlevinFryReadRecord>::from_bytes(&mut ifile, &tag_context);
     println!(
         "Chunk :: nbytes: {}, nrecs: {}",
