@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/COMBINE-lab/libradicl/compare/v0.7.0...v0.8.0) (2024-02-26)
+
+
+### Features
+
+* add record_context function to prelude ([aa85018](https://github.com/COMBINE-lab/libradicl/commit/aa850182902460bfe2d08f398cbfb818d4fa43a6))
+
+
+### Bug Fixes
+
+* add examples to Cargo.toml ([a163b99](https://github.com/COMBINE-lab/libradicl/commit/a163b99824050bb1a7ac0501745ac97046060d18))
+
 ## [0.7.0](https://github.com/COMBINE-lab/libradicl/compare/v0.6.0...v0.7.0) (2024-02-16)
 
 
