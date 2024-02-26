@@ -1,5 +1,5 @@
 use anyhow;
-use libradicl::rad_types;
+use libradicl::{self, rad_types};
 use std::io::BufReader;
 
 fn main() -> anyhow::Result<()> {
@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     {
         let f = std::fs::File::open(&fname)?;
         let mut ifile = BufReader::new(f);
-        let p = rad_types::RadPrelude::from_bytes(&mut ifile)?;
+        let p = libradicl::header::RadPrelude::from_bytes(&mut ifile)?;
         if let Ok(summary) = p.summary(None) {
             println!("{}", summary);
         }

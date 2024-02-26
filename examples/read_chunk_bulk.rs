@@ -1,4 +1,5 @@
 use anyhow;
+use libradicl;
 use libradicl::rad_types::{self, RecordContext};
 use std::io::BufReader;
 
@@ -6,7 +7,7 @@ fn main() -> anyhow::Result<()> {
     let fname = std::env::args().nth(1).expect("input filename");
     let f = std::fs::File::open(&fname)?;
     let mut ifile = BufReader::new(f);
-    let p = rad_types::RadPrelude::from_bytes(&mut ifile)?;
+    let p = libradicl::header::RadPrelude::from_bytes(&mut ifile)?;
     if let Ok(summary) = p.summary(None) {
         println!("{}", summary);
     }
