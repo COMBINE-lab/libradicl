@@ -11,7 +11,9 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::{CorrectedCbChunk, RadIntId, ReadRecord};
+use self::libradicl::chunk::CorrectedCbChunk;
+use self::libradicl::rad_types::RadIntId;
+use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -28,10 +30,17 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
+pub mod chunk;
+pub mod constants;
 pub mod exit_codes;
+pub mod header;
+pub mod io;
 pub mod rad_types;
+pub mod record;
 pub mod schema;
 pub mod utils;
+#[macro_use]
+mod macros;
 
 // Name of the program, to be used in diagnostic messages.
 static LIB_NAME: &str = "libradicl";
@@ -108,7 +117,7 @@ impl BarcodeLookupMap {
             end: self.offsets[(query_pref + 1) as usize],
         };
 
-        let qs = qrange.start as usize;
+        let qs = qrange.start;
 
         // if we can, then we return the found barcode and that there was 1 best hit
         if let Ok(res) = self.barcodes[qrange].binary_search(&query) {
@@ -143,7 +152,7 @@ impl BarcodeLookupMap {
             end: self.offsets[(query_pref + 1) as usize],
         };
 
-        let qs = qrange.start as usize;
+        let qs = qrange.start;
 
         if try_exact {
             // first, we try to find exactly.
@@ -164,7 +173,7 @@ impl BarcodeLookupMap {
         // that are 1 mismatch off in the suffix.
         if !(std::ops::Range::<usize>::is_empty(&qrange)) {
             // the initial offset of suffixes for this prefix
-            let qs = qrange.start as usize;
+            let qs = qrange.start;
 
             // for each position in the suffix
             for i in (0..suffix_bits).step_by(2) {
@@ -205,7 +214,7 @@ impl BarcodeLookupMap {
                         start: self.offsets[query_pref as usize],
                         end: self.offsets[(query_pref + 1) as usize],
                     };
-                    let qs = qrange.start as usize;
+                    let qs = qrange.start;
                     if let Ok(res) = self.barcodes[qrange].binary_search(&nquery) {
                         ret = Some(qs + res);
                         num_neighbors += 1;
@@ -295,7 +304,7 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
     owriter.lock().unwrap().write_all(v.data.get_ref()).unwrap();
 }
 
-/// Given a `BufReader<T>` from which to read a set of records that
+/// Given a [BufReader]`<T>` from which to read a set of records that
 /// should reside in the same collated bucket, this function will
 /// collate the records by cell barcode, filling them into a chunk of
 /// memory exactly as they will reside on disk.  If `compress` is true
@@ -326,7 +335,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
@@ -344,10 +353,10 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
         // compute the total number of bytes this record requires
         let nbytes = calc_record_bytes(na);
-        (*v).offset += nbytes as u64;
-        (*v).nbytes += nbytes as u32;
-        (*v).nrec += 1;
-        total_bytes += nbytes as usize;
+        v.offset += nbytes as u64;
+        v.nbytes += nbytes as u32;
+        v.nrec += 1;
+        total_bytes += nbytes;
     }
 
     // each cell will have a header (8 bytes each)
@@ -363,14 +372,14 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         // jump to the position where this chunk should start
         // and write the header
         output_buffer.set_position(next_offset);
-        let cell_bytes = (*v).nbytes as u32;
-        let cell_rec = (*v).nrec as u32;
+        let cell_bytes = v.nbytes;
+        let cell_rec = v.nrec;
         output_buffer.write_all(&cell_bytes.to_le_bytes()).unwrap();
         output_buffer.write_all(&cell_rec.to_le_bytes()).unwrap();
         // where we will start writing records for this cell
-        (*v).offset = output_buffer.position();
+        v.offset = output_buffer.position();
         // the number of bytes allocated to this chunk
-        let nbytes = (*v).nbytes as u64;
+        let nbytes = v.nbytes as u64;
         // the next record will start after this one
         next_offset += nbytes;
     }
@@ -387,7 +396,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // get the entry for this chunk, or create a new one
         if let Some(v) = cb_byte_map.get_mut(&tup.0) {
@@ -403,15 +412,13 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
             umit.write_to(tup.1, &mut output_buffer).unwrap();
 
             // read the alignment records
-            reader
-                .read_exact(&mut tbuf[0..(size_of_u32 as usize * na)])
-                .unwrap();
+            reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
             // write them
             output_buffer
-                .write_all(&tbuf[..(size_of_u32 as usize * na)])
+                .write_all(&tbuf[..(size_of_u32 * na)])
                 .unwrap();
 
-            (*v).offset = output_buffer.position();
+            v.offset = output_buffer.position();
         } else {
             panic!("should not have any barcodes we can't find");
         }
@@ -461,7 +468,7 @@ pub fn collate_temporary_bucket<T: Read>(
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // get the entry for this chunk, or create a new one
         let v = output_cache
@@ -469,17 +476,17 @@ pub fn collate_temporary_bucket<T: Read>(
             .or_insert_with(|| CorrectedCbChunk::from_label_and_counter(tup.0, est_num_rec));
 
         // keep track of the number of records we're writing
-        (*v).nrec += 1;
+        v.nrec += 1;
         // write the num align
         let na = tup.2;
-        (*v).data.write_all(&na.to_le_bytes()).unwrap();
+        v.data.write_all(&na.to_le_bytes()).unwrap();
         // write the corrected barcode
-        bct.write_to(tup.0, &mut (*v).data).unwrap();
-        umit.write_to(tup.1, &mut (*v).data).unwrap();
+        bct.write_to(tup.0, &mut v.data).unwrap();
+        umit.write_to(tup.1, &mut v.data).unwrap();
         // read the alignment records
         reader.read_exact(&mut tbuf[0..(4 * na as usize)]).unwrap();
         // write them
-        (*v).data.write_all(&tbuf[..(4 * na as usize)]).unwrap();
+        v.data.write_all(&tbuf[..(4 * na as usize)]).unwrap();
     }
 }
 
@@ -502,11 +509,10 @@ pub fn process_corrected_cb_chunk<T: Read>(
     let nrec = buf.pread::<u32>(4).unwrap();
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
-        //let rr = ReadRecord::from_bytes_keep_ori(reader, &bct, &umit, expected_ori);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.0) {
-            let rr = ReadRecord::from_bytes_with_header_keep_ori(
+            let rr = AlevinFryReadRecord::from_bytes_with_header_keep_ori(
                 reader,
                 tup.0,
                 tup.1,
@@ -562,7 +568,7 @@ impl TempBucket {
             bucket_id,
             bucket_writer: Arc::new(Mutex::new(BufWriter::with_capacity(
                 4096_usize,
-                File::create(parent.join(&format!("bucket_{}.tmp", bucket_id))).unwrap(),
+                File::create(parent.join(format!("bucket_{}.tmp", bucket_id))).unwrap(),
             ))),
             num_chunks: 0u32,
             num_records: 0u32,
@@ -606,11 +612,11 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let tup = ReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
 
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.0) {
-            let rr = ReadRecord::from_bytes_with_header_keep_ori(
+            let rr = AlevinFryReadRecord::from_bytes_with_header_keep_ori(
                 reader,
                 tup.0,
                 tup.1,
@@ -641,9 +647,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
                 // then first flush the buffer to file.
                 if len + nb as usize >= flush_limit {
                     let mut filebuf = v.bucket_writer.lock().unwrap();
-                    filebuf
-                        .write_all(&bcursor.get_ref()[0..len as usize])
-                        .unwrap();
+                    filebuf.write_all(&bcursor.get_ref()[0..len]).unwrap();
                     // and reset the local buffer cursor
                     bcursor.set_position(0);
                 }
@@ -684,17 +688,13 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 }
 
 pub fn as_u8_slice(v: &[u32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            v.as_ptr() as *const u8,
-            v.len() * std::mem::size_of::<u32>(),
-        )
-    }
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::BarcodeLookupMap;
+    use needletail;
 
     #[test]
     fn test_barcode_lookup_map() {

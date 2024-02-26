@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.7.0"
+version = "0.8.0"
 authors = [
   "Avi Srivastava <avi.srivastava@nyu.edu>",
   "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
@@ -15,7 +15,7 @@ readme = "README.md"
 repository = "https://github.com/COMBINE-lab/alevin-fry"
 homepage = "https://github.com/COMBINE-lab/alevin-fry"
 documentation = "https://alevin-fry.readthedocs.io/en/latest/"
-include = ["src/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
+include = ["src/*.rs", "examples/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
 keywords = [
   "single-cell",
   "preprocessing",
@@ -29,10 +29,14 @@ categories = ["command-line-utilities", "science"]
 snap = "1"
 scroll = "0.12.0"
 num = "0.4.1"
-ahash = "0.8.8"
-serde = { version = "1.0.196", features = ["derive"] }
+ahash = "0.8.9"
+serde = { version = "1.0.197", features = ["derive"] }
 dashmap = "^5.5.3"
 bio-types = "1.0.1"
 smallvec = "1.13.1"
 noodles-bam = "0.56.0"
 noodles-sam = "0.53.0"
+anyhow = "1.0.80"
+
+[dev-dependencies]
+needletail="0.5.1"
