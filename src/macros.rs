@@ -10,3 +10,10 @@ macro_rules! u8_to_vec_of {
             .collect()
     };
 }
+
+#[macro_export]
+macro_rules! u8_to_vec_of_bool {
+    ($a:expr) => {
+        $a.iter().map(|x| *x > 0).collect::<Vec<bool>>()
+    };
+}
