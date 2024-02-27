@@ -273,12 +273,17 @@ pub enum RadType {
 }
 
 impl RadType {
+    /// Returns true if this [RadType] encodes some type of
+    /// integer, and false otherwise.
     #[inline]
     pub fn is_int_type(&self) -> bool {
         matches!(self, Self::Int(_))
     }
 }
 
+/// This function takes a [RadType] and returns the
+/// underlying id (i.e. [u8] value) that defines the type in
+/// the RAD format.
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
@@ -293,6 +298,9 @@ pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     }
 }
 
+/// This function takes a [u8] and returns the corresponding
+/// [RadIntId]. If the `type_id` represents a valid [RadIntId]
+/// then return `Some(`[RadIntId]`)`, otherwise return [None].
 pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     match type_id {
         1 => Some(RadIntId::U8),
@@ -303,6 +311,9 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     }
 }
 
+/// Represents the manner in which a fragment (read or read pair)
+/// may map to a target. This type does not encode orientation, but
+/// rather the mapping status.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum MappingType {
     Unmapped,
@@ -313,6 +324,9 @@ pub enum MappingType {
 }
 
 impl MappingType {
+    /// convert from the [u8] representation to the
+    /// corresponding [MappingType].
+    #[inline]
     pub fn from_u8(t: u8) -> Self {
         match t {
             0 => MappingType::Unmapped,
@@ -324,6 +338,8 @@ impl MappingType {
         }
     }
 
+    /// Return the mask that is relevant given the current
+    /// [MappingType].
     #[inline]
     pub fn get_mask(&self) -> u32 {
         match &self {
@@ -337,6 +353,9 @@ impl MappingType {
         }
     }
 
+    /// Returns `true` if the current [MappingType] is an orphan
+    /// (i.e. a fragment paired in sequencing for which only a single
+    /// end is mapped to the current target) and `false` otherwise.
     #[inline]
     pub fn is_orphan(&self) -> bool {
         matches!(
@@ -346,6 +365,11 @@ impl MappingType {
     }
 }
 
+/// Encodes the orientation of a mapped fragment. If the fragment is
+/// a single-end mapping (or orphan), then there are only 2 possible
+/// orientations, while for paired and mapped reads, there are 4 possible
+/// orientations. Finally, this `enum` can also represent an "Unknown"
+/// orientation.
 #[derive(Debug, Copy, Clone)]
 pub enum MappedFragmentOrientation {
     Reverse,
@@ -358,6 +382,9 @@ pub enum MappedFragmentOrientation {
 }
 
 impl MappedFragmentOrientation {
+    /// Given an encoding of the mapped fragment information (`n`) and
+    /// the corresponding [MappingType], return the [MappedFragmentOrientation]
+    #[inline]
     pub fn from_u32_paired_status(n: u32, m: MappingType) -> Self {
         // if not paired, then we don't care about
         // the lowest order bit so shift it off
@@ -384,6 +411,8 @@ impl MappedFragmentOrientation {
     }
 }
 
+/// For a given [MappedFragmentOrientation], return the [u32]
+/// that corresponds to this orientation.
 impl From<MappedFragmentOrientation> for u32 {
     fn from(item: MappedFragmentOrientation) -> Self {
         match item {
@@ -398,6 +427,8 @@ impl From<MappedFragmentOrientation> for u32 {
     }
 }
 
+/// For a given [u32], interpret it as a [MappedFragmentOrientation],
+/// and return the appropriate variant.
 impl From<u32> for MappedFragmentOrientation {
     fn from(item: u32) -> Self {
         match item {
