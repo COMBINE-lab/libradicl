@@ -12,9 +12,9 @@ edition = "2021"
 description = "support library for alevin-fry"
 license-file = "LICENSE"
 readme = "README.md"
-repository = "https://github.com/COMBINE-lab/alevin-fry"
-homepage = "https://github.com/COMBINE-lab/alevin-fry"
-documentation = "https://alevin-fry.readthedocs.io/en/latest/"
+repository = "https://github.com/COMBINE-lab/libradicl"
+homepage = "https://github.com/COMBINE-lab/libradicl"
+documentation = "https://docs.rs/libradicl"
 include = ["src/*.rs", "examples/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
 keywords = [
   "single-cell",
