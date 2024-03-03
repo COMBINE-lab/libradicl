@@ -137,6 +137,10 @@ impl RadHeader {
 }
 
 impl RadPrelude {
+    /// Read a [RadPrelude] from the provided `reader`, which includes the
+    /// [RadHeader] as well as the relevant [TagSection]s.  This function returns
+    /// an `std::Ok(`[RadPrelude]`)` if the prelude is parsed succesfully and an
+    /// [anyhow::Error] otherwise.
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<Self> {
         let hdr = RadHeader::from_bytes(reader)?;
         let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
@@ -154,13 +158,14 @@ impl RadPrelude {
         })
     }
 
+    /// Returns a textual summary of this as an `std::Ok(`[String]`)` if successful
+    /// and an [anyhow::Error] otherwise.
     pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
         use std::fmt::Write as _;
         let mut s = self.hdr.summary(num_refs)?;
         writeln!(&mut s, "[[{:?}]]", self.file_tags)?;
         writeln!(&mut s, "[[{:?}]]", self.read_tags)?;
         writeln!(&mut s, "[[{:?}]]", self.aln_tags)?;
-        //writeln!(&mut s, "file-level tag values [{:?}]", self.file_tag_vals)?;
         Ok(s)
     }
 
@@ -168,7 +173,7 @@ impl RadPrelude {
     /// using the associated [TagSection]s.  **Note**: Since this function
     /// constructs the resulting `R` itself, and doesn't take any `R` parameter,
     /// then it must always be invoked with the proper
-    /// [turbofish](https://doc.rust-lang.org/1.30.0/book/2018-edition/appendix-02-operators.html?highlight=turbofish#non-operator-symbols)
+    /// [turbofish](https://doc.rust-lang.org/1.75.0/book/2018-edition/appendix-02-operators.html?highlight=turbofish#non-operator-symbols)
     /// notation.
     pub fn get_record_context<R: RecordContext>(&self) -> anyhow::Result<R> {
         R::get_context_from_tag_section(&self.file_tags, &self.read_tags, &self.aln_tags)

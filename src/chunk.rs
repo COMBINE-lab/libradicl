@@ -44,6 +44,18 @@ impl<R: MappedRecord> Chunk<R> {
 
     /// Read the next [Chunk] from the provided reader and return it.
     #[inline]
+    pub fn from_bytes_with_tags<T: Read>(_reader: &mut T, _ctx: &R::ParsingContext) -> Self {
+        // think about how best to implement this, and where to store the tags
+        // (a) should the tags be part of the record, or stored externally (e.g. in a parallel
+        // Vec)?
+        // (b) should the tags be read into an "unparsed" structure (e.g. a binary blob) and 
+        // then parsed on demand, or parsed as they are read here?
+        // (c) What's the best mechanism to allow the user to access the tags?
+        todo!("Should read and store the optional tags associated with each record.");
+    }
+ 
+    /// Read the next [Chunk] from the provided reader and return it.
+    #[inline]
     pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ParsingContext) -> Self {
         let (nbytes, nrec) = Self::read_header(reader);
         let mut c = Self {

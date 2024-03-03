@@ -9,7 +9,7 @@
 
 use crate::{self as libradicl, constants};
 use anyhow::{self, bail};
-use libradicl::u8_to_vec_of;
+use libradicl::{u8_to_vec_of, u8_to_vec_of_bool};
 use num::cast::AsPrimitive;
 use scroll::Pread;
 use std::io::Read;
@@ -64,6 +64,33 @@ impl RadIntId {
             Self::U32 => mem::size_of::<u32>(),
             Self::U64 => mem::size_of::<u64>(),
         }
+    }
+
+    /// Read a value whose size matches this [RadIntId] and return
+    /// the value in a [u64] container
+    #[inline]
+    pub fn read_value_into_u64<R: Read>(&self, reader: &mut R) -> u64 {
+        let mut rbuf = [0u8; 8];
+
+        let v: u64 = match self {
+            RadIntId::U8 => {
+                reader.read_exact(&mut rbuf[0..1]).unwrap();
+                rbuf.pread::<u8>(0).unwrap() as u64
+            }
+            RadIntId::U16 => {
+                reader.read_exact(&mut rbuf[0..2]).unwrap();
+                rbuf.pread::<u16>(0).unwrap() as u64
+            }
+            RadIntId::U32 => {
+                reader.read_exact(&mut rbuf[0..4]).unwrap();
+                rbuf.pread::<u32>(0).unwrap() as u64
+            }
+            RadIntId::U64 => {
+                reader.read_exact(&mut rbuf[0..8]).unwrap();
+                rbuf.pread::<u64>(0).unwrap()
+            }
+        };
+        v
     }
 }
 
@@ -171,7 +198,11 @@ impl RadIntId {
         }
     }
 
-    pub fn read_into_usize(&self, buf: &[u8]) -> usize {
+    /// Read a value, whose size is determined by this [RadIntId],
+    /// from the provided `buf` and return the value in a [usize] type
+    /// container.
+    #[inline]
+    pub fn read_value_into_usize(&self, buf: &[u8]) -> usize {
         match self {
             Self::U8 => buf.pread::<u8>(0).unwrap() as usize,
             Self::U16 => buf.pread::<u16>(0).unwrap() as usize,
@@ -181,27 +212,40 @@ impl RadIntId {
     }
 }
 
+/// This type represents any **non-aggregate**
+/// [RadType], differentiating between an Int,
+/// Float, Bool and String types. Each Int and Float
+/// type contains a further description of the width
+/// of that type as a [RadIntId].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RadAtomicId {
     Int(RadIntId),
     Float(RadFloatId),
+    Bool,
     String,
 }
 
 impl RadAtomicId {
+    /// Return the size_of this [RadAtomicId] in bytes; as with the
+    /// underlying Rust type, a [bool] is 1 byte.
     #[inline]
     pub fn size_of(&self) -> usize {
         match self {
             Self::Int(x) => x.size_of(),
             Self::Float(x) => x.size_of(),
+            Self::Bool => std::mem::size_of::<bool>(),
             Self::String => panic!("RadAtomicId::String does not have a fixed type"),
         }
     }
 }
 
+/// Map from each possible integer tag to the corresponding
+/// [RadAtomicId] type.  This function **panics** if the provided
+/// [u8] is not a valid [RadAtomicId] (i.e. is 7 or > 8).
 impl From<u8> for RadAtomicId {
     fn from(x: u8) -> Self {
         match x {
+            0 => Self::Bool,
             1 => Self::Int(RadIntId::U8),
             2 => Self::Int(RadIntId::U16),
             3 => Self::Int(RadIntId::U32),
@@ -214,6 +258,8 @@ impl From<u8> for RadAtomicId {
     }
 }
 
+/// The top-level enum representing the different types that
+/// can be encoded in the tag system.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RadType {
     Bool,
@@ -227,12 +273,17 @@ pub enum RadType {
 }
 
 impl RadType {
+    /// Returns true if this [RadType] encodes some type of
+    /// integer, and false otherwise.
     #[inline]
     pub fn is_int_type(&self) -> bool {
         matches!(self, Self::Int(_))
     }
 }
 
+/// This function takes a [RadType] and returns the
+/// underlying id (i.e. [u8] value) that defines the type in
+/// the RAD format.
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
@@ -247,6 +298,9 @@ pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     }
 }
 
+/// This function takes a [u8] and returns the corresponding
+/// [RadIntId]. If the `type_id` represents a valid [RadIntId]
+/// then return `Some(`[RadIntId]`)`, otherwise return [None].
 pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     match type_id {
         1 => Some(RadIntId::U8),
@@ -257,6 +311,9 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     }
 }
 
+/// Represents the manner in which a fragment (read or read pair)
+/// may map to a target. This type does not encode orientation, but
+/// rather the mapping status.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum MappingType {
     Unmapped,
@@ -267,6 +324,9 @@ pub enum MappingType {
 }
 
 impl MappingType {
+    /// convert from the [u8] representation to the
+    /// corresponding [MappingType].
+    #[inline]
     pub fn from_u8(t: u8) -> Self {
         match t {
             0 => MappingType::Unmapped,
@@ -278,6 +338,8 @@ impl MappingType {
         }
     }
 
+    /// Return the mask that is relevant given the current
+    /// [MappingType].
     #[inline]
     pub fn get_mask(&self) -> u32 {
         match &self {
@@ -291,6 +353,9 @@ impl MappingType {
         }
     }
 
+    /// Returns `true` if the current [MappingType] is an orphan
+    /// (i.e. a fragment paired in sequencing for which only a single
+    /// end is mapped to the current target) and `false` otherwise.
     #[inline]
     pub fn is_orphan(&self) -> bool {
         matches!(
@@ -300,6 +365,11 @@ impl MappingType {
     }
 }
 
+/// Encodes the orientation of a mapped fragment. If the fragment is
+/// a single-end mapping (or orphan), then there are only 2 possible
+/// orientations, while for paired and mapped reads, there are 4 possible
+/// orientations. Finally, this `enum` can also represent an "Unknown"
+/// orientation.
 #[derive(Debug, Copy, Clone)]
 pub enum MappedFragmentOrientation {
     Reverse,
@@ -312,6 +382,9 @@ pub enum MappedFragmentOrientation {
 }
 
 impl MappedFragmentOrientation {
+    /// Given an encoding of the mapped fragment information (`n`) and
+    /// the corresponding [MappingType], return the [MappedFragmentOrientation]
+    #[inline]
     pub fn from_u32_paired_status(n: u32, m: MappingType) -> Self {
         // if not paired, then we don't care about
         // the lowest order bit so shift it off
@@ -338,6 +411,8 @@ impl MappedFragmentOrientation {
     }
 }
 
+/// For a given [MappedFragmentOrientation], return the [u32]
+/// that corresponds to this orientation.
 impl From<MappedFragmentOrientation> for u32 {
     fn from(item: MappedFragmentOrientation) -> Self {
         match item {
@@ -352,6 +427,8 @@ impl From<MappedFragmentOrientation> for u32 {
     }
 }
 
+/// For a given [u32], interpret it as a [MappedFragmentOrientation],
+/// and return the appropriate variant.
 impl From<u32> for MappedFragmentOrientation {
     fn from(item: u32) -> Self {
         match item {
@@ -414,6 +491,7 @@ pub enum TagValue {
     U64(u64),
     F32(f32),
     F64(f64),
+    ArrayBool(Vec<bool>),
     ArrayU8(Vec<u8>),
     ArrayU16(Vec<u16>),
     ArrayU32(Vec<u32>),
@@ -500,7 +578,7 @@ impl TagDesc {
             }
             RadType::Array(len_t, val_t) => {
                 let _ = reader.read_exact(&mut small_buf[0..len_t.size_of()]);
-                let vec_len = len_t.read_into_usize(&small_buf);
+                let vec_len = len_t.read_value_into_usize(&small_buf);
                 if val_t == RadAtomicId::String {
                     let mut strings = Vec::with_capacity(vec_len);
                     let sl: u16 = 0;
@@ -519,6 +597,7 @@ impl TagDesc {
                     let mut data = vec![0u8; num_bytes];
                     let _ = reader.read_exact(data.as_mut_slice());
                     match val_t {
+                        RadAtomicId::Bool => TagValue::ArrayBool(u8_to_vec_of_bool!(data)),
                         RadAtomicId::Int(RadIntId::U8) => TagValue::ArrayU8(data),
                         RadAtomicId::Int(RadIntId::U16) => {
                             TagValue::ArrayU16(u8_to_vec_of!(data, u16))
@@ -564,6 +643,7 @@ impl TagDesc {
             (RadType::Int(RadIntId::U64), TagValue::U64(_)) => true,
             (RadType::Float(RadFloatId::F32), TagValue::F32(_)) => true,
             (RadType::Float(RadFloatId::F64), TagValue::F64(_)) => true,
+            (RadType::Array(_, RadAtomicId::Bool), TagValue::ArrayBool(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U8)), TagValue::ArrayU8(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U16)), TagValue::ArrayU16(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U32)), TagValue::ArrayU32(_)) => true,

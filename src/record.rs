@@ -84,11 +84,12 @@ impl RecordContext for AlevinFryRecordContext {
         rt: &TagSection,
         _at: &TagSection,
     ) -> anyhow::Result<Self> {
+        // the tags we expect to exist
         let bct = rt
             .get_tag_type("b")
             .expect("alevin-fry record context requires a \'b\' read-level tag");
         let umit = rt
-            .get_tag_type("b")
+            .get_tag_type("u")
             .expect("alevin-fry record context requires a \'u\' read-level tag");
         if let (RadType::Int(x), RadType::Int(y)) = (bct, umit) {
             Ok(Self { bct: x, umit: y })
