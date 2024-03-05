@@ -21,6 +21,10 @@ macro_rules! u8_to_vec_of_bool {
 #[macro_export]
 macro_rules! tag_value_try_into_int {
     ($b:ty) => {
+        /// allow converting a [libradicl::rad_types::TagValue] into 
+        /// an appropriate integer type. This fails 
+        /// if the value contained is too big to fit 
+        /// in the corresponidng type.
         impl std::convert::TryInto<$b> for &libradicl::rad_types::TagValue {
             type Error = anyhow::Error;
 
