@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/COMBINE-lab/libradicl/compare/v0.8.0...v0.8.1) (2024-03-03)
+
+
+### Bug Fixes
+
+* umi type tag is u not b ([67f3e28](https://github.com/COMBINE-lab/libradicl/commit/67f3e280f91571417c895dfece83c30605d2106f))
+
 ## [0.8.0](https://github.com/COMBINE-lab/libradicl/compare/v0.7.0...v0.8.0) (2024-02-26)
 
 
