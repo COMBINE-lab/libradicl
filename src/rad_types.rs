@@ -9,7 +9,7 @@
 
 use crate::{self as libradicl, constants};
 use anyhow::{self, bail};
-use libradicl::{u8_to_vec_of, u8_to_vec_of_bool};
+use libradicl::{u8_to_vec_of, u8_to_vec_of_bool, tag_value_try_into_int};
 use num::cast::AsPrimitive;
 use scroll::Pread;
 use std::io::Read;
@@ -501,6 +501,37 @@ pub enum TagValue {
     ArrayString(Vec<String>),
     String(String),
 }
+
+tag_value_try_into_int!(u8);
+tag_value_try_into_int!(u16);
+tag_value_try_into_int!(u32);
+tag_value_try_into_int!(u64);
+/* impl TryInto<u16> for TagValue {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> std::result::Result<u16, Self::Error> {
+        match self {
+            Self::U8(x) => { Ok(x as u16) },
+            Self::U16(x) => { Ok(x) },
+            Self::U32(x) => { 
+                if x > u16::MAX as u32 {
+                    bail!("Cannot convert value {x} to u16; too large")
+                } else {
+                    Ok(x as u16)
+                }
+            },
+            Self::U64(x) => { 
+                if x > u16::MAX as u64 {
+                    bail!("Cannot convert value {x} to u16; too large")
+                } else {
+                    Ok(x as u16)
+                }
+            },
+            _ => { bail!("cannot convert non-int TagValue to u16") }
+        }
+    }
+}
+*/
 
 impl TagDesc {
     /// Attempts to read a [TagDesc] from the provided `reader`. If the
