@@ -137,7 +137,7 @@ impl RadHeader {
 }
 
 impl RadPrelude {
-    pub fn from_header_and_sections(
+    pub fn from_header_and_tag_sections(
         hdr: RadHeader,
         file_tags: TagSection,
         read_tags: TagSection,
