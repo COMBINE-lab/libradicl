@@ -21,21 +21,21 @@ macro_rules! u8_to_vec_of_bool {
 #[macro_export]
 macro_rules! tag_value_try_into_int {
     ($b:ty) => {
-        impl std::convert::TryInto<$b> for TagValue {
+        impl std::convert::TryInto<$b> for &TagValue {
             type Error = anyhow::Error;
 
             fn try_into(self) -> std::result::Result<$b, Self::Error> {
-                match self {
-                    Self::U8(x) => { Ok(x as $b) },
-                    Self::U16(x) => { Ok(x as $b) },
-                    Self::U32(x) => { 
+                match *self {
+                    TagValue::U8(x) => { Ok(x as $b) },
+                    TagValue::U16(x) => { Ok(x as $b) },
+                    TagValue::U32(x) => { 
                         if x as u64 > <$b>::MAX as u64 {
                             bail!("Cannot convert value {x} to u16; too large")
                         } else {
                             Ok(x as $b)
                         }
                     },
-                    Self::U64(x) => { 
+                    TagValue::U64(x) => { 
                         if x as u64 > <$b>::MAX as u64 {
                             bail!("Cannot convert value {x} to {}; too large", stringify!($b))
                         } else {
