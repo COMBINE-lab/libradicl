@@ -137,6 +137,20 @@ impl RadHeader {
 }
 
 impl RadPrelude {
+    pub fn from_header_and_sections(
+        hdr: RadHeader,
+        file_tags: TagSection,
+        read_tags: TagSection,
+        aln_tags: TagSection,
+    ) -> Self {
+        Self {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        }
+    }
+
     /// Read a [RadPrelude] from the provided `reader`, which includes the
     /// [RadHeader] as well as the relevant [TagSection]s.  This function returns
     /// an `std::Ok(`[RadPrelude]`)` if the prelude is parsed succesfully and an
