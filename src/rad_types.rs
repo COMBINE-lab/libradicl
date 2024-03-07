@@ -9,9 +9,12 @@
 
 use crate::{self as libradicl, constants};
 use anyhow::{self, bail};
-use libradicl::{u8_to_vec_of, u8_to_vec_of_bool, tag_value_try_into_int};
+use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool};
 use num::cast::AsPrimitive;
 use scroll::Pread;
+
+// use byteorder::{WriteBytesExt, ReadBytesExt, LittleEndian, BigEndian};
+
 use std::io::Read;
 use std::io::Write;
 use std::mem;
@@ -20,6 +23,40 @@ use std::mem;
 pub struct TagDesc {
     pub name: String,
     pub typeid: RadType,
+}
+
+impl TagDesc {
+    pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        // write the name
+        let name_len: u16 = self
+            .name
+            .len()
+            .try_into()
+            .expect("TagDesc name must have size < 65536");
+        writer
+            .write_all(&name_len.to_le_bytes())
+            .expect("could not write name length to writer");
+        writer
+            .write_all(self.name.as_bytes())
+            .expect("could not write name to writer");
+
+        let type_enc: u8 =
+            encode_type_tag(self.typeid).expect("RadType tag doesn't have valid encoding");
+        writer
+            .write_all(&type_enc.to_le_bytes())
+            .expect("could not write name length to writer");
+        if let RadType::Array(len_t, val_t) = self.typeid {
+            let len_id: u8 = len_t.into();
+            let val_id: u8 = val_t.into();
+            writer
+                .write_all(&len_id.to_le_bytes())
+                .expect("could not write Array length type");
+            writer
+                .write_all(&val_id.to_le_bytes())
+                .expect("could not write Array value type");
+        };
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +73,39 @@ pub enum TagSectionLabel {
 pub struct TagSection {
     pub label: TagSectionLabel,
     pub tags: Vec<TagDesc>,
+}
+
+impl TagSection {
+    /// Create a new tag section with the provided label
+    /// type, but with no tags descripitons.
+    pub fn new_with_label(label: TagSectionLabel) -> Self {
+        TagSection {
+            label,
+            tags: vec![],
+        }
+    }
+
+    /// Add a [TagDesc] to the list of tags in this section
+    pub fn add_tag_desc(&mut self, desc: TagDesc) {
+        self.tags.push(desc);
+    }
+
+    /// Write the tag section to the provided writer
+    pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        let num_tags: u16 = self
+            .tags
+            .len()
+            .try_into()
+            .unwrap_or_else(|_| panic!("should have < {} tags", u16::MAX));
+        writer
+            .write_all(&num_tags.to_le_bytes())
+            .expect("couldn't write number of tags to writer");
+
+        for tag in &self.tags {
+            tag.write(writer)?;
+        }
+        Ok(())
+    }
 }
 
 /// The below are currently hard-coded
@@ -91,6 +161,17 @@ impl RadIntId {
             }
         };
         v
+    }
+}
+
+impl From<RadIntId> for u8 {
+    fn from(r: RadIntId) -> Self {
+        match r {
+            RadIntId::U8 => 1_u8,
+            RadIntId::U16 => 2_u8,
+            RadIntId::U32 => 3_u8,
+            RadIntId::U64 => 4_u8,
+        }
     }
 }
 
@@ -239,6 +320,23 @@ impl RadAtomicId {
     }
 }
 
+/// Map from each possible [RadAtomicId] type to the corresponidng
+/// u8 encoding.  
+impl From<RadAtomicId> for u8 {
+    fn from(x: RadAtomicId) -> Self {
+        match x {
+            RadAtomicId::Bool => 0,
+            RadAtomicId::Int(RadIntId::U8) => 1,
+            RadAtomicId::Int(RadIntId::U16) => 2,
+            RadAtomicId::Int(RadIntId::U32) => 3,
+            RadAtomicId::Int(RadIntId::U64) => 4,
+            RadAtomicId::Float(RadFloatId::F32) => 5,
+            RadAtomicId::Float(RadFloatId::F64) => 6,
+            RadAtomicId::String => 8,
+        }
+    }
+}
+
 /// Map from each possible integer tag to the corresponding
 /// [RadAtomicId] type.  This function **panics** if the provided
 /// [u8] is not a valid [RadAtomicId] (i.e. is 7 or > 8).
@@ -278,6 +376,26 @@ impl RadType {
     #[inline]
     pub fn is_int_type(&self) -> bool {
         matches!(self, Self::Int(_))
+    }
+
+    pub fn from_bytes<R: Read>(r: &mut R) -> Self {
+        // read the type id
+        let mut type_num = 0_u8;
+        r.read_exact(std::slice::from_mut(&mut type_num))
+            .expect("cannot read RadType id from file");
+        if type_num == 7 {
+            let mut len_id = 0_u8;
+            let mut member_id = 0_u8;
+            r.read_exact(std::slice::from_mut(&mut len_id))
+                .expect("cannot read Array length type from file");
+            r.read_exact(std::slice::from_mut(&mut member_id))
+                .expect("cannot read Array value type from file");
+            let len_type: RadIntId = len_id.into();
+            let member_type: RadAtomicId = member_id.into();
+            RadType::Array(len_type, member_type)
+        } else {
+            type_num.into()
+        }
     }
 }
 

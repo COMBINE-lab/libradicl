@@ -113,8 +113,8 @@ impl RadHeader {
         tot_size
     }
 
-    /// Write a summary of the current [RadHeader] to a [String]. This 
-    /// produces an [Ok(String)] if successful. The `num_refs` argument 
+    /// Write a summary of the current [RadHeader] to a [String]. This
+    /// produces an [Ok(String)] if successful. The `num_refs` argument
     /// can be provided to control the number of reference names printed.
     /// The default (if `None` is provided to this option) is 10.
     pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
@@ -141,12 +141,11 @@ impl RadHeader {
 }
 
 impl RadPrelude {
-
-    /// Build a [RadPrelude] from the provided [RadHeader] and the 
-    /// [TagSection]s for the file, read, and alignment tags. The header 
+    /// Build a [RadPrelude] from the provided [RadHeader] and the
+    /// [TagSection]s for the file, read, and alignment tags. The header
     /// and tag sections are moved, and so are no long valid after the
     /// construction of the prelude. However, those fields are public
-    /// so they can be accessed after the prelude is returned. Unlike 
+    /// so they can be accessed after the prelude is returned. Unlike
     /// the `from_bytes` constructor, this construction is assumed not
     /// to be failable.
     pub fn from_header_and_tag_sections(

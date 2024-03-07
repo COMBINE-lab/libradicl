@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.8.1"
+version = "0.8.2"
 authors = [
   "Avi Srivastava <avi.srivastava@nyu.edu>",
   "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
@@ -37,6 +37,7 @@ smallvec = "1.13.1"
 noodles-bam = "0.56.0"
 noodles-sam = "0.53.0"
 anyhow = "1.0.80"
+byteorder = "1.5.0"
 
 [dev-dependencies]
 needletail="0.5.1"
