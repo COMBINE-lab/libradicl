@@ -3,7 +3,7 @@ use libradicl::rad_types::{TagSection, TagSectionLabel};
 use libradicl::record::RecordContext;
 use noodles_sam as sam;
 use scroll::Pread;
-use std::io::Read;
+use std::io::{Read, Write};
 
 /// The [RadPrelude] groups together the [RadHeader]
 /// as well as the relevant top-level [TagSection]s of the file.
@@ -137,6 +137,30 @@ impl RadHeader {
         writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
         writeln!(&mut s, "}}")?;
         Ok(s)
+    }
+
+    /// Write this [RadHeader] to the provided writer `w`, propagating
+    /// any error that occurs or returing `Ok(())` on success.
+    pub fn write<W: Write>(&self, w: &mut W) -> anyhow::Result<()> {
+        // NOTE: If this RadHeader was created from a SAM
+        // header, this information is not meanginful because
+        // it's not contained in the SAM header.  Think about if
+        // and how to address that.
+        w.write_all(&self.is_paired.to_le_bytes())?;
+
+        let ref_count = self.ref_count;
+        w.write_all(&ref_count.to_le_bytes())?;
+
+        // create longest buffer
+        for k in self.ref_names.iter() {
+            let name_size = k.len() as u16;
+            w.write_all(&name_size.to_le_bytes())?;
+            w.write_all(k.as_bytes())?;
+        }
+
+        let initial_num_chunks = self.num_chunks;
+        w.write_all(&initial_num_chunks.to_le_bytes())?;
+        Ok(())
     }
 }
 
