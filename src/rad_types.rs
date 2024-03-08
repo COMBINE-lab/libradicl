@@ -13,8 +13,6 @@ use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool};
 use num::cast::AsPrimitive;
 use scroll::Pread;
 
-// use byteorder::{WriteBytesExt, ReadBytesExt, LittleEndian, BigEndian};
-
 use std::io::Read;
 use std::io::Write;
 use std::mem;
@@ -26,6 +24,8 @@ pub struct TagDesc {
 }
 
 impl TagDesc {
+    /// Write this [TagDesc] to the provided `writer`, propagating any
+    /// error that may occur.
     pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         // write the name
         let name_len: u16 = self
@@ -126,6 +126,8 @@ pub enum RadIntId {
 }
 
 impl RadIntId {
+    /// Return the size (in bytes) of the a *value* associated
+    /// with a [RadIntId] of this type.
     #[inline]
     pub fn size_of(&self) -> usize {
         match self {
@@ -164,6 +166,8 @@ impl RadIntId {
     }
 }
 
+/// Convert from a [RadIntId], to the corresponding type id (`u8`)
+/// encoding.
 impl From<RadIntId> for u8 {
     fn from(r: RadIntId) -> Self {
         match r {
@@ -175,6 +179,9 @@ impl From<RadIntId> for u8 {
     }
 }
 
+/// Convert from a `u8` (type tag id) to a [RadIntId].
+/// This will fail (`panic`) if the type id is not a valid
+/// id for a [RadIntId].
 impl From<u8> for RadIntId {
     fn from(x: u8) -> Self {
         match x {
@@ -194,6 +201,8 @@ pub enum RadFloatId {
 }
 
 impl RadFloatId {
+    /// The size (in bytes) of *values* associated with this
+    /// type of [RadFloatId].
     #[inline]
     pub fn size_of(&self) -> usize {
         match self {
@@ -203,7 +212,11 @@ impl RadFloatId {
     }
 }
 
+/// Convert from a `u8` (type tag id) to a [RadFloatId].
+/// This will fail (`panic`) if the type id is not a valid
+/// id for a [RadFloatId]
 impl From<u8> for RadFloatId {
+    #[inline]
     fn from(x: u8) -> Self {
         match x {
             5 => Self::F32,
@@ -243,6 +256,9 @@ impl<
 }
 
 impl RadIntId {
+    /// Return the number of bytes required
+    /// to store a *value* associated with
+    /// this type of [RadIntId].
     #[inline]
     pub fn bytes_for_type(&self) -> usize {
         self.size_of()
