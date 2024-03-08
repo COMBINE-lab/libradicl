@@ -1,5 +1,11 @@
-// macro generalizing solution from
-// https://stackoverflow.com/questions/77388769/convert-vecu8-to-vecfloat-in-rust
+/*
+ * Copyright (c) 2020-2024 COMBINE-lab.
+ *
+ * This file is part of libradicl
+ * (see https://www.github.com/COMBINE-lab/libradicl).
+ *
+ * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
+ */
 #[macro_export]
 macro_rules! u8_to_vec_of {
     ($a:expr, $b:ty) => {
