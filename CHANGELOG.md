@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/COMBINE-lab/libradicl/compare/v0.8.1...v0.8.2) (2024-03-08)
+
+
+### Bug Fixes
+
+* add functions for compatibility with alevin-fry changes ([a9df1fa](https://github.com/COMBINE-lab/libradicl/commit/a9df1fa6815cb84d8a350bc72b4212bae47e3d5e))
+* add new function ([87dbbd1](https://github.com/COMBINE-lab/libradicl/commit/87dbbd15c8a4fec34bbdba549a488effc583bc78))
+
 ## [0.8.1](https://github.com/COMBINE-lab/libradicl/compare/v0.8.0...v0.8.1) (2024-03-03)
 
 
