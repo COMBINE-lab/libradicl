@@ -37,7 +37,6 @@ smallvec = "1.13.1"
 noodles-bam = "0.56.0"
 noodles-sam = "0.53.0"
 anyhow = "1.0.80"
-byteorder = "1.5.0"
 
 [dev-dependencies]
 needletail="0.5.1"
