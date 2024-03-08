@@ -1,4 +1,4 @@
-#!/usr/local/bin bash
+#!/usr/bin/env bash
 
 if ! command -v licenseheaders &> /dev/null
 then
