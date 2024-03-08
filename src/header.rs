@@ -1,9 +1,17 @@
+/*
+ * Copyright (c) 2020-2024 COMBINE-lab.
+ *
+ * This file is part of libradicl
+ * (see https://www.github.com/COMBINE-lab/libradicl).
+ *
+ * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
+ */
 use crate::{self as libradicl, constants};
 use libradicl::rad_types::{TagSection, TagSectionLabel};
 use libradicl::record::RecordContext;
 use noodles_sam as sam;
 use scroll::Pread;
-use std::io::Read;
+use std::io::{Read, Write};
 
 /// The [RadPrelude] groups together the [RadHeader]
 /// as well as the relevant top-level [TagSection]s of the file.
@@ -113,6 +121,10 @@ impl RadHeader {
         tot_size
     }
 
+    /// Write a summary of the current [RadHeader] to a [String]. This
+    /// produces an [Ok(String)] if successful. The `num_refs` argument
+    /// can be provided to control the number of reference names printed.
+    /// The default (if `None` is provided to this option) is 10.
     pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
         use std::fmt::Write as _;
         let mut s = String::new();
@@ -134,9 +146,54 @@ impl RadHeader {
         writeln!(&mut s, "}}")?;
         Ok(s)
     }
+
+    /// Write this [RadHeader] to the provided writer `w`, propagating
+    /// any error that occurs or returing `Ok(())` on success.
+    pub fn write<W: Write>(&self, w: &mut W) -> anyhow::Result<()> {
+        // NOTE: If this RadHeader was created from a SAM
+        // header, this information is not meanginful because
+        // it's not contained in the SAM header.  Think about if
+        // and how to address that.
+        w.write_all(&self.is_paired.to_le_bytes())?;
+
+        let ref_count = self.ref_count;
+        w.write_all(&ref_count.to_le_bytes())?;
+
+        // create longest buffer
+        for k in self.ref_names.iter() {
+            let name_size = k.len() as u16;
+            w.write_all(&name_size.to_le_bytes())?;
+            w.write_all(k.as_bytes())?;
+        }
+
+        let initial_num_chunks = self.num_chunks;
+        w.write_all(&initial_num_chunks.to_le_bytes())?;
+        Ok(())
+    }
 }
 
 impl RadPrelude {
+    /// Build a [RadPrelude] from the provided [RadHeader] and the
+    /// [TagSection]s for the file, read, and alignment tags. The header
+    /// and tag sections are moved, and so are no long valid after the
+    /// construction of the prelude. However, those fields are public
+    /// so they can be accessed after the prelude is returned. Unlike
+    /// the `from_bytes` constructor, this construction is assumed not
+    /// to be failable.
+    pub fn from_header_and_tag_sections(
+        hdr: RadHeader,
+        file_tags: TagSection,
+        read_tags: TagSection,
+        aln_tags: TagSection,
+    ) -> Self {
+        Self {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        }
+    }
+
     /// Read a [RadPrelude] from the provided `reader`, which includes the
     /// [RadHeader] as well as the relevant [TagSection]s.  This function returns
     /// an `std::Ok(`[RadPrelude]`)` if the prelude is parsed succesfully and an
