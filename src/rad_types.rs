@@ -17,6 +17,10 @@ use std::io::Read;
 use std::io::Write;
 use std::mem;
 
+/// A **description** for a type tag. This  specifies the name
+/// that the tag should be given, and the type of value that it
+/// holds.  At other points in the file, when this tag is used
+/// it will conform to this type description.
 #[derive(Clone, Debug)]
 pub struct TagDesc {
     pub name: String,
@@ -59,6 +63,10 @@ impl TagDesc {
     }
 }
 
+/// A label of the type of a [TagSection]. The RAD format
+/// has file, read, and alignment-level tags, though the
+/// `Unlabeled` variant is reserved for potential other
+/// applications.
 #[derive(Clone, Debug)]
 pub enum TagSectionLabel {
     FileTags,
@@ -106,15 +114,6 @@ impl TagSection {
         }
         Ok(())
     }
-}
-
-/// The below are currently hard-coded
-/// until we decide how to solve this
-/// generally
-#[derive(Debug)]
-pub struct FileTags {
-    pub bclen: u16,
-    pub umilen: u16,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -573,20 +572,6 @@ impl From<u32> for MappedFragmentOrientation {
             0b1 => MappedFragmentOrientation::Forward,
             0b10 => MappedFragmentOrientation::Reverse,
             _ => MappedFragmentOrientation::Unknown,
-        }
-    }
-}
-
-impl FileTags {
-    /// Reads the FileTags from the provided `reader` and return the
-    /// barcode length and umi length
-    pub fn from_bytes<T: Read>(reader: &mut T) -> Self {
-        let mut buf = [0u8; 4];
-        reader.read_exact(&mut buf).unwrap();
-
-        Self {
-            bclen: buf.pread::<u16>(0).unwrap(),
-            umilen: buf.pread::<u16>(2).unwrap(),
         }
     }
 }

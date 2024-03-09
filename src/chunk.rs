@@ -6,9 +6,14 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! Types and functions that primarily deal with the reading and writing of
+//! data [Chunk]s in the RAD file.
+
 use crate::{self as libradicl};
 use libradicl::record::MappedRecord;
 use scroll::Pread;
+use std::io::Write;
 use std::io::{Cursor, Read};
 
 #[derive(Debug)]
@@ -18,24 +23,54 @@ pub struct Chunk<T: MappedRecord> {
     pub reads: Vec<T>,
 }
 
+/// A [CorrectedCbChunk] represents a [Chunk] of RAD records
+/// that share the same underlying corrected cell barcode
+/// `corrected_bc`.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct CorrectedCbChunk {
     pub(crate) remaining_records: u32,
     pub(crate) corrected_bc: u64,
     pub(crate) nrec: u32,
-    pub(crate) data: Cursor<Vec<u8>>, /*,
-                                      umis: Vec<u64>,
-                                      ref_offsets: Vec<u32>,
-                                      ref_ids: Vec<u32>,
-                                      */
+    pub(crate) data: Cursor<Vec<u8>>,
 }
 
+impl CorrectedCbChunk {
+    pub fn from_label_and_counter(corrected_bc_in: u64, num_remain: u32) -> CorrectedCbChunk {
+        let mut cc = CorrectedCbChunk {
+            remaining_records: num_remain,
+            corrected_bc: corrected_bc_in,
+            nrec: 0u32,
+            data: Cursor::new(Vec::<u8>::with_capacity((num_remain * 24) as usize)),
+        };
+        let dummy = 0u32;
+        cc.data.write_all(&dummy.to_le_bytes()).unwrap();
+        cc.data.write_all(&dummy.to_le_bytes()).unwrap();
+        cc
+    }
+}
+
+#[deprecated(
+    since = "0.9.0",
+    note = "This type is deprecated as it's name implies it is general, but it is specalized for the single-cell context. \
+            This is replaced more generally by the ChunkContext trait and individual structures implementing this trait \
+            For specific RAD file types."
+)]
 pub struct ChunkConfig {
     pub num_chunks: u64,
     pub bc_type: u8,
     pub umi_type: u8,
 }
+
+pub trait ChunkContext {}
+
+pub struct AlevinFryChunkContext {
+    pub num_chunks: u64,
+    pub bc_type: u8,
+    pub umi_type: u8,
+}
+
+impl ChunkContext for AlevinFryChunkContext {}
 
 impl<R: MappedRecord> Chunk<R> {
     /// Read the header of the next [Chunk] from the provided `reader`. This
