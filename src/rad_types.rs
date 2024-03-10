@@ -804,14 +804,12 @@ impl<'a> TagMap<'a> {
 
     /// Try to add the next tag value. If there is space and the type
     /// matches, add it and return `true`, otherwise return `false`.
-    pub fn add_checked(&mut self, val: TagValue) -> bool {
+    pub fn try_add(&mut self, val: TagValue) -> anyhow::Result<()> {
         let next_idx = self.dat.len();
-        if next_idx >= self.keys.len() || !self.keys[next_idx].matches_value_type(&val) {
-            false
-        } else {
-            self.dat.push(val);
-            true
-        }
+        anyhow::ensure!(next_idx < self.keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", self.keys.len());
+        anyhow::ensure!(self.keys[next_idx].matches_value_type(&val), "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}", self.keys[next_idx]);
+        self.dat.push(val);
+        Ok(())
     }
 
     /// add the next TagValue to the data for this TagMap.
@@ -884,6 +882,9 @@ impl TagSection {
         Ok(ts)
     }
 
+    /// Parse a set of tag **values**, having types described by this [TagSection], from the
+    /// provided `reader`. This function returns the [TagMap] on success, or an error if the
+    /// map could not be produced.
     pub fn parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
@@ -895,19 +896,20 @@ impl TagSection {
         Ok(tm)
     }
 
-    pub fn parse_tags_from_bytes_checked<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
+    pub fn try_parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
         //let mut tv = Vec::<TagValue>::new();
         let mut tm = TagMap::with_keyset(&self.tags);
         for tag_desc in &self.tags {
-            if !tm.add_checked(tag_desc.value_from_bytes(reader)) {
-                panic!("Tried to read value for non-matching type");
-            }
+            tm.try_add(tag_desc.value_from_bytes(reader))?;
         }
         Ok(tm)
     }
 
+    /// return the [RadType] associated with the tag having the provided
+    /// `name`. Returns [Some(RadType)] if the tag exists in the map and
+    /// [None] otherwise.
     pub fn get_tag_type(&self, name: &str) -> Option<RadType> {
         for td in &self.tags {
             if name == td.name {
@@ -1033,7 +1035,7 @@ mod tests {
         );
 
         let map = tag_sec
-            .parse_tags_from_bytes_checked(&mut buf.as_slice())
+            .try_parse_tags_from_bytes(&mut buf.as_slice())
             .unwrap();
         assert_eq!(
             map.get("mytag").unwrap(),

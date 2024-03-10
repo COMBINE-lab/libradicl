@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
         println!("{}", summary);
     }
 
-    let tag_map = p.file_tags.parse_tags_from_bytes_checked(&mut ifile)?;
+    let tag_map = p.file_tags.try_parse_tags_from_bytes(&mut ifile)?;
     println!("tag map {:?}\n", tag_map);
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.
