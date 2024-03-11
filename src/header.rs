@@ -6,6 +6,12 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! This module contains types, functions and traits to deal with RAD
+//! file headers, and also top-level functionality to encapsulate a RAD
+//! prelude (which consists of the header, and the initial [TagSection]s;
+//! basically everything up to the first chunk).
+
 use crate::{self as libradicl, constants};
 use libradicl::rad_types::{TagSection, TagSectionLabel};
 use libradicl::record::RecordContext;

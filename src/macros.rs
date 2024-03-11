@@ -6,6 +6,10 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! This module contains macros used by `libradicl`. These are
+//! mostly intended for internal use.
+
 #[macro_export]
 macro_rules! u8_to_vec_of {
     ($a:expr, $b:ty) => {
