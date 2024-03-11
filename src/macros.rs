@@ -29,6 +29,49 @@ macro_rules! u8_to_vec_of_bool {
 }
 
 #[macro_export]
+macro_rules! write_tag_value_array {
+    ($v:ident , $len_t:expr, $val_t: ty, $slice_name: ident, $writer:expr) => {
+        // the tag_t tells us the width we should use to write
+        // the length
+        match $len_t {
+            RadIntId::U8 => {
+                let l: u8 = $v.len() as u8;
+                $writer
+                    .write_all(&l.to_le_bytes())
+                    .context("couldn't write array length as u8")?;
+            }
+            RadIntId::U16 => {
+                let l: u16 = $v.len() as u16;
+                $writer
+                    .write_all(&l.to_le_bytes())
+                    .context("couldn't write array length as u16")?;
+            }
+            RadIntId::U32 => {
+                let l: u32 = $v.len() as u32;
+                $writer
+                    .write_all(&l.to_le_bytes())
+                    .context("couldn't write array length as u32")?;
+            }
+            RadIntId::U64 => {
+                let l: u64 = $v.len() as u64;
+                $writer
+                    .write_all(&l.to_le_bytes())
+                    .context("couldn't write array length as u64")?;
+            }
+        }
+        let $slice_name: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                $v.as_ptr() as *const u8,
+                $v.len() * mem::size_of::<$val_t>(),
+            )
+        };
+        $writer
+            .write_all($slice_name)
+            .context("couldn't write values of the array")?;
+    };
+}
+
+#[macro_export]
 macro_rules! tag_value_try_into_int {
     ($b:ty) => {
         /// allow converting a [libradicl::rad_types::TagValue] into

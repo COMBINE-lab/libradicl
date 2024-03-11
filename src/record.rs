@@ -11,10 +11,10 @@ use crate::{
     rad_types::{MappedFragmentOrientation, MappingType, RadIntId, RadType, TagSection},
     utils,
 };
-use anyhow::{self, bail};
+use anyhow::{self, bail, Context};
 use bio_types::strand::*;
 use scroll::Pread;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::mem;
 
 /// A concrete struct representing a [MappedRecord]
@@ -29,6 +29,10 @@ pub struct AlevinFryReadRecord {
     pub refs: Vec<u32>,
 }
 
+/// A concrete struct representing a [MappedRecord] for
+/// reads processed upstream with `piscem`. This represents a set of
+/// alignments and relevant information for a basic piscem bulk
+/// record.
 #[derive(Debug)]
 pub struct PiscemBulkReadRecord {
     pub frag_type: u8,
@@ -57,6 +61,7 @@ pub trait MappedRecord {
 
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult;
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self;
+    fn write<W: Write>(&self, ctx: &Self::ParsingContext, writer: &mut W) -> anyhow::Result<()>;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -185,6 +190,40 @@ impl MappedRecord for PiscemBulkReadRecord {
     fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
         unimplemented!("Currently there is no implementation for peek_record for PiscemBulkReadRecord. This should not be needed");
     }
+
+    #[inline]
+    fn write<W: Write>(&self, _ctx: &Self::ParsingContext, writer: &mut W) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len().try_into()?;
+        // first write the number of alignments
+        writer
+            .write_all(&na.to_le_bytes())
+            .context("couldn't write number of alignments for record")?;
+
+        let fmt: u8 = self.frag_type;
+        writer
+            .write_all(&fmt.to_le_bytes())
+            .context("couldn't write frag_map_t for the record")?;
+
+        for (dir, ref_idx, pos, length) in
+            itertools::izip!(&self.dirs, &self.refs, &self.positions, &self.frag_lengths)
+        {
+            // pack info about the mapped type into the
+            // higher order bits. First get the encoding
+            // then shift it to the left.
+            let encoded_dir: u32 = (*dir).into();
+            let encoded_dir_idx: u32 = (encoded_dir << 30) | ref_idx;
+            writer
+                .write_all(&encoded_dir_idx.to_le_bytes())
+                .context("couldn't write frag_map_type and ref for record")?;
+            writer
+                .write_all(&pos.to_le_bytes())
+                .context("couldn't write position for record")?;
+            writer
+                .write_all(&length.to_le_bytes())
+                .context("couldn't write fragment length for record")?;
+        }
+        Ok(())
+    }
 }
 
 impl MappedRecord for AlevinFryReadRecord {
@@ -234,6 +273,29 @@ impl MappedRecord for AlevinFryReadRecord {
             rec.refs.push(v & utils::MASK_TOP_BIT_U32);
         }
         rec
+    }
+
+    #[inline]
+    fn write<W: Write>(&self, ctx: &Self::ParsingContext, writer: &mut W) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len() as u32;
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for record")?;
+
+        for (dir, ref_idx) in itertools::izip!(&self.dirs, &self.refs) {
+            let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
+            let encoded_dir_ref: u32 = ref_idx | encoded_dir;
+            writer
+                .write_all(&encoded_dir_ref.to_le_bytes())
+                .context("couldn't write compressed_ori_refid for record")?;
+        }
+        Ok(())
     }
 }
 

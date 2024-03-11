@@ -9,7 +9,7 @@
 
 use crate::{self as libradicl, constants};
 use anyhow::{self, bail, Context};
-use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool};
+use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool, write_tag_value_array};
 use num::cast::AsPrimitive;
 use scroll::Pread;
 
@@ -653,6 +653,117 @@ tag_value_try_into_int!(u16);
 tag_value_try_into_int!(u32);
 tag_value_try_into_int!(u64);
 
+impl TagValue {
+    /// Write this tag value to the provided writer
+    #[inline]
+    pub fn write_with_type<W: Write>(
+        &self,
+        tag_type: &RadType,
+        writer: &mut W,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Bool(b) => {
+                let b = if *b { 1_u8 } else { 0_u8 };
+                writer
+                    .write_all(&b.to_le_bytes())
+                    .context("couldn't write Bool tag value")?;
+            }
+            Self::U8(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::U16(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::U32(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::U64(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::F32(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::F64(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::ArrayBool(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, bool, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU8(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u8, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU16(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u16, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU32(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u32, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU64(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u64, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayF32(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, f32, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayF64(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, f64, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayString(_vb) => {
+                todo!("Not yet implemented")
+            }
+            Self::String(s) => {
+                let slen: u16 = s.len() as u16;
+                writer
+                    .write_all(&slen.to_le_bytes())
+                    .context("couldn't write String tag value's length")?;
+                writer
+                    .write_all(&s.as_bytes())
+                    .context("couldn't write String tag value's content")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl TagDesc {
     /// Attempts to read a [TagDesc] from the provided `reader`. If the
     /// `reader` is positioned at the start of a valid [TagDesc], then this
@@ -879,6 +990,16 @@ impl<'a> TagMap<'a> {
     /// is in bounds and None otherwise.
     pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
         self.dat.get(idx)
+    }
+
+    /// writes the values contained in this [TagMap], in order, to the provided
+    /// writer, propagating any errors or returning Ok(()) on success.
+    pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        for (n, v) in self.keys.iter().zip(self.dat.iter()) {
+            v.write_with_type(&n.typeid, writer)
+                .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
+        }
+        Ok(())
     }
 }
 

@@ -13,6 +13,7 @@
 //! basically everything up to the first chunk).
 
 use crate::{self as libradicl, constants};
+use anyhow::{self, Context};
 use libradicl::rad_types::{TagSection, TagSectionLabel};
 use libradicl::record::RecordContext;
 use noodles_sam as sam;
@@ -219,6 +220,25 @@ impl RadPrelude {
             read_tags,
             aln_tags,
         })
+    }
+
+    /// Writes this [RadPrelude] to the provided writer. Returns an
+    /// [anyhow::Result] that records any error that occured during writing or
+    /// Ok(()) if successful
+    pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        self.hdr
+            .write(writer)
+            .context("could not write the header of the prelude")?;
+        self.file_tags
+            .write(writer)
+            .context("could not write the file-level tags of the prelude")?;
+        self.read_tags
+            .write(writer)
+            .context("could not write the file-level tags of the prelude")?;
+        self.aln_tags
+            .write(writer)
+            .context("could not write the file-level tags of the prelude")?;
+        Ok(())
     }
 
     /// Returns a textual summary of this as an `std::Ok(`[String]`)` if successful
