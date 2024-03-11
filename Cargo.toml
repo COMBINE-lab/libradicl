@@ -38,6 +38,7 @@ noodles-bam = "0.56.0"
 noodles-sam = "0.53.0"
 anyhow = "1.0.80"
 itertools = "0.12.1"
+bytemuck = { version = "1.14.3", features = ["aarch64_simd"] }
 
 [dev-dependencies]
 needletail="0.5.1"

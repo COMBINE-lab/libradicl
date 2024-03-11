@@ -756,7 +756,7 @@ impl TagValue {
                     .write_all(&slen.to_le_bytes())
                     .context("couldn't write String tag value's length")?;
                 writer
-                    .write_all(&s.as_bytes())
+                    .write_all(s.as_bytes())
                     .context("couldn't write String tag value's content")?;
             }
         }

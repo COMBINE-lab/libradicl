@@ -59,12 +59,9 @@ macro_rules! write_tag_value_array {
                     .context("couldn't write array length as u64")?;
             }
         }
-        let $slice_name: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                $v.as_ptr() as *const u8,
-                $v.len() * mem::size_of::<$val_t>(),
-            )
-        };
+        let $slice_name: &[u8] = bytemuck::try_cast_slice(&$v)
+            .or_else(|_e| Err(anyhow::anyhow!("could't convert array contents to &[u8]")))
+            .context("array conversion failed")?;
         $writer
             .write_all($slice_name)
             .context("couldn't write values of the array")?;
