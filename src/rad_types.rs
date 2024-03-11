@@ -8,7 +8,7 @@
  */
 
 use crate::{self as libradicl, constants};
-use anyhow::{self, bail};
+use anyhow::{self, bail, Context};
 use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool};
 use num::cast::AsPrimitive;
 use scroll::Pread;
@@ -36,28 +36,28 @@ impl TagDesc {
             .name
             .len()
             .try_into()
-            .expect("TagDesc name must have size < 65536");
+            .context("TagDesc name must have size < 65536")?;
         writer
             .write_all(&name_len.to_le_bytes())
-            .expect("could not write name length to writer");
+            .context("could not write name length to writer")?;
         writer
             .write_all(self.name.as_bytes())
-            .expect("could not write name to writer");
+            .context("could not write name to writer")?;
 
         let type_enc: u8 =
-            encode_type_tag(self.typeid).expect("RadType tag doesn't have valid encoding");
+            encode_type_tag(self.typeid).context("RadType tag doesn't have valid encoding")?;
         writer
             .write_all(&type_enc.to_le_bytes())
-            .expect("could not write name length to writer");
+            .context("could not write name length to writer")?;
         if let RadType::Array(len_t, val_t) = self.typeid {
             let len_id: u8 = len_t.into();
             let val_id: u8 = val_t.into();
             writer
                 .write_all(&len_id.to_le_bytes())
-                .expect("could not write Array length type");
+                .context("could not write Array length type")?;
             writer
                 .write_all(&val_id.to_le_bytes())
-                .expect("could not write Array value type");
+                .context("could not write Array value type")?;
         };
         Ok(())
     }
@@ -107,7 +107,7 @@ impl TagSection {
             .unwrap_or_else(|_| panic!("should have < {} tags", u16::MAX));
         writer
             .write_all(&num_tags.to_le_bytes())
-            .expect("couldn't write number of tags to writer");
+            .context("couldn't write number of tags to writer")?;
 
         for tag in &self.tags {
             tag.write(writer)?;
@@ -393,6 +393,9 @@ impl RadType {
         matches!(self, Self::Int(_))
     }
 
+    /// Reads a [RadType] from the provided reader `r`.
+    /// **Note**: This function expects that a valid [RadType] encoding
+    /// must occur next within `r`, and panics if this is not the case.
     pub fn from_bytes<R: Read>(r: &mut R) -> Self {
         // read the type id
         let mut type_num = 0_u8;
@@ -410,6 +413,30 @@ impl RadType {
             RadType::Array(len_type, member_type)
         } else {
             type_num.into()
+        }
+    }
+
+    /// Reads a [RadType] from the provided reader `r`.
+    /// This function expects that a valid [RadType] encoding
+    /// must occur next within `r`; it returns an [Ok(RadType)] if this
+    /// is the case and propagates encountered errors otherwise.
+    pub fn try_from_bytes<R: Read>(r: &mut R) -> anyhow::Result<Self> {
+        // read the type id
+        let mut type_num = 0_u8;
+        r.read_exact(std::slice::from_mut(&mut type_num))
+            .context("cannot read RadType id from file")?;
+        if type_num == 7 {
+            let mut len_id = 0_u8;
+            let mut member_id = 0_u8;
+            r.read_exact(std::slice::from_mut(&mut len_id))
+                .context("cannot read Array length type from file")?;
+            r.read_exact(std::slice::from_mut(&mut member_id))
+                .context("cannot read Array value type from file")?;
+            let len_type: RadIntId = len_id.into();
+            let member_type: RadAtomicId = member_id.into();
+            Ok(RadType::Array(len_type, member_type))
+        } else {
+            Ok(type_num.into())
         }
     }
 }
@@ -632,26 +659,40 @@ impl TagDesc {
     /// [TagDesc] is returned.  Otherwise, a description of the error is returned
     /// via an [anyhow::Error].
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<TagDesc> {
-        // space for the string length (1 byte)
+        // space for the string length (2 bytes)
         // the longest string possible (255 char)
         // and the typeid
         let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
-        reader.read_exact(&mut buf[0..2])?;
+        reader
+            .read_exact(&mut buf[0..2])
+            .context("failed to read the string length for the Tag Description.")?;
         let str_len = buf.pread::<u16>(0)? as usize;
 
         // read str_len + 1 to get the type id that follows the string
-        reader.read_exact(&mut buf[0..str_len + 1])?;
-        let name = std::str::from_utf8(&buf[0..str_len])?.to_string();
-        let typeid = buf.pread(str_len)?;
+        reader
+            .read_exact(&mut buf[0..str_len + 1])
+            .context("failed to read string name or type-id from Tag Description.")?;
+        let name = std::str::from_utf8(&buf[0..str_len])
+            .context("failed to convert string name to a valid string.")?
+            .to_string();
+        let typeid = buf
+            .pread(str_len)
+            .context("failed to read RadType id from the buffer.")?;
         // if the type id is 7, need to read the types of
         // the length and element type, otherwise just turn the
         // id into a proper RatType and we're done.
         let rad_t = match typeid {
             0..=6 | 8 => typeid.into(),
             7 => {
-                reader.read_exact(&mut buf[0..2])?;
-                let t1: RadIntId = buf.pread::<u8>(0)?.into();
-                let t2: RadAtomicId = buf.pread::<u8>(1)?.into();
+                reader.read_exact(&mut buf[0..2]).context("failed to read aggregate type parameters (array length and element types) from the reader.")?;
+                let t1: RadIntId = buf
+                    .pread::<u8>(0)
+                    .context("failed to parse the array length type")?
+                    .into();
+                let t2: RadAtomicId = buf
+                    .pread::<u8>(1)
+                    .context("failed to parse the array value type")?
+                    .into();
                 RadType::Array(t1, t2)
             }
             _ => {
@@ -749,6 +790,8 @@ impl TagDesc {
                 let slen = small_buf.pread::<u16>(0).unwrap();
                 let mut dat: Vec<u8> = vec![0_u8; slen as usize];
                 let _ = reader.read_exact(dat.as_mut_slice());
+                // safety: a *valid* input RAD file will only have written a
+                // valid utf8 string into the file at this position.
                 let s = unsafe { String::from_utf8_unchecked(dat) };
                 TagValue::String(s)
             }
@@ -888,7 +931,6 @@ impl TagSection {
     pub fn parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
-        //let mut tv = Vec::<TagValue>::new();
         let mut tm = TagMap::with_keyset(&self.tags);
         for tag_desc in &self.tags {
             tm.add(tag_desc.value_from_bytes(reader));
@@ -896,6 +938,11 @@ impl TagSection {
         Ok(tm)
     }
 
+    /// Parse a set of tag **values**, having types described by this [TagSection], from the
+    /// provided `reader`. This function returns the [TagMap] on success, or an error if the
+    /// map could not be produced. It propagates more errors than does `parse_tags_from_bytes`
+    /// by checking that the number of values in this [TagMap] never exceeds the size of the
+    /// `keyset`.
     pub fn try_parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
