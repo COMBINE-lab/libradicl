@@ -24,6 +24,7 @@ use std::io::{Read, Write};
 /// as well as the relevant top-level [TagSection]s of the file.
 /// It constitutes everything in the initial file prior to the
 /// start of the first [libradicl::chunk::Chunk].
+#[derive(Debug, PartialEq, Eq)]
 pub struct RadPrelude {
     pub hdr: RadHeader,
     pub file_tags: TagSection,
@@ -34,6 +35,7 @@ pub struct RadPrelude {
 /// The [RadHeader] contains the relevant information about the
 /// references against which the reads in this file were mapped and
 /// information about the way in which mapping was performed.
+#[derive(Debug, PartialEq, Eq)]
 pub struct RadHeader {
     pub is_paired: u8,
     pub ref_count: u64,
@@ -338,5 +340,8 @@ mod tests {
 
         println!("new_prelude = {}", new_prelude.summary(None).unwrap());
         println!("new_file_tag_map = {:?}", new_file_tag_map);
+
+        assert_eq!(prelude, new_prelude);
+        assert_eq!(&file_tag_map, new_file_tag_map);
     }
 }

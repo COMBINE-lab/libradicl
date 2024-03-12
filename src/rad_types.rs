@@ -21,7 +21,7 @@ use std::mem;
 /// that the tag should be given, and the type of value that it
 /// holds.  At other points in the file, when this tag is used
 /// it will conform to this type description.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagDesc {
     pub name: String,
     pub typeid: RadType,
@@ -67,7 +67,7 @@ impl TagDesc {
 /// has file, read, and alignment-level tags, though the
 /// `Unlabeled` variant is reserved for potential other
 /// applications.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TagSectionLabel {
     FileTags,
     ReadTags,
@@ -77,7 +77,7 @@ pub enum TagSectionLabel {
 
 /// A [TagSection] consists of a series of [TagDesc]s that are
 /// logically grouped together as tags for a specific unit
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagSection {
     pub label: TagSectionLabel,
     pub tags: Vec<TagDesc>,
@@ -939,7 +939,7 @@ impl TagDesc {
 /// values conforming to these descriptions (i.e. in terms of types). The
 /// [TagMap] allows you to fetch the value for a specific tag by name or index, or
 /// to add values to a corresponding set of descriptions.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TagMap<'a> {
     keys: &'a [TagDesc],
     dat: Vec<TagValue>,

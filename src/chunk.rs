@@ -11,12 +11,13 @@
 //! data [Chunk]s in the RAD file.
 
 use crate::{self as libradicl};
+use anyhow::{self, Context};
 use libradicl::record::MappedRecord;
 use scroll::Pread;
-use std::io::Write;
 use std::io::{Cursor, Read};
+use std::io::{Seek, SeekFrom, Write};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Chunk<T: MappedRecord> {
     pub nbytes: u32,
     pub nrec: u32,
@@ -85,6 +86,46 @@ impl<R: MappedRecord> Chunk<R> {
         (nbytes, nrec)
     }
 
+    pub fn write<W: Write + Seek>(
+        &self,
+        writer: &mut W,
+        ctx: &R::ParsingContext,
+    ) -> anyhow::Result<()> {
+        let dummy_num_bytes = 0_u32;
+        let start_pos = writer
+            .stream_position()
+            .context("couldn't get stream position at start")?;
+
+        writer
+            .write_all(&dummy_num_bytes.to_le_bytes())
+            .context("couldn't write dummy bytes for chunk")?;
+
+        let nrec = self.reads.len() as u32;
+        writer
+            .write_all(&nrec.to_le_bytes())
+            .context("couldn't write num records for chunk")?;
+
+        for r in &self.reads {
+            r.write(writer, ctx).context("couldn't write record")?;
+        }
+        let end_pos = writer
+            .stream_position()
+            .context("couldn't get stream position at end")?;
+        let nbytes: u32 = (end_pos - start_pos) as u32;
+        writer
+            .seek(SeekFrom::Current(-(nbytes as i64)))
+            .context("couldn't seek to start of chunk")?;
+        writer
+            .write_all(&nbytes.to_le_bytes())
+            .context("couldn't write bytes for chunk")?;
+
+        let seek_fwd = (nbytes as usize) - std::mem::size_of_val(&nbytes);
+        writer
+            .seek(SeekFrom::Current(seek_fwd as i64))
+            .context("couldn't seek to end of chunk")?;
+        Ok(())
+    }
+
     /// Read the next [Chunk] from the provided reader and return it.
     #[inline]
     pub fn from_bytes_with_tags<T: Read>(_reader: &mut T, _ctx: &R::ParsingContext) -> Self {
@@ -120,5 +161,61 @@ impl<R: MappedRecord> Chunk<R> {
     #[inline]
     pub fn peek_record(buf: &[u8], ctx: &R::ParsingContext) -> R::PeekResult {
         R::peek_record(buf, ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::chunk::Chunk;
+    use crate::rad_types::{RadIntId, TagSection, TagSectionLabel};
+    use crate::rad_types::{RadType, TagDesc};
+    use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext, RecordContext};
+    use std::io::Cursor;
+
+    #[test]
+    fn can_write_af_chunk() {
+        let rec = AlevinFryReadRecord {
+            bc: 12345_u64,
+            umi: 6789_u64,
+            dirs: vec![true, true, true, false],
+            refs: vec![123, 456, 78, 910],
+        };
+
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(TagDesc {
+            name: "b".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        rt.add_tag_desc(TagDesc {
+            name: "u".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        let ctx = AlevinFryRecordContext::get_context_from_tag_section(&ft, &rt, &at).unwrap();
+
+        let chunk = Chunk::<AlevinFryReadRecord> {
+            nbytes: 148_u32,
+            nrec: 5_u32,
+            reads: vec![rec; 5],
+        };
+
+        let buf: Vec<u8> = Vec::new();
+        let mut cursor = Cursor::new(buf);
+        chunk
+            .write(&mut cursor, &ctx)
+            .expect("couldn't write chunk");
+        chunk
+            .write(&mut cursor, &ctx)
+            .expect("couldn't write chunk");
+
+
+        cursor.set_position(0);
+        let new_chunk = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
+        let new_chunk2 = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
+
+        assert_eq!(chunk, new_chunk);
+        assert_eq!(chunk, new_chunk2);
     }
 }

@@ -21,7 +21,7 @@ use std::mem;
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
 /// This represents the set of alignments and relevant information
 /// for a basic alevin-fry record.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlevinFryReadRecord {
     pub bc: u64,
     pub umi: u64,
@@ -61,7 +61,7 @@ pub trait MappedRecord {
 
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult;
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self;
-    fn write<W: Write>(&self, ctx: &Self::ParsingContext, writer: &mut W) -> anyhow::Result<()>;
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()>;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -192,7 +192,7 @@ impl MappedRecord for PiscemBulkReadRecord {
     }
 
     #[inline]
-    fn write<W: Write>(&self, _ctx: &Self::ParsingContext, writer: &mut W) -> anyhow::Result<()> {
+    fn write<W: Write>(&self, writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
         let na: u32 = self.refs.len().try_into()?;
         // first write the number of alignments
         writer
@@ -276,7 +276,7 @@ impl MappedRecord for AlevinFryReadRecord {
     }
 
     #[inline]
-    fn write<W: Write>(&self, ctx: &Self::ParsingContext, writer: &mut W) -> anyhow::Result<()> {
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
         let na: u32 = self.refs.len() as u32;
         RadIntId::U32
             .write_to(na, writer)
@@ -399,5 +399,46 @@ impl AlevinFryReadRecord {
     ) -> Self {
         let (bc, umi, na) = Self::from_bytes_record_header(reader, bct, umit);
         Self::from_bytes_with_header_keep_ori(reader, bc, umi, na, expected_ori)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rad_types::{RadIntId, TagSection, TagSectionLabel};
+    use crate::rad_types::{RadType, TagDesc};
+    use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext, MappedRecord, RecordContext};
+    use std::io::Cursor;
+
+    #[test]
+    fn can_write_af_record() {
+        let rec = AlevinFryReadRecord {
+            bc: 12345_u64,
+            umi: 6789_u64,
+            dirs: vec![true, true, true, false],
+            refs: vec![123, 456, 78, 910],
+        };
+
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(TagDesc {
+            name: "b".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        rt.add_tag_desc(TagDesc {
+            name: "u".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        let ctx = AlevinFryRecordContext::get_context_from_tag_section(&ft, &rt, &at).unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        rec.write(&mut buf, &ctx).expect("couldn't write record");
+
+        let mut cursor = Cursor::new(buf);
+        let new_rec = AlevinFryReadRecord::from_bytes_with_context(&mut cursor, &ctx);
+
+        //println!("rec = {:?}, new_rec = {:?}", rec, new_rec);
+        assert_eq!(rec, new_rec);
     }
 }
