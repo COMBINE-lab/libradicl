@@ -59,8 +59,15 @@ pub trait MappedRecord {
     /// to peek at the next record in the input stream.
     type PeekResult;
 
+    /// Peek into the provided buffer `buf`, and return the [Self::PeekResult] for this
+    /// [MappedRecord].
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult;
+
+    /// Produce a [MappedRecord] by reading from `reader` using the provided `ctx`
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self;
+
+    /// Write this [MappedRecord] to `writer` using the provided `ctx`; returns Ok(())
+    /// on success and propagates any errors otherwise.
     fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()>;
 }
 
@@ -90,7 +97,7 @@ pub struct AlevinFryRecordContext {
 
 impl RecordContext for AlevinFryRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
-    /// correspond to the length of the barcode and the UMI. Here, these are parsed from the
+    /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
     /// corresponding [TagSection].
     fn get_context_from_tag_section(
         _ft: &TagSection,
@@ -113,11 +120,13 @@ impl RecordContext for AlevinFryRecordContext {
 }
 
 impl AlevinFryRecordContext {
+    /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
     }
 }
 
+/// Context necessary for reading a piscem bulk record
 #[derive(Debug, Clone)]
 pub struct PiscemBulkRecordContext {
     pub frag_map_t: RadIntId,
@@ -162,8 +171,6 @@ impl MappedRecord for PiscemBulkReadRecord {
             positions: Vec::with_capacity(na as usize),
             frag_lengths: Vec::with_capacity(na as usize),
         };
-
-        //println!("number of records : {:?}",na);
 
         for _ in 0..(na as usize) {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
@@ -331,6 +338,9 @@ impl AlevinFryReadRecord {
         rec
     }
 
+    /// Reads the record header, consisting of the number of the barcode,
+    /// umi, and number of alignments for this record, from the provided `reader`,
+    /// using the provided [RadIntId] description for the barcode and umi types.
     #[inline]
     pub fn from_bytes_record_header<T: Read>(
         reader: &mut T,

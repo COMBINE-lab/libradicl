@@ -86,6 +86,10 @@ impl<R: MappedRecord> Chunk<R> {
         (nbytes, nrec)
     }
 
+    /// Write this chunk to the provided `writer`, which must implement [std::io::Seek].
+    /// This is because in order to write the number of bytes in the chunk, we need to know
+    /// the size of the final encoding.  Returns Ok(()) on sucess, or propagates any errors
+    /// otherwise.
     pub fn write<W: Write + Seek>(
         &self,
         writer: &mut W,
@@ -151,7 +155,6 @@ impl<R: MappedRecord> Chunk<R> {
         for _ in 0..(nrec as usize) {
             c.reads.push(R::from_bytes_with_context(reader, ctx));
         }
-
         c
     }
 
