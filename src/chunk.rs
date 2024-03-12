@@ -167,7 +167,8 @@ impl<R: MappedRecord> Chunk<R> {
 #[cfg(test)]
 mod tests {
     use crate::chunk::Chunk;
-    use crate::rad_types::{RadIntId, TagSection, TagSectionLabel};
+    use crate::header::{RadHeader, RadPrelude};
+    use crate::rad_types::{RadIntId, TagMap, TagSection, TagSectionLabel, TagValue};
     use crate::rad_types::{RadType, TagDesc};
     use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext, RecordContext};
     use std::io::Cursor;
@@ -210,8 +211,131 @@ mod tests {
             .write(&mut cursor, &ctx)
             .expect("couldn't write chunk");
 
-
         cursor.set_position(0);
+        let new_chunk = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
+        let new_chunk2 = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
+
+        assert_eq!(chunk, new_chunk);
+        assert_eq!(chunk, new_chunk2);
+    }
+
+    #[test]
+    fn can_write_af_file() {
+        // mock the header
+        let hdr = RadHeader {
+            is_paired: 0,
+            ref_count: 3,
+            ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
+            num_chunks: 2,
+        };
+
+        // describe the barcode and UMI length tags
+        let bc_desc = TagDesc {
+            name: "bclen".to_string(),
+            typeid: RadType::Int(RadIntId::U16),
+        };
+        let umi_desc = TagDesc {
+            name: "umilen".to_string(),
+            typeid: RadType::Int(RadIntId::U16),
+        };
+        let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
+        file_tags.add_tag_desc(bc_desc);
+        file_tags.add_tag_desc(umi_desc);
+
+        // per-read barcode and umi encoding
+        let rd_bc = TagDesc {
+            name: "b".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let rd_umi = TagDesc {
+            name: "u".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        read_tags.add_tag_desc(rd_bc);
+        read_tags.add_tag_desc(rd_umi);
+
+        // per alignment information
+        let aln_ent = TagDesc {
+            name: "compressed_ori_refid".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+        aln_tags.add_tag_desc(aln_ent);
+
+        // create the whole prelude
+        let prelude = RadPrelude {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        };
+
+        // create the buffer we will write into
+        let buf: Vec<u8> = Vec::new();
+        let mut cursor = Cursor::new(buf);
+
+        // write the prelude
+        let _ = prelude
+            .write(&mut cursor)
+            .expect("cannot write prelude to buffer");
+
+        // create and write the file tag map
+        // barcode length 16, umi length 12
+        let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
+        file_tag_map.add(TagValue::U16(16));
+        file_tag_map.add(TagValue::U16(12));
+        let _ = file_tag_map
+            .write_values(&mut cursor)
+            .expect("cannot write file tag map");
+
+        // the record that will comprise our chunks
+        let rec = AlevinFryReadRecord {
+            bc: 12345_u64,
+            umi: 6789_u64,
+            dirs: vec![true, true, true, false],
+            refs: vec![123, 456, 78, 910],
+        };
+
+        let ctx = AlevinFryRecordContext::get_context_from_tag_section(
+            &prelude.file_tags,
+            &prelude.read_tags,
+            &prelude.aln_tags,
+        )
+        .unwrap();
+        let chunk = Chunk::<AlevinFryReadRecord> {
+            nbytes: 148_u32,
+            nrec: 5_u32,
+            reads: vec![rec; 5],
+        };
+
+        // write the same chunk twice to ensure we're computing the
+        // chunk number of bytes and offsets correctly
+        chunk
+            .write(&mut cursor, &ctx)
+            .expect("couldn't write chunk");
+        chunk
+            .write(&mut cursor, &ctx)
+            .expect("couldn't write chunk");
+
+        // set to the start of the buffer
+        cursor.set_position(0);
+
+        // read in the prelude, the tag map and the chunks
+        let new_prelude =
+            RadPrelude::from_bytes(&mut cursor).expect("cannot read prelude from buffer");
+
+        let new_file_tag_map = &prelude
+            .file_tags
+            .try_parse_tags_from_bytes(&mut cursor)
+            .expect("cannot read file TagMap");
+
+        println!("new_prelude = {}", new_prelude.summary(None).unwrap());
+        println!("new_file_tag_map = {:?}", new_file_tag_map);
+
+        assert_eq!(prelude, new_prelude);
+        assert_eq!(&file_tag_map, new_file_tag_map);
+
         let new_chunk = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
         let new_chunk2 = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
 
