@@ -7,6 +7,9 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
+//! This module contains basic type-related information that doesn't fit cleanly into the other,
+//! more focused modules.
+
 use bio_types;
 
 #[allow(unused_imports)]

@@ -6,6 +6,11 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! This module contains types and traits related to RAD records, including the
+//! traits for [MappedRecord]s and [RecordContext]s. It also defines concrete types
+//! implementing these traits for `alevin-fry` and `piscem-infer`.
+
 use crate::{
     io as rad_io,
     rad_types::{MappedFragmentOrientation, MappingType, RadIntId, RadType, TagSection},

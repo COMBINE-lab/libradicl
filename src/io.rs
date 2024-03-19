@@ -6,6 +6,10 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! Free functions to help with reading and writing specific `libradicl` types
+//! into and out of primitive types.
+
 use crate::libradicl::rad_types::RadIntId;
 use anyhow::Context;
 use scroll::Pread;

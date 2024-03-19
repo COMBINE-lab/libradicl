@@ -7,6 +7,11 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
+//! This module contains the relevant structures and traits for most of the **core**
+//! RAD types. This includes the integer, numeric and composite types, as well as
+//! other relevant types built from them (e.g. [TagSection]s). It also contains the
+//! types and traits related to parsing and writing values of specific types.
+
 use crate::{self as libradicl, constants};
 use anyhow::{self, bail, Context};
 use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool, write_tag_value_array};
