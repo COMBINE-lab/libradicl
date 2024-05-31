@@ -154,7 +154,9 @@ impl RadHeader {
         for rn in self.ref_names.iter().take(refs_to_print) {
             writeln!(&mut s, "  ref: {}", rn)?;
         }
-        writeln!(&mut s, "  ...")?;
+        if refs_to_print < self.ref_count as usize {
+            writeln!(&mut s, "  ...")?;
+        }
 
         writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
         writeln!(&mut s, "}}")?;
