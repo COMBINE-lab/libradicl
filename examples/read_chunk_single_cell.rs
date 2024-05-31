@@ -34,5 +34,23 @@ fn main() -> anyhow::Result<()> {
         first_chunk.nrec
     );
 
+    let mut total_rec = first_chunk.nrec as usize;
+    let mut total_bytes = first_chunk.nbytes as usize;
+    let mut total_chunks = 1;
+
+    while total_chunks < p.hdr.num_chunks {
+        let chunk = Chunk::<AlevinFryReadRecord>::from_bytes(&mut ifile, &tag_context);
+        total_rec += chunk.nrec as usize;
+        total_bytes += chunk.nbytes as usize;
+        total_chunks += 1;
+        if total_chunks % 500 == 0 {
+            println!(r"read {total_chunks} chunks");
+        }
+    }
+
+    println!(
+        r"read a total of {total_chunks} chunks, comprising {total_rec} records and {total_bytes} bytes."
+    );
+
     Ok(())
 }
