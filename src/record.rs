@@ -38,6 +38,15 @@ pub struct PiscemBulkReadRecord {
     pub frag_lengths: Vec<u16>,
 }
 
+#[derive(Debug)]
+pub struct AtacSeqReadRecord {
+    pub bc: u64,
+    pub start_pos: Vec<u32>,
+    pub refs: Vec<u32>,
+    pub frag_lengths: Vec<u16>,
+    pub map_type: Vec<u8>
+}
+
 /// This trait represents a mapped read record that should be stored
 /// in the [crate::chunk::Chunk] of a RAD file.  The [crate::chunk::Chunk] type is parameterized on
 /// some concrete struct that must implement this [MappedRecord] trait.
@@ -126,7 +135,7 @@ impl RecordContext for PiscemBulkRecordContext {
     ) -> anyhow::Result<Self> {
         let frag_map_t = rt
             .get_tag_type("frag_map_type")
-            .expect("psicem bulk record cantext requires a \"frag_map_type\" read-level tag");
+            .expect("psicem bulk record context requires a \"frag_map_type\" read-level tag");
         if let RadType::Int(x) = frag_map_t {
             Ok(Self { frag_map_t: x })
         } else {
@@ -337,5 +346,152 @@ impl AlevinFryReadRecord {
     ) -> Self {
         let (bc, umi, na) = Self::from_bytes_record_header(reader, bct, umit);
         Self::from_bytes_with_header_keep_ori(reader, bc, umi, na, expected_ori)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AtacSeqRecordContext {
+    pub bct: RadIntId
+}
+
+impl RecordContext for AtacSeqRecordContext {
+    /// Currently, the [AtacSeqRecordContext] only cares about and provides the read tags that
+    /// correspond to the length of the barcode. Here, these are parsed from the
+    /// corresponding [TagSection].
+    fn get_context_from_tag_section(
+        _ft: &TagSection,
+        rt: &TagSection,
+        _at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        // the tags we expect to exist
+        let bct = rt
+            .get_tag_type("barcode")
+            .expect("atac-reader record context requires a \'barcode\' read-level tag");
+        
+        if let RadType::Int(x) = bct {
+            Ok(Self { bct: x})
+        } else {
+            bail!("atac-reader record context requires that barcode tags are of type RadType::Int");
+        }
+    }
+}
+
+impl AtacSeqRecordContext {
+    pub fn from_bct(bct: RadIntId) -> Self {
+        Self { bct }
+    }
+}
+
+impl MappedRecord for AtacSeqReadRecord {
+    type ParsingContext = AtacSeqRecordContext;
+    type PeekResult = u64;
+
+    #[inline]
+    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
+        let na_size = mem::size_of::<u32>();
+        // let bc_size = ctx.bct.bytes_for_type();
+
+        let _na = buf.pread::<u32>(0).unwrap();
+
+        let bc = match ctx.bct {
+            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
+        };
+        
+        bc
+    }
+
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        let (bc, na) = Self::from_bytes_record_header(reader, &ctx.bct);
+        println!("bc na {} {}", bc, na);
+        let mut rec = Self {
+            bc,
+            refs: Vec::with_capacity(na as usize),
+            map_type: Vec::with_capacity(na as usize),
+            start_pos: Vec::with_capacity(na as usize),
+            frag_lengths: Vec::with_capacity(na as usize)
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let ref_id = rbuf.pread::<u32>(0).unwrap();
+            println!("ref_id {}", ref_id);
+            rec.refs.push(ref_id);
+            reader.read_exact(&mut rbuf[0..1]).unwrap();
+            let map_type = rbuf.pread::<u8>(0).unwrap();
+            println!("type {}", map_type);
+            rec.map_type.push(map_type);
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let start_pos = rbuf.pread::<u32>(0).unwrap();
+            rec.start_pos.push(start_pos);
+            println!("start_pos {}", start_pos);
+            reader.read_exact(&mut rbuf[0..2]).unwrap();
+            let frag_length = rbuf.pread::<u16>(0).unwrap();
+            rec.frag_lengths.push(frag_length);
+            println!("frag {}", frag_length);
+            
+        }
+        rec
+    }
+}
+
+impl AtacSeqReadRecord {
+    /// Returns `true` if this [AtacSeqReadRecord] contains no references and
+    /// `false` otherwise.
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+
+    /// Obtains the next [AtacSeqReadRecord] in the stream from the reader `reader`.
+    /// The barcode should be encoded with the [RadIntId] type `bct` and
+    pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        let (bc, na) = Self::from_bytes_record_header(reader, bct);
+
+        let mut rec = Self {
+            bc,
+            refs: Vec::with_capacity(na as usize),
+            map_type: Vec::with_capacity(na as usize),
+            start_pos: Vec::with_capacity(na as usize),
+            frag_lengths: Vec::with_capacity(na as usize)
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let ref_id = rbuf.pread::<u32>(0).unwrap();
+            
+            rec.refs.push(ref_id);
+            reader.read_exact(&mut rbuf[0..1]).unwrap();
+            let map_type = rbuf.pread::<u8>(0).unwrap();
+            
+            rec.map_type.push(map_type);
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let start_pos = rbuf.pread::<u32>(0).unwrap();
+            
+            rec.start_pos.push(start_pos);
+            reader.read_exact(&mut rbuf[0..2]).unwrap();
+            let frag_length = rbuf.pread::<u16>(0).unwrap();
+            rec.frag_lengths.push(frag_length);
+            
+        }
+        rec
+    }
+
+    #[inline]
+    pub fn from_bytes_record_header<T: Read>(
+        reader: &mut T,
+        bct: &RadIntId
+    ) -> (u64, u32) {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
+        let bc = rad_io::read_into_u64(reader, bct);
+        (bc, na)
     }
 }

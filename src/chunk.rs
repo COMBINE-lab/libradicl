@@ -66,6 +66,7 @@ impl<R: MappedRecord> Chunk<R> {
     #[inline]
     pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ParsingContext) -> Self {
         let (nbytes, nrec) = Self::read_header(reader);
+        println!("nbytes {} {}", nbytes, nrec);
         let mut c = Self {
             nbytes,
             nrec,
