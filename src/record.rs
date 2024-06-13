@@ -408,7 +408,6 @@ impl MappedRecord for AtacSeqReadRecord {
         let mut rbuf = [0u8; 255];
 
         let (bc, na) = Self::from_bytes_record_header(reader, &ctx.bct);
-        println!("bc na {} {}", bc, na);
         let mut rec = Self {
             bc,
             refs: Vec::with_capacity(na as usize),
@@ -420,20 +419,20 @@ impl MappedRecord for AtacSeqReadRecord {
         for _ in 0..(na as usize) {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let ref_id = rbuf.pread::<u32>(0).unwrap();
-            println!("ref_id {}", ref_id);
+            // println!("ref_id {}", ref_id);
             rec.refs.push(ref_id);
             reader.read_exact(&mut rbuf[0..1]).unwrap();
             let map_type = rbuf.pread::<u8>(0).unwrap();
-            println!("type {}", map_type);
+            // println!("type {}", map_type);
             rec.map_type.push(map_type);
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let start_pos = rbuf.pread::<u32>(0).unwrap();
             rec.start_pos.push(start_pos);
-            println!("start_pos {}", start_pos);
+            // println!("start_pos {}", start_pos);
             reader.read_exact(&mut rbuf[0..2]).unwrap();
             let frag_length = rbuf.pread::<u16>(0).unwrap();
             rec.frag_lengths.push(frag_length);
-            println!("frag {}", frag_length);
+            // println!("frag {}", frag_length);
             
         }
         rec

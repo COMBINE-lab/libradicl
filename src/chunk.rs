@@ -66,14 +66,15 @@ impl<R: MappedRecord> Chunk<R> {
     #[inline]
     pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ParsingContext) -> Self {
         let (nbytes, nrec) = Self::read_header(reader);
-        println!("nbytes {} {}", nbytes, nrec);
+        // println!("nbytes {} {}", nbytes, nrec);
         let mut c = Self {
             nbytes,
             nrec,
             reads: Vec::<R>::with_capacity(nrec as usize),
         };
 
-        for _ in 0..(nrec as usize) {
+        for i in 0..(nrec as usize) {
+            // println!("nrec {} ", i);
             c.reads.push(R::from_bytes_with_context(reader, ctx));
         }
 
