@@ -71,16 +71,17 @@ impl RadHeader {
     /// an [anyhow::Error] explaining the failure to parse the [RadHeader].
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<RadHeader> {
         let mut rh = RadHeader::new();
-
+        
         // size of the longest allowable string.
-        let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
+        let mut buf = [0u8; constants:: MAX_REF_NAME_LEN];
+        // reader.read_exact(&mut buf[0..1])?;
         reader.read_exact(&mut buf[0..9])?;
+        
         rh.is_paired = buf.pread(0)?;
         rh.ref_count = buf.pread::<u64>(1)?;
-
         // we know how many names we will read in.
         rh.ref_names.reserve_exact(rh.ref_count as usize);
-
+        
         let mut num_read = 0u64;
         while num_read < rh.ref_count {
             // the length of the string
