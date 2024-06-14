@@ -1,8 +1,7 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::io::BufReader;
 use libradicl::{
+    utils,
     header::{RadPrelude},
     record::{AtacSeqReadRecord, AtacSeqRecordContext},
 };
@@ -15,19 +14,24 @@ fn main() {
     if let Ok(summary) = p.summary(None) {
         println!("{}", summary);
     }
-    let tag_map = p.file_tags.parse_tags_from_bytes_checked(&mut ifile).unwrap();
+    let tag_map = p.file_tags.parse_tags_from_bytes(&mut ifile).unwrap();
     println!("tag map {:?}\n", tag_map);
+    println!("num chunks = {:?}\n", p.hdr.num_chunks());
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.
     let tag_context = p.get_record_context::<AtacSeqRecordContext>().unwrap();
-    let first_chunk = Chunk::<AtacSeqReadRecord>::from_bytes(&mut ifile, &tag_context);
-    println!(
-        "Chunk :: nbytes: {}, nrecs: {}",
-        first_chunk.nbytes, first_chunk.nrec
-    );
-    assert_eq!(first_chunk.nrec as usize, first_chunk.reads.len());
-    for (i, r) in first_chunk.reads.iter().take(10).enumerate() {
-        println!("record {i}: {:?}", r);
+    println!("tag context = {:?}", tag_context);
+
+    while utils::has_data_left(&mut ifile).expect("encountered error reading input file") {
+        let next_chunk = Chunk::<AtacSeqReadRecord>::from_bytes(&mut ifile, &tag_context);
+        println!(
+            "Chunk :: nbytes: {}, nrecs: {}",
+            next_chunk.nbytes, next_chunk.nrec
+        );
+        assert_eq!(next_chunk.nrec as usize, next_chunk.reads.len());
+        for (i, r) in next_chunk.reads.iter().take(10).enumerate() {
+            println!("record {i}: {:?}", r);
+        }
     }
 
 }

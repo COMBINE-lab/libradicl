@@ -74,6 +74,7 @@ pub struct AlevinFryChunkContext {
 impl ChunkContext for AlevinFryChunkContext {}
 
 impl<R: MappedRecord> Chunk<R> {
+
     /// Read the header of the next [Chunk] from the provided `reader`. This
     /// function returns a tuple representing the number of bytes and number of
     /// records, respectively, in the chunk.
@@ -153,8 +154,7 @@ impl<R: MappedRecord> Chunk<R> {
             reads: Vec::<R>::with_capacity(nrec as usize),
         };
 
-        for i in 0..(nrec as usize) {
-            // println!("nrec {} ", i);
+        for _i in 0..(nrec as usize) {
             c.reads.push(R::from_bytes_with_context(reader, ctx));
         }
         c

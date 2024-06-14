@@ -65,6 +65,12 @@ impl RadHeader {
         }
     }
 
+    /// If the number of chunks is known, then it returns 
+    /// Some(num_chunks), if not, then it returns None.
+    pub fn num_chunks(&self) -> Option<std::num::NonZeroUsize> {
+        std::num::NonZeroUsize::new(self.num_chunks as usize)
+    }
+
     /// Create and return a new [RadHeader] by reading the contents of the
     /// `reader`. If the reader is positioned such that a valid [RadHeader] comes
     /// next, then this function returns [Ok(RadHeader)], otherwise, it returns

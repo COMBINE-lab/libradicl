@@ -470,14 +470,12 @@ impl MappedRecord for AtacSeqReadRecord {
 
         let _na = buf.pread::<u32>(0).unwrap();
 
-        let bc = match ctx.bct {
+        match ctx.bct {
             RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
             RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
             RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
-        };
-        
-        bc
+        }
     }
 
     #[inline]
@@ -514,6 +512,44 @@ impl MappedRecord for AtacSeqReadRecord {
         }
         rec
     }
+
+    #[inline]
+    fn write<W: Write>(&self, _writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        todo!();
+        /*
+        let na: u32 = self.refs.len().try_into()?;
+        // first write the number of alignments
+        writer
+            .write_all(&na.to_le_bytes())
+            .context("couldn't write number of alignments for record")?;
+
+        let fmt: u8 = self.frag_type;
+        writer
+            .write_all(&fmt.to_le_bytes())
+            .context("couldn't write frag_map_t for the record")?;
+
+        for (dir, ref_idx, pos, length) in
+            itertools::izip!(&self.dirs, &self.refs, &self.positions, &self.frag_lengths)
+        {
+            // pack info about the mapped type into the
+            // higher order bits. First get the encoding
+            // then shift it to the left.
+            let encoded_dir: u32 = (*dir).into();
+            let encoded_dir_idx: u32 = (encoded_dir << 30) | ref_idx;
+            writer
+                .write_all(&encoded_dir_idx.to_le_bytes())
+                .context("couldn't write frag_map_type and ref for record")?;
+            writer
+                .write_all(&pos.to_le_bytes())
+                .context("couldn't write position for record")?;
+            writer
+                .write_all(&length.to_le_bytes())
+                .context("couldn't write fragment length for record")?;
+        }
+        Ok(())
+        */
+    }
+
 }
 
 impl AtacSeqReadRecord {
