@@ -6,22 +6,27 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! This module contains types and traits related to RAD records, including the
+//! traits for [MappedRecord]s and [RecordContext]s. It also defines concrete types
+//! implementing these traits for `alevin-fry` and `piscem-infer`.
+
 use crate::{
     io as rad_io,
     rad_types::{MappedFragmentOrientation, MappingType, RadIntId, RadType, TagSection},
     utils,
 };
-use anyhow::{self, bail};
+use anyhow::{self, bail, Context};
 use bio_types::strand::*;
 use scroll::Pread;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::mem;
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
 /// This represents the set of alignments and relevant information
 /// for a basic alevin-fry record.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlevinFryReadRecord {
     pub bc: u64,
     pub umi: u64,
@@ -29,6 +34,10 @@ pub struct AlevinFryReadRecord {
     pub refs: Vec<u32>,
 }
 
+/// A concrete struct representing a [MappedRecord] for
+/// reads processed upstream with `piscem`. This represents a set of
+/// alignments and relevant information for a basic piscem bulk
+/// record.
 #[derive(Debug)]
 pub struct PiscemBulkReadRecord {
     pub frag_type: u8,
@@ -64,8 +73,16 @@ pub trait MappedRecord {
     /// to peek at the next record in the input stream.
     type PeekResult;
 
+    /// Peek into the provided buffer `buf`, and return the [Self::PeekResult] for this
+    /// [MappedRecord].
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult;
+
+    /// Produce a [MappedRecord] by reading from `reader` using the provided `ctx`
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self;
+
+    /// Write this [MappedRecord] to `writer` using the provided `ctx`; returns Ok(())
+    /// on success and propagates any errors otherwise.
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()>;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -94,7 +111,7 @@ pub struct AlevinFryRecordContext {
 
 impl RecordContext for AlevinFryRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
-    /// correspond to the length of the barcode and the UMI. Here, these are parsed from the
+    /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
     /// corresponding [TagSection].
     fn get_context_from_tag_section(
         _ft: &TagSection,
@@ -117,11 +134,13 @@ impl RecordContext for AlevinFryRecordContext {
 }
 
 impl AlevinFryRecordContext {
+    /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
     }
 }
 
+/// Context necessary for reading a piscem bulk record
 #[derive(Debug, Clone)]
 pub struct PiscemBulkRecordContext {
     pub frag_map_t: RadIntId,
@@ -167,8 +186,6 @@ impl MappedRecord for PiscemBulkReadRecord {
             frag_lengths: Vec::with_capacity(na as usize),
         };
 
-        //println!("number of records : {:?}",na);
-
         for _ in 0..(na as usize) {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let v = rbuf.pread::<u32>(0).unwrap();
@@ -193,6 +210,40 @@ impl MappedRecord for PiscemBulkReadRecord {
     #[inline]
     fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
         unimplemented!("Currently there is no implementation for peek_record for PiscemBulkReadRecord. This should not be needed");
+    }
+
+    #[inline]
+    fn write<W: Write>(&self, writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len().try_into()?;
+        // first write the number of alignments
+        writer
+            .write_all(&na.to_le_bytes())
+            .context("couldn't write number of alignments for record")?;
+
+        let fmt: u8 = self.frag_type;
+        writer
+            .write_all(&fmt.to_le_bytes())
+            .context("couldn't write frag_map_t for the record")?;
+
+        for (dir, ref_idx, pos, length) in
+            itertools::izip!(&self.dirs, &self.refs, &self.positions, &self.frag_lengths)
+        {
+            // pack info about the mapped type into the
+            // higher order bits. First get the encoding
+            // then shift it to the left.
+            let encoded_dir: u32 = (*dir).into();
+            let encoded_dir_idx: u32 = (encoded_dir << 30) | ref_idx;
+            writer
+                .write_all(&encoded_dir_idx.to_le_bytes())
+                .context("couldn't write frag_map_type and ref for record")?;
+            writer
+                .write_all(&pos.to_le_bytes())
+                .context("couldn't write position for record")?;
+            writer
+                .write_all(&length.to_le_bytes())
+                .context("couldn't write fragment length for record")?;
+        }
+        Ok(())
     }
 }
 
@@ -244,6 +295,29 @@ impl MappedRecord for AlevinFryReadRecord {
         }
         rec
     }
+
+    #[inline]
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len() as u32;
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for record")?;
+
+        for (dir, ref_idx) in itertools::izip!(&self.dirs, &self.refs) {
+            let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
+            let encoded_dir_ref: u32 = ref_idx | encoded_dir;
+            writer
+                .write_all(&encoded_dir_ref.to_le_bytes())
+                .context("couldn't write compressed_ori_refid for record")?;
+        }
+        Ok(())
+    }
 }
 
 impl AlevinFryReadRecord {
@@ -278,6 +352,9 @@ impl AlevinFryReadRecord {
         rec
     }
 
+    /// Reads the record header, consisting of the number of the barcode,
+    /// umi, and number of alignments for this record, from the provided `reader`,
+    /// using the provided [RadIntId] description for the barcode and umi types.
     #[inline]
     pub fn from_bytes_record_header<T: Read>(
         reader: &mut T,
@@ -494,3 +571,45 @@ impl AtacSeqReadRecord {
         (bc, na)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::rad_types::{RadIntId, TagSection, TagSectionLabel};
+    use crate::rad_types::{RadType, TagDesc};
+    use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext, MappedRecord, RecordContext};
+    use std::io::Cursor;
+
+    #[test]
+    fn can_write_af_record() {
+        let rec = AlevinFryReadRecord {
+            bc: 12345_u64,
+            umi: 6789_u64,
+            dirs: vec![true, true, true, false],
+            refs: vec![123, 456, 78, 910],
+        };
+
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(TagDesc {
+            name: "b".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        rt.add_tag_desc(TagDesc {
+            name: "u".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        let ctx = AlevinFryRecordContext::get_context_from_tag_section(&ft, &rt, &at).unwrap();
+
+        let mut buf: Vec<u8> = Vec::new();
+        rec.write(&mut buf, &ctx).expect("couldn't write record");
+
+        let mut cursor = Cursor::new(buf);
+        let new_rec = AlevinFryReadRecord::from_bytes_with_context(&mut cursor, &ctx);
+
+        //println!("rec = {:?}, new_rec = {:?}", rec, new_rec);
+        assert_eq!(rec, new_rec);
+    }
+}
+

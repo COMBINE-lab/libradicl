@@ -7,9 +7,14 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
+//! This module contains the relevant structures and traits for most of the **core**
+//! RAD types. This includes the integer, numeric and composite types, as well as
+//! other relevant types built from them (e.g. [TagSection]s). It also contains the
+//! types and traits related to parsing and writing values of specific types.
+
 use crate::{self as libradicl, constants};
-use anyhow::{self, bail};
-use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool};
+use anyhow::{self, bail, Context};
+use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool, write_tag_value_array};
 use num::cast::AsPrimitive;
 use scroll::Pread;
 
@@ -17,7 +22,11 @@ use std::io::Read;
 use std::io::Write;
 use std::mem;
 
-#[derive(Clone, Debug)]
+/// A **description** for a type tag. This  specifies the name
+/// that the tag should be given, and the type of value that it
+/// holds.  At other points in the file, when this tag is used
+/// it will conform to this type description.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagDesc {
     pub name: String,
     pub typeid: RadType,
@@ -32,34 +41,38 @@ impl TagDesc {
             .name
             .len()
             .try_into()
-            .expect("TagDesc name must have size < 65536");
+            .context("TagDesc name must have size < 65536")?;
         writer
             .write_all(&name_len.to_le_bytes())
-            .expect("could not write name length to writer");
+            .context("could not write name length to writer")?;
         writer
             .write_all(self.name.as_bytes())
-            .expect("could not write name to writer");
+            .context("could not write name to writer")?;
 
         let type_enc: u8 =
-            encode_type_tag(self.typeid).expect("RadType tag doesn't have valid encoding");
+            encode_type_tag(self.typeid).context("RadType tag doesn't have valid encoding")?;
         writer
             .write_all(&type_enc.to_le_bytes())
-            .expect("could not write name length to writer");
+            .context("could not write name length to writer")?;
         if let RadType::Array(len_t, val_t) = self.typeid {
             let len_id: u8 = len_t.into();
             let val_id: u8 = val_t.into();
             writer
                 .write_all(&len_id.to_le_bytes())
-                .expect("could not write Array length type");
+                .context("could not write Array length type")?;
             writer
                 .write_all(&val_id.to_le_bytes())
-                .expect("could not write Array value type");
+                .context("could not write Array value type")?;
         };
         Ok(())
     }
 }
 
-#[derive(Clone, Debug)]
+/// A label of the type of a [TagSection]. The RAD format
+/// has file, read, and alignment-level tags, though the
+/// `Unlabeled` variant is reserved for potential other
+/// applications.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TagSectionLabel {
     FileTags,
     ReadTags,
@@ -69,7 +82,7 @@ pub enum TagSectionLabel {
 
 /// A [TagSection] consists of a series of [TagDesc]s that are
 /// logically grouped together as tags for a specific unit
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagSection {
     pub label: TagSectionLabel,
     pub tags: Vec<TagDesc>,
@@ -99,22 +112,13 @@ impl TagSection {
             .unwrap_or_else(|_| panic!("should have < {} tags", u16::MAX));
         writer
             .write_all(&num_tags.to_le_bytes())
-            .expect("couldn't write number of tags to writer");
+            .context("couldn't write number of tags to writer")?;
 
         for tag in &self.tags {
             tag.write(writer)?;
         }
         Ok(())
     }
-}
-
-/// The below are currently hard-coded
-/// until we decide how to solve this
-/// generally
-#[derive(Debug)]
-pub struct FileTags {
-    pub bclen: u16,
-    pub umilen: u16,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -394,6 +398,9 @@ impl RadType {
         matches!(self, Self::Int(_))
     }
 
+    /// Reads a [RadType] from the provided reader `r`.
+    /// **Note**: This function expects that a valid [RadType] encoding
+    /// must occur next within `r`, and panics if this is not the case.
     pub fn from_bytes<R: Read>(r: &mut R) -> Self {
         // read the type id
         let mut type_num = 0_u8;
@@ -411,6 +418,30 @@ impl RadType {
             RadType::Array(len_type, member_type)
         } else {
             type_num.into()
+        }
+    }
+
+    /// Reads a [RadType] from the provided reader `r`.
+    /// This function expects that a valid [RadType] encoding
+    /// must occur next within `r`; it returns an [Ok(RadType)] if this
+    /// is the case and propagates encountered errors otherwise.
+    pub fn try_from_bytes<R: Read>(r: &mut R) -> anyhow::Result<Self> {
+        // read the type id
+        let mut type_num = 0_u8;
+        r.read_exact(std::slice::from_mut(&mut type_num))
+            .context("cannot read RadType id from file")?;
+        if type_num == 7 {
+            let mut len_id = 0_u8;
+            let mut member_id = 0_u8;
+            r.read_exact(std::slice::from_mut(&mut len_id))
+                .context("cannot read Array length type from file")?;
+            r.read_exact(std::slice::from_mut(&mut member_id))
+                .context("cannot read Array value type from file")?;
+            let len_type: RadIntId = len_id.into();
+            let member_type: RadAtomicId = member_id.into();
+            Ok(RadType::Array(len_type, member_type))
+        } else {
+            Ok(type_num.into())
         }
     }
 }
@@ -577,20 +608,6 @@ impl From<u32> for MappedFragmentOrientation {
     }
 }
 
-impl FileTags {
-    /// Reads the FileTags from the provided `reader` and return the
-    /// barcode length and umi length
-    pub fn from_bytes<T: Read>(reader: &mut T) -> Self {
-        let mut buf = [0u8; 4];
-        reader.read_exact(&mut buf).unwrap();
-
-        Self {
-            bclen: buf.pread::<u16>(0).unwrap(),
-            umilen: buf.pread::<u16>(2).unwrap(),
-        }
-    }
-}
-
 /// Convert from a u8 to the corresponding RadType.
 /// This will only work for *non-aggregate* types
 /// (i.e. it will not work for the array type, since
@@ -641,32 +658,157 @@ tag_value_try_into_int!(u16);
 tag_value_try_into_int!(u32);
 tag_value_try_into_int!(u64);
 
+impl TagValue {
+    /// Write this tag value to the provided writer
+    #[inline]
+    pub fn write_with_type<W: Write>(
+        &self,
+        tag_type: &RadType,
+        writer: &mut W,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Bool(b) => {
+                let b = if *b { 1_u8 } else { 0_u8 };
+                writer
+                    .write_all(&b.to_le_bytes())
+                    .context("couldn't write Bool tag value")?;
+            }
+            Self::U8(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::U16(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::U32(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::U64(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::F32(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::F64(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U8 tag value")?;
+            }
+            Self::ArrayBool(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, bool, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU8(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u8, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU16(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u16, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU32(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u32, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU64(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u64, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayF32(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, f32, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayF64(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, f64, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayString(_vb) => {
+                todo!("Not yet implemented")
+            }
+            Self::String(s) => {
+                let slen: u16 = s.len() as u16;
+                writer
+                    .write_all(&slen.to_le_bytes())
+                    .context("couldn't write String tag value's length")?;
+                writer
+                    .write_all(s.as_bytes())
+                    .context("couldn't write String tag value's content")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl TagDesc {
     /// Attempts to read a [TagDesc] from the provided `reader`. If the
     /// `reader` is positioned at the start of a valid [TagDesc], then this
     /// [TagDesc] is returned.  Otherwise, a description of the error is returned
     /// via an [anyhow::Error].
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<TagDesc> {
-        // space for the string length (1 byte)
+        // space for the string length (2 bytes)
         // the longest string possible (255 char)
         // and the typeid
         let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
-        reader.read_exact(&mut buf[0..2])?;
+        reader
+            .read_exact(&mut buf[0..2])
+            .context("failed to read the string length for the Tag Description.")?;
         let str_len = buf.pread::<u16>(0)? as usize;
 
         // read str_len + 1 to get the type id that follows the string
-        reader.read_exact(&mut buf[0..str_len + 1])?;
-        let name = std::str::from_utf8(&buf[0..str_len])?.to_string();
-        let typeid = buf.pread(str_len)?;
+        reader
+            .read_exact(&mut buf[0..str_len + 1])
+            .context("failed to read string name or type-id from Tag Description.")?;
+        let name = std::str::from_utf8(&buf[0..str_len])
+            .context("failed to convert string name to a valid string.")?
+            .to_string();
+        let typeid = buf
+            .pread(str_len)
+            .context("failed to read RadType id from the buffer.")?;
         // if the type id is 7, need to read the types of
         // the length and element type, otherwise just turn the
         // id into a proper RatType and we're done.
         let rad_t = match typeid {
             0..=6 | 8 => typeid.into(),
             7 => {
-                reader.read_exact(&mut buf[0..2])?;
-                let t1: RadIntId = buf.pread::<u8>(0)?.into();
-                let t2: RadAtomicId = buf.pread::<u8>(1)?.into();
+                reader.read_exact(&mut buf[0..2]).context("failed to read aggregate type parameters (array length and element types) from the reader.")?;
+                let t1: RadIntId = buf
+                    .pread::<u8>(0)
+                    .context("failed to parse the array length type")?
+                    .into();
+                let t2: RadAtomicId = buf
+                    .pread::<u8>(1)
+                    .context("failed to parse the array value type")?
+                    .into();
                 RadType::Array(t1, t2)
             }
             _ => {
@@ -764,6 +906,8 @@ impl TagDesc {
                 let slen = small_buf.pread::<u16>(0).unwrap();
                 let mut dat: Vec<u8> = vec![0_u8; slen as usize];
                 let _ = reader.read_exact(dat.as_mut_slice());
+                // safety: a *valid* input RAD file will only have written a
+                // valid utf8 string into the file at this position.
                 let s = unsafe { String::from_utf8_unchecked(dat) };
                 TagValue::String(s)
             }
@@ -800,7 +944,7 @@ impl TagDesc {
 /// values conforming to these descriptions (i.e. in terms of types). The
 /// [TagMap] allows you to fetch the value for a specific tag by name or index, or
 /// to add values to a corresponding set of descriptions.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TagMap<'a> {
     keys: &'a [TagDesc],
     dat: Vec<TagValue>,
@@ -819,14 +963,12 @@ impl<'a> TagMap<'a> {
 
     /// Try to add the next tag value. If there is space and the type
     /// matches, add it and return `true`, otherwise return `false`.
-    pub fn add_checked(&mut self, val: TagValue) -> bool {
+    pub fn try_add(&mut self, val: TagValue) -> anyhow::Result<()> {
         let next_idx = self.dat.len();
-        if next_idx >= self.keys.len() || !self.keys[next_idx].matches_value_type(&val) {
-            false
-        } else {
-            self.dat.push(val);
-            true
-        }
+        anyhow::ensure!(next_idx < self.keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", self.keys.len());
+        anyhow::ensure!(self.keys[next_idx].matches_value_type(&val), "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}", self.keys[next_idx]);
+        self.dat.push(val);
+        Ok(())
     }
 
     /// add the next TagValue to the data for this TagMap.
@@ -853,6 +995,16 @@ impl<'a> TagMap<'a> {
     /// is in bounds and None otherwise.
     pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
         self.dat.get(idx)
+    }
+
+    /// writes the values contained in this [TagMap], in order, to the provided
+    /// writer, propagating any errors or returning Ok(()) on success.
+    pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        for (n, v) in self.keys.iter().zip(self.dat.iter()) {
+            v.write_with_type(&n.typeid, writer)
+                .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
+        }
+        Ok(())
     }
 }
 
@@ -899,10 +1051,12 @@ impl TagSection {
         Ok(ts)
     }
 
+    /// Parse a set of tag **values**, having types described by this [TagSection], from the
+    /// provided `reader`. This function returns the [TagMap] on success, or an error if the
+    /// map could not be produced.
     pub fn parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
-        //let mut tv = Vec::<TagValue>::new();
         let mut tm = TagMap::with_keyset(&self.tags);
         for tag_desc in &self.tags {
             tm.add(tag_desc.value_from_bytes(reader));
@@ -910,19 +1064,25 @@ impl TagSection {
         Ok(tm)
     }
 
-    pub fn parse_tags_from_bytes_checked<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
+    /// Parse a set of tag **values**, having types described by this [TagSection], from the
+    /// provided `reader`. This function returns the [TagMap] on success, or an error if the
+    /// map could not be produced. It propagates more errors than does `parse_tags_from_bytes`
+    /// by checking that the number of values in this [TagMap] never exceeds the size of the
+    /// `keyset`.
+    pub fn try_parse_tags_from_bytes<T: Read>(&self, reader: &mut T) -> anyhow::Result<TagMap> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
         //let mut tv = Vec::<TagValue>::new();
         let mut tm = TagMap::with_keyset(&self.tags);
         for tag_desc in &self.tags {
-            if !tm.add_checked(tag_desc.value_from_bytes(reader)) {
-                panic!("Tried to read value for non-matching type");
-            }
+            tm.try_add(tag_desc.value_from_bytes(reader))?;
         }
         Ok(tm)
     }
 
+    /// return the [RadType] associated with the tag having the provided
+    /// `name`. Returns [Some(RadType)] if the tag exists in the map and
+    /// [None] otherwise.
     pub fn get_tag_type(&self, name: &str) -> Option<RadType> {
         for td in &self.tags {
             if name == td.name {
@@ -1048,7 +1208,7 @@ mod tests {
         );
 
         let map = tag_sec
-            .parse_tags_from_bytes_checked(&mut buf.as_slice())
+            .try_parse_tags_from_bytes(&mut buf.as_slice())
             .unwrap();
         assert_eq!(
             map.get("mytag").unwrap(),

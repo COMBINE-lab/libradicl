@@ -7,6 +7,26 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
+//! `libradicl` is a crate for reading (and writing) RAD (Reduced Alignment Data) format
+//! files.  The RAD format is a binary format designed to encode alignment information
+//! about sequencing reads and how they map to a set of targets (a genome, metagenome,
+//! transcriptome, etc.). The format is "reduced" because it is allowed to contain sparser
+//! information than e.g. a [SAM](https://samtools.github.io/hts-specs/) format file.
+//!
+//!
+//! While the eventual goal of this crate is to provide a generic API to read and write RAD
+//! files that may be designed for any purpose, it is driven mostly by our (the [COMBINE-lab's](https://combine-lab.github.io/))
+//! needs within the tools we produce that use the RAD format (e.g. [`alevin-fry`](https://github.com/COMBINE-lab/alevin-fry) and
+//! [`piscem-infer`](https://github.com/COMBINE-lab/alevin-fry)).  Thus, features are generally
+//! developed and added in the order that is most urgent to the development of these tools.
+//! However, we welcome external contributions via pull requests, and are happy to discuss
+//! your potential use cases for the RAD format, and how they might be supported.
+//!
+//! This crate is broken into several components that cover the various parts of RAD files
+//! including the type tag system, the header, and the main data chunks.  The names of
+//! each module are fairly self-explanatory.
+//!
+
 // scroll now, explore nom later
 
 use crate as libradicl;
@@ -230,23 +250,6 @@ impl BarcodeLookupMap {
     }
 }
 
-impl CorrectedCbChunk {
-    pub fn from_label_and_counter(corrected_bc_in: u64, num_remain: u32) -> CorrectedCbChunk {
-        let mut cc = CorrectedCbChunk {
-            remaining_records: num_remain,
-            corrected_bc: corrected_bc_in,
-            nrec: 0u32,
-            data: Cursor::new(Vec::<u8>::with_capacity((num_remain * 24) as usize)), //umis: Vec::<u64>::with_capacity(num_remain as usize),
-                                                                                     //ref_offsets: Vec::<u32>::with_capacity(num_remain as usize),
-                                                                                     //ref_ids: Vec::<u32>::with_capacity(3 * num_remain as usize),
-        };
-        let dummy = 0u32;
-        cc.data.write_all(&dummy.to_le_bytes()).unwrap();
-        cc.data.write_all(&dummy.to_le_bytes()).unwrap();
-        cc
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct GlobalEqCellList {
     cell_ids: Vec<usize>,
@@ -268,31 +271,6 @@ impl GlobalEqCellList {
         self.count += count;
     }
 }
-
-/*
-pub fn collect_records<T: Read>(
-    reader: &mut BufReader<T>,
-    chunk_config: &ChunkConfig,
-    correct_map: &HashMap<u64, u64>,
-    expected_ori: &Strand,
-    output_cache: &DashMap<u64, CorrectedCBChunk>,
-) {
-    // NOTE: since the chunks are independent, this part could be multithreaded
-    let bc_type = decode_int_type_tag(chunk_config.bc_type).expect("unknown barcode type id.");
-    let umi_type = decode_int_type_tag(chunk_config.umi_type).expect("unknown barcode type id.");
-
-    for _ in 0..(chunk_config.num_chunks as usize) {
-        process_corrected_cb_chunk(
-            reader,
-            &bc_type,
-            &umi_type,
-            correct_map,
-            expected_ori,
-            output_cache,
-        );
-    }
-}
-*/
 
 #[inline]
 pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {

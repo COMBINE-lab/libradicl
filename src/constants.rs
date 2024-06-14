@@ -6,4 +6,6 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
-pub(crate) const MAX_REF_NAME_LEN: usize = 65535;
+
+//! Constants relevant for the `RAD` format
+pub(crate) const MAX_REF_NAME_LEN: usize = 65536;

@@ -6,17 +6,28 @@
  *
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
+
+//! This module contains types, functions and traits to deal with RAD
+//! file headers, and also top-level functionality to encapsulate a RAD
+//! prelude (which consists of the header, and the initial [TagSection]s;
+//! basically everything up to the first chunk).
+
 use crate::{self as libradicl, constants};
+use anyhow::{self, Context};
 use libradicl::rad_types::{TagSection, TagSectionLabel};
 use libradicl::record::RecordContext;
 use noodles_sam as sam;
 use scroll::Pread;
+use std::cmp::{Eq, PartialEq};
 use std::io::{Read, Write};
+
+use derivative::Derivative;
 
 /// The [RadPrelude] groups together the [RadHeader]
 /// as well as the relevant top-level [TagSection]s of the file.
 /// It constitutes everything in the initial file prior to the
 /// start of the first [libradicl::chunk::Chunk].
+#[derive(Debug, PartialEq, Eq)]
 pub struct RadPrelude {
     pub hdr: RadHeader,
     pub file_tags: TagSection,
@@ -27,10 +38,13 @@ pub struct RadPrelude {
 /// The [RadHeader] contains the relevant information about the
 /// references against which the reads in this file were mapped and
 /// information about the way in which mapping was performed.
+#[derive(Derivative)]
+#[derivative(Debug, PartialEq, Eq)]
 pub struct RadHeader {
     pub is_paired: u8,
     pub ref_count: u64,
     pub ref_names: Vec<String>,
+    #[derivative(PartialEq = "ignore")]
     pub num_chunks: u64,
 }
 
@@ -141,7 +155,9 @@ impl RadHeader {
         for rn in self.ref_names.iter().take(refs_to_print) {
             writeln!(&mut s, "  ref: {}", rn)?;
         }
-        writeln!(&mut s, "  ...")?;
+        if refs_to_print < self.ref_count as usize {
+            writeln!(&mut s, "  ...")?;
+        }
 
         writeln!(&mut s, "num_chunks: {}", self.num_chunks)?;
         writeln!(&mut s, "}}")?;
@@ -216,6 +232,25 @@ impl RadPrelude {
         })
     }
 
+    /// Writes this [RadPrelude] to the provided writer. Returns an
+    /// [anyhow::Result] that records any error that occured during writing or
+    /// Ok(()) if successful
+    pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        self.hdr
+            .write(writer)
+            .context("could not write the header of the prelude")?;
+        self.file_tags
+            .write(writer)
+            .context("could not write the file-level tags of the prelude")?;
+        self.read_tags
+            .write(writer)
+            .context("could not write the file-level tags of the prelude")?;
+        self.aln_tags
+            .write(writer)
+            .context("could not write the file-level tags of the prelude")?;
+        Ok(())
+    }
+
     /// Returns a textual summary of this as an `std::Ok(`[String]`)` if successful
     /// and an [anyhow::Error] otherwise.
     pub fn summary(&self, num_refs: Option<usize>) -> anyhow::Result<String> {
@@ -235,5 +270,161 @@ impl RadPrelude {
     /// notation.
     pub fn get_record_context<R: RecordContext>(&self) -> anyhow::Result<R> {
         R::get_context_from_tag_section(&self.file_tags, &self.read_tags, &self.aln_tags)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RadHeader, RadPrelude};
+    use crate::rad_types::{RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue};
+    use crate::rad_types::{RadType, TagDesc};
+
+    #[test]
+    fn can_write_prelude() {
+        let hdr = RadHeader {
+            is_paired: 0,
+            ref_count: 3,
+            ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
+            num_chunks: 1,
+        };
+
+        let ft_desc = TagDesc {
+            name: "ref_lengths".to_string(),
+            typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
+        };
+        let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
+        file_tags.add_tag_desc(ft_desc);
+
+        let rd_desc = TagDesc {
+            name: "frag_map_type".to_string(),
+            typeid: RadType::Int(RadIntId::U8),
+        };
+        let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        read_tags.add_tag_desc(rd_desc);
+
+        let aln_coi = TagDesc {
+            name: "compressed_ori_ref".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let aln_mt = TagDesc {
+            name: "frag_map_type".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let aln_fl = TagDesc {
+            name: "frag_len".to_string(),
+            typeid: RadType::Int(RadIntId::U16),
+        };
+        let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+        aln_tags.add_tag_desc(aln_coi);
+        aln_tags.add_tag_desc(aln_mt);
+        aln_tags.add_tag_desc(aln_fl);
+
+        let prelude = RadPrelude {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        };
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        let _ = prelude
+            .write(&mut buf)
+            .expect("cannot write prelude to buffer");
+
+        let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
+        file_tag_map.add(TagValue::ArrayU32(vec![1, 2, 3]));
+        let _ = file_tag_map
+            .write_values(&mut buf)
+            .expect("cannot write file tag map");
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let new_prelude =
+            RadPrelude::from_bytes(&mut cursor).expect("cannot read prelude from buffer");
+        let new_file_tag_map = &prelude
+            .file_tags
+            .try_parse_tags_from_bytes(&mut cursor)
+            .expect("cannot read file TagMap");
+
+        println!("new_prelude = {}", new_prelude.summary(None).unwrap());
+        println!("new_file_tag_map = {:?}", new_file_tag_map);
+
+        assert_eq!(prelude, new_prelude);
+        assert_eq!(&file_tag_map, new_file_tag_map);
+    }
+
+    #[test]
+    fn preludes_equal_with_different_chunks() {
+        let hdr = RadHeader {
+            is_paired: 0,
+            ref_count: 3,
+            ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
+            num_chunks: 1,
+        };
+
+        let ft_desc = TagDesc {
+            name: "ref_lengths".to_string(),
+            typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
+        };
+        let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
+        file_tags.add_tag_desc(ft_desc);
+
+        let rd_desc = TagDesc {
+            name: "frag_map_type".to_string(),
+            typeid: RadType::Int(RadIntId::U8),
+        };
+        let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        read_tags.add_tag_desc(rd_desc);
+
+        let aln_coi = TagDesc {
+            name: "compressed_ori_ref".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let aln_mt = TagDesc {
+            name: "frag_map_type".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+        let aln_fl = TagDesc {
+            name: "frag_len".to_string(),
+            typeid: RadType::Int(RadIntId::U16),
+        };
+        let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+        aln_tags.add_tag_desc(aln_coi);
+        aln_tags.add_tag_desc(aln_mt);
+        aln_tags.add_tag_desc(aln_fl);
+
+        let prelude = RadPrelude {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        };
+
+        let mut buf: Vec<u8> = Vec::new();
+
+        let _ = prelude
+            .write(&mut buf)
+            .expect("cannot write prelude to buffer");
+
+        let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
+        file_tag_map.add(TagValue::ArrayU32(vec![1, 2, 3]));
+        let _ = file_tag_map
+            .write_values(&mut buf)
+            .expect("cannot write file tag map");
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let mut new_prelude =
+            RadPrelude::from_bytes(&mut cursor).expect("cannot read prelude from buffer");
+        let new_file_tag_map = &prelude
+            .file_tags
+            .try_parse_tags_from_bytes(&mut cursor)
+            .expect("cannot read file TagMap");
+
+        new_prelude.hdr.num_chunks = 4;
+        println!("new_prelude = {}", new_prelude.summary(None).unwrap());
+        println!("new_file_tag_map = {:?}", new_file_tag_map);
+
+        assert_eq!(prelude, new_prelude);
+        assert_eq!(&file_tag_map, new_file_tag_map);
     }
 }
