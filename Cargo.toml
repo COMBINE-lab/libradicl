@@ -40,6 +40,7 @@ anyhow = "1.0.80"
 itertools = "0.12.1"
 bytemuck = { version = "1.14.3", features = ["aarch64_simd"] }
 derivative = "2.2.0"
+crossbeam-queue = "0.3.11"
 
 [dev-dependencies]
 needletail="0.5.1"
