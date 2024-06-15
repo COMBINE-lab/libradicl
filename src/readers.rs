@@ -113,6 +113,8 @@ impl<'a, R: MappedRecord> ParallelRadReader<'a, R> {
     {
         if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
             // fill queue known number of chunks
+            println!("known number of chunks");
+            self.fill_work_queue_until_eof(done_var, br)?;
         } else {
             // fill queue unknown
             println!("unknown number of chunks");
