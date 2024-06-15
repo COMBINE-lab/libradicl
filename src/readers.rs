@@ -94,6 +94,14 @@ where
     }
 }
 
+/// Allows reading chunks from the underlying RAD file
+/// in parallel by dedicating a single thread (the one running
+/// functions on this structure) to filling a work queue.
+/// The queue is filled with `MetaChunk`s, which themselves
+/// provide an iterator over `Chunk`s.  The `ParallelChunkReader`
+/// takes a reference to the `RadPrelude` for this RAD file so
+/// that it can produce `MetaChunk`s that know how to be properly
+/// parsed into `Chunk`s.
 #[derive(Debug)]
 pub struct ParallelChunkReader<'a, R: MappedRecord> {
     pub prelude: &'a RadPrelude,
@@ -101,6 +109,24 @@ pub struct ParallelChunkReader<'a, R: MappedRecord> {
     // *NOTE*: The field below is a temporary hack, and shouldn't
     // be necessary once the implementations converge.
     pub header_incl_in_bytes: bool,
+}
+
+impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
+    pub fn new(
+        prelude: &'a RadPrelude,
+        num_consumers: std::num::NonZeroUsize,
+        header_incl_in_bytes: bool,
+    ) -> Self {
+        Self {
+            prelude,
+            meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
+            header_incl_in_bytes,
+        }
+    }
+
+    pub fn get_queue(&self) -> Arc<ArrayQueue<MetaChunk<R>>> {
+        self.meta_chunk_queue.clone()
+    }
 }
 
 impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {

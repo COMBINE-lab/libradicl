@@ -1,11 +1,7 @@
-use crossbeam_queue::ArrayQueue;
-use libradicl::{
-    header::RadPrelude,
-    readers::{MetaChunk, ParallelChunkReader},
-    record::AtacSeqReadRecord,
-};
+use libradicl::{header::RadPrelude, readers::ParallelChunkReader, record::AtacSeqReadRecord};
 use std::fs::File;
 use std::io::BufReader;
+use std::num::NonZeroUsize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -22,20 +18,14 @@ fn main() {
     println!("tag map {:?}\n", tag_map);
     println!("num chunks = {:?}\n", p.hdr.num_chunks());
 
-    let q = Arc::new(ArrayQueue::<MetaChunk<AtacSeqReadRecord>>::new(2));
-
-    let mut reader = ParallelChunkReader::<AtacSeqReadRecord> {
-        prelude: &p,
-        meta_chunk_queue: q.clone(),
-        header_incl_in_bytes: false,
-    };
-
+    let mut reader =
+        ParallelChunkReader::<AtacSeqReadRecord>::new(&p, NonZeroUsize::new(2).unwrap(), false);
     let reading_done = Arc::new(AtomicBool::new(false));
 
     let mut handles = Vec::<std::thread::JoinHandle<_>>::new();
     for _ in 0..2 {
         let rd = reading_done.clone();
-        let q = q.clone();
+        let q = reader.get_queue();
         let handle = std::thread::spawn(move || {
             while !rd.load(Ordering::SeqCst) {
                 while let Some(meta_chunk) = q.pop() {
