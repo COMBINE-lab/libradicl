@@ -1,7 +1,7 @@
 use crossbeam_queue::ArrayQueue;
 use libradicl::{
     header::RadPrelude,
-    readers::{MetaChunk, ParallelRadReader},
+    readers::{MetaChunk, ParallelChunkReader},
     record::AtacSeqReadRecord,
 };
 use std::fs::File;
@@ -22,9 +22,9 @@ fn main() {
     println!("tag map {:?}\n", tag_map);
     println!("num chunks = {:?}\n", p.hdr.num_chunks());
 
-    let q = Arc::new(ArrayQueue::<MetaChunk<AtacSeqReadRecord>>::new(1));
+    let q = Arc::new(ArrayQueue::<MetaChunk<AtacSeqReadRecord>>::new(2));
 
-    let mut reader = ParallelRadReader::<AtacSeqReadRecord> {
+    let mut reader = ParallelChunkReader::<AtacSeqReadRecord> {
         prelude: &p,
         meta_chunk_queue: q.clone(),
         header_incl_in_bytes: false,
@@ -32,24 +32,30 @@ fn main() {
 
     let reading_done = Arc::new(AtomicBool::new(false));
 
-    let rd = reading_done.clone();
-    let handle = std::thread::spawn(move || {
+    let mut handles = Vec::<std::thread::JoinHandle<_>>::new();
+    for _ in 0..2 {
+        let rd = reading_done.clone();
         let q = q.clone();
-        while !rd.load(Ordering::SeqCst) {
-            while let Some(meta_chunk) = q.pop() {
-                for c in meta_chunk.iter() {
-                    println!("Chunk :: nbytes: {}, nrecs: {}", c.nbytes, c.nrec);
-                    assert_eq!(c.nrec as usize, c.reads.len());
-                    for (i, r) in c.reads.iter().take(10).enumerate() {
-                        println!("record {i}: {:?}", r);
+        let handle = std::thread::spawn(move || {
+            while !rd.load(Ordering::SeqCst) {
+                while let Some(meta_chunk) = q.pop() {
+                    for c in meta_chunk.iter() {
+                        println!("Chunk :: nbytes: {}, nrecs: {}", c.nbytes, c.nrec);
+                        assert_eq!(c.nrec as usize, c.reads.len());
+                        for (i, r) in c.reads.iter().take(10).enumerate() {
+                            println!("record {i}: {:?}", r);
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+        handles.push(handle);
+    }
 
-    let _ = reader.fill_work_queue(reading_done, &mut ifile);
-    handle.join().expect("The parsing thread panicked");
+    let _ = reader.start(reading_done, &mut ifile);
+    for handle in handles {
+        handle.join().expect("The parsing thread panicked");
+    }
     /*
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.

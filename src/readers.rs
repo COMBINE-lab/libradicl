@@ -95,18 +95,16 @@ where
 }
 
 #[derive(Debug)]
-pub struct ParallelRadReader<'a, R: MappedRecord> {
+pub struct ParallelChunkReader<'a, R: MappedRecord> {
     pub prelude: &'a RadPrelude,
     pub meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
+    // *NOTE*: The field below is a temporary hack, and shouldn't
+    // be necessary once the implementations converge.
     pub header_incl_in_bytes: bool,
 }
 
-impl<'a, R: MappedRecord> ParallelRadReader<'a, R> {
-    pub fn fill_work_queue<T: BufRead>(
-        &mut self,
-        done_var: Arc<AtomicBool>,
-        br: T,
-    ) -> anyhow::Result<()>
+impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
+    pub fn start<T: BufRead>(&mut self, done_var: Arc<AtomicBool>, br: T) -> anyhow::Result<()>
     where
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
