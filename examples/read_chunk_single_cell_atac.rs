@@ -15,12 +15,15 @@ fn main() {
     println!("tag map {:?}\n", tag_map);
     println!("num chunks = {:?}\n", p.hdr.num_chunks());
 
-    let mut reader =
-        ParallelChunkReader::<AtacSeqReadRecord>::new(&p, NonZeroUsize::new(2).unwrap(), false);
-    //let reading_done = Arc::new(AtomicBool::new(false));
+    const NWORKERS: usize = 3;
+    let mut reader = ParallelChunkReader::<AtacSeqReadRecord>::new(
+        &p,
+        NonZeroUsize::new(NWORKERS).unwrap(),
+        false,
+    );
 
     let mut handles = Vec::<std::thread::JoinHandle<_>>::new();
-    for _ in 0..2 {
+    for _ in 0..NWORKERS {
         let rd = reader.is_done();
         let q = reader.get_queue();
         let handle = std::thread::spawn(move || {
