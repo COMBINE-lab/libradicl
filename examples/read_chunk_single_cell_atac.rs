@@ -1,10 +1,8 @@
 use crossbeam_queue::ArrayQueue;
-use libradicl::chunk::Chunk;
 use libradicl::{
     header::RadPrelude,
     readers::{MetaChunk, ParallelRadReader},
-    record::{AtacSeqReadRecord, AtacSeqRecordContext},
-    utils,
+    record::AtacSeqReadRecord,
 };
 use std::fs::File;
 use std::io::BufReader;
@@ -36,7 +34,7 @@ fn main() {
 
     let rd = reading_done.clone();
     let handle = std::thread::spawn(move || {
-        let mut q = q.clone();
+        let q = q.clone();
         while !rd.load(Ordering::SeqCst) {
             while let Some(meta_chunk) = q.pop() {
                 for c in meta_chunk.iter() {
@@ -50,7 +48,7 @@ fn main() {
         }
     });
 
-    reader.fill_work_queue(reading_done, &mut ifile);
+    let _ = reader.fill_work_queue(reading_done, &mut ifile);
     handle.join().expect("The parsing thread panicked");
     /*
     // Any extra context we may need to parse the records. In this case, it's the

@@ -8,14 +8,13 @@
  */
 
 use crate::libradicl::chunk::Chunk;
-use crate::libradicl::header::{RadHeader, RadPrelude};
+use crate::libradicl::header::RadPrelude;
 use crate::libradicl::record::{MappedRecord, RecordContext};
 use crate::libradicl::utils;
 use anyhow::Context;
 use crossbeam_queue::ArrayQueue;
 use scroll::Pwrite;
-use std::io::{BufRead, Cursor, Read};
-use std::marker::PhantomData;
+use std::io::{BufRead, Cursor};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -28,7 +27,6 @@ pub struct MetaChunk<R: MappedRecord> {
     num_records: u32,
     chunk_blob: Vec<u8>,
     record_context: <R as MappedRecord>::ParsingContext,
-    //_record_t: PhantomData<R>
 }
 
 pub struct MetaChunkIterator<'a, 'b, R: MappedRecord> {
@@ -36,7 +34,6 @@ pub struct MetaChunkIterator<'a, 'b, R: MappedRecord> {
     num_sub_chunks: usize,
     data: Cursor<&'a [u8]>,
     record_context: &'b <R as MappedRecord>::ParsingContext,
-    //_record_t: PhantomData<R>
 }
 
 impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkIterator<'a, 'b, R> {
@@ -74,7 +71,6 @@ where
             num_records,
             chunk_blob,
             record_context,
-            //_record_t: PhantomData
         }
     }
 
@@ -82,10 +78,19 @@ where
         MetaChunkIterator {
             curr_sub_chunk: 0,
             num_sub_chunks: self.num_sub_chunks,
-            data: Cursor::new(&self.chunk_blob.as_slice()),
+            data: Cursor::new(self.chunk_blob.as_slice()),
             record_context: &self.record_context,
-            //_record_t: PhantomData
         }
+    }
+
+    pub fn num_records(&self) -> u32 {
+        self.num_records
+    }
+    pub fn num_bytes(&self) -> u32 {
+        self.num_bytes
+    }
+    pub fn first_chunk_index(&self) -> usize {
+        self.first_chunk_index
     }
 }
 
@@ -106,12 +111,12 @@ impl<'a, R: MappedRecord> ParallelRadReader<'a, R> {
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
     {
-        if let Some(nchunks) = self.prelude.hdr.num_chunks() {
+        if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
             // fill queue known number of chunks
         } else {
             // fill queue unknown
             println!("unknown number of chunks");
-            self.fill_work_queue_until_eof(done_var, br);
+            self.fill_work_queue_until_eof(done_var, br)?;
         }
         Ok(())
     }
