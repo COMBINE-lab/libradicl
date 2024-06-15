@@ -2,10 +2,7 @@ use libradicl::{header::RadPrelude, readers::ParallelChunkReader, record::AtacSe
 use std::fs::File;
 use std::io::BufReader;
 use std::num::NonZeroUsize;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::Ordering;
 
 fn main() {
     let f = File::open("../piscem_atac_data/map.rad");
@@ -20,11 +17,11 @@ fn main() {
 
     let mut reader =
         ParallelChunkReader::<AtacSeqReadRecord>::new(&p, NonZeroUsize::new(2).unwrap(), false);
-    let reading_done = Arc::new(AtomicBool::new(false));
+    //let reading_done = Arc::new(AtomicBool::new(false));
 
     let mut handles = Vec::<std::thread::JoinHandle<_>>::new();
     for _ in 0..2 {
-        let rd = reading_done.clone();
+        let rd = reader.is_done();
         let q = reader.get_queue();
         let handle = std::thread::spawn(move || {
             while !rd.load(Ordering::SeqCst) {
@@ -42,7 +39,7 @@ fn main() {
         handles.push(handle);
     }
 
-    let _ = reader.start(reading_done, &mut ifile);
+    let _ = reader.start(&mut ifile);
     for handle in handles {
         handle.join().expect("The parsing thread panicked");
     }

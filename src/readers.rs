@@ -109,9 +109,15 @@ pub struct ParallelChunkReader<'a, R: MappedRecord> {
     // *NOTE*: The field below is a temporary hack, and shouldn't
     // be necessary once the implementations converge.
     pub header_incl_in_bytes: bool,
+    done_var: Arc<AtomicBool>,
 }
 
 impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
+    /// `prelude`: The `RadPrelude` corresponding to the file that will be parsed
+    /// `num_consumers`: The estimated number of consumer threads that will draw `MetaChunk`s from
+    /// this `ParallelChunkReader`
+    /// `header_incl_in_bytes`: Should be `true` if the number of bytes recorded for the header of
+    /// each chunk includes the size of the header itself, or false otherwise.
     pub fn new(
         prelude: &'a RadPrelude,
         num_consumers: std::num::NonZeroUsize,
@@ -121,16 +127,27 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             prelude,
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
             header_incl_in_bytes,
+            done_var: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Get an `std::sync::Arc` holding the underlying `ArrayQueue` associated with this reader.
+    /// This allows independent parser threads to obtain `MetaChunk`s, over which they can iterate
+    /// to parse records.
     pub fn get_queue(&self) -> Arc<ArrayQueue<MetaChunk<R>>> {
         self.meta_chunk_queue.clone()
+    }
+
+    pub fn is_done(&self) -> Arc<AtomicBool> {
+        self.done_var.clone()
     }
 }
 
 impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
-    pub fn start<T: BufRead>(&mut self, done_var: Arc<AtomicBool>, br: T) -> anyhow::Result<()>
+    /// Start this `ParallelChunkReader` processing input from the `BufRead` `br`.
+    /// Note that this reader should be positioned at the start of the chunks for this
+    /// RAD file, so that the prelude and file tag values have already been parsed/consumded.
+    pub fn start<T: BufRead>(&mut self, br: T) -> anyhow::Result<()>
     where
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
@@ -138,20 +155,16 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
             // fill queue known number of chunks
             println!("known number of chunks");
-            self.fill_work_queue_until_eof(done_var, br)?;
+            self.fill_work_queue_until_eof(br)?;
         } else {
             // fill queue unknown
             println!("unknown number of chunks");
-            self.fill_work_queue_until_eof(done_var, br)?;
+            self.fill_work_queue_until_eof(br)?;
         }
         Ok(())
     }
 
-    fn fill_work_queue_until_eof<T: BufRead>(
-        &mut self,
-        done_var: Arc<AtomicBool>,
-        mut br: T,
-    ) -> anyhow::Result<()>
+    fn fill_work_queue_until_eof<T: BufRead>(&mut self, mut br: T) -> anyhow::Result<()>
     where
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
@@ -260,7 +273,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             }
             chunk_num += 1;
         }
-        done_var.store(true, Ordering::SeqCst);
+        self.done_var.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
