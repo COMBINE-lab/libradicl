@@ -52,7 +52,7 @@ impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkIterator<'a, 'b, R> {
     }
 }
 
-impl<X, R: MappedRecord<ParsingContext = X>> MetaChunk<R>
+impl<R: MappedRecord> MetaChunk<R>
 where
     <R as MappedRecord>::ParsingContext: RecordContext,
 {
