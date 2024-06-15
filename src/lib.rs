@@ -56,6 +56,7 @@ pub mod exit_codes;
 pub mod header;
 pub mod io;
 pub mod rad_types;
+pub mod readers;
 pub mod record;
 pub mod schema;
 pub mod utils;

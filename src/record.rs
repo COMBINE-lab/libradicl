@@ -53,7 +53,7 @@ pub struct AtacSeqReadRecord {
     pub start_pos: Vec<u32>,
     pub refs: Vec<u32>,
     pub frag_lengths: Vec<u16>,
-    pub map_type: Vec<u8>
+    pub map_type: Vec<u8>,
 }
 
 /// This trait represents a mapped read record that should be stored
@@ -428,7 +428,7 @@ impl AlevinFryReadRecord {
 
 #[derive(Debug, Clone)]
 pub struct AtacSeqRecordContext {
-    pub bct: RadIntId
+    pub bct: RadIntId,
 }
 
 impl RecordContext for AtacSeqRecordContext {
@@ -444,9 +444,9 @@ impl RecordContext for AtacSeqRecordContext {
         let bct = rt
             .get_tag_type("barcode")
             .expect("atac-reader record context requires a \'barcode\' read-level tag");
-        
+
         if let RadType::Int(x) = bct {
-            Ok(Self { bct: x})
+            Ok(Self { bct: x })
         } else {
             bail!("atac-reader record context requires that barcode tags are of type RadType::Int");
         }
@@ -488,7 +488,7 @@ impl MappedRecord for AtacSeqReadRecord {
             refs: Vec::with_capacity(na as usize),
             map_type: Vec::with_capacity(na as usize),
             start_pos: Vec::with_capacity(na as usize),
-            frag_lengths: Vec::with_capacity(na as usize)
+            frag_lengths: Vec::with_capacity(na as usize),
         };
 
         for _ in 0..(na as usize) {
@@ -508,7 +508,6 @@ impl MappedRecord for AtacSeqReadRecord {
             let frag_length = rbuf.pread::<u16>(0).unwrap();
             rec.frag_lengths.push(frag_length);
             // println!("frag {}", frag_length);
-            
         }
         rec
     }
@@ -549,7 +548,6 @@ impl MappedRecord for AtacSeqReadRecord {
         Ok(())
         */
     }
-
 }
 
 impl AtacSeqReadRecord {
@@ -571,35 +569,31 @@ impl AtacSeqReadRecord {
             refs: Vec::with_capacity(na as usize),
             map_type: Vec::with_capacity(na as usize),
             start_pos: Vec::with_capacity(na as usize),
-            frag_lengths: Vec::with_capacity(na as usize)
+            frag_lengths: Vec::with_capacity(na as usize),
         };
 
         for _ in 0..(na as usize) {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let ref_id = rbuf.pread::<u32>(0).unwrap();
-            
+
             rec.refs.push(ref_id);
             reader.read_exact(&mut rbuf[0..1]).unwrap();
             let map_type = rbuf.pread::<u8>(0).unwrap();
-            
+
             rec.map_type.push(map_type);
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let start_pos = rbuf.pread::<u32>(0).unwrap();
-            
+
             rec.start_pos.push(start_pos);
             reader.read_exact(&mut rbuf[0..2]).unwrap();
             let frag_length = rbuf.pread::<u16>(0).unwrap();
             rec.frag_lengths.push(frag_length);
-            
         }
         rec
     }
 
     #[inline]
-    pub fn from_bytes_record_header<T: Read>(
-        reader: &mut T,
-        bct: &RadIntId
-    ) -> (u64, u32) {
+    pub fn from_bytes_record_header<T: Read>(reader: &mut T, bct: &RadIntId) -> (u64, u32) {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
@@ -648,4 +642,3 @@ mod tests {
         assert_eq!(rec, new_rec);
     }
 }
-

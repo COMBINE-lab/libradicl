@@ -74,7 +74,6 @@ pub struct AlevinFryChunkContext {
 impl ChunkContext for AlevinFryChunkContext {}
 
 impl<R: MappedRecord> Chunk<R> {
-
     /// Read the header of the next [Chunk] from the provided `reader`. This
     /// function returns a tuple representing the number of bytes and number of
     /// records, respectively, in the chunk.
@@ -147,7 +146,7 @@ impl<R: MappedRecord> Chunk<R> {
     #[inline]
     pub fn from_bytes<T: Read>(reader: &mut T, ctx: &R::ParsingContext) -> Self {
         let (nbytes, nrec) = Self::read_header(reader);
-        // println!("nbytes {} {}", nbytes, nrec);
+        //println!("parsed chunk header :: nbytes {} {}", nbytes, nrec);
         let mut c = Self {
             nbytes,
             nrec,
