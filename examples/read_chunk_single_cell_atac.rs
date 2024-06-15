@@ -15,7 +15,7 @@ fn main() {
     println!("tag map {:?}\n", tag_map);
     println!("num chunks = {:?}\n", p.hdr.num_chunks());
 
-    const NWORKERS: usize = 3;
+    const NWORKERS: usize = 4;
     let mut reader = ParallelChunkReader::<AtacSeqReadRecord>::new(
         &p,
         NonZeroUsize::new(NWORKERS).unwrap(),
