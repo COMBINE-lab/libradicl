@@ -17,7 +17,6 @@ fn main() {
     let mut rad_reader = ParallelRadReader::<AtacSeqReadRecord, BufReader<File>>::new(
         ifile,
         NonZeroUsize::new(NWORKERS).unwrap(),
-        false,
     );
 
     if let Ok(summary) = rad_reader.prelude.summary(None) {

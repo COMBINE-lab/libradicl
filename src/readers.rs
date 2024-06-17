@@ -21,6 +21,9 @@ use std::sync::{
     Arc,
 };
 
+/// A [MetaChunk] consists of a series of [Chunk]s that may be grouped together
+/// for efficiency.  One can easily iterate over the [Chunk]s of a [MetaChunk] by
+/// calling the [MetaChunk::iter] method.
 pub struct MetaChunk<R: MappedRecord> {
     first_chunk_index: usize,
     num_sub_chunks: usize,
@@ -30,6 +33,7 @@ pub struct MetaChunk<R: MappedRecord> {
     record_context: <R as MappedRecord>::ParsingContext,
 }
 
+/// An iterator over the [Chunk]s of a [MetaChunk].
 pub struct MetaChunkIterator<'a, 'b, R: MappedRecord> {
     curr_sub_chunk: usize,
     num_sub_chunks: usize,
@@ -51,7 +55,16 @@ impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkIterator<'a, 'b, R> {
             None
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.num_sub_chunks - self.curr_sub_chunk;
+        (rem, Some(rem))
+    }
 }
+
+// We know exactly how many [Chunk]s a [MetaChunk] will yield, so this is also an
+// [ExactSizeIterator].
+impl<'a, 'b, R: MappedRecord> ExactSizeIterator for MetaChunkIterator<'a, 'b, R> {}
 
 impl<R: MappedRecord> MetaChunk<R>
 where
@@ -98,7 +111,6 @@ where
 fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead>(
     mut br: T,
     prelude: &RadPrelude,
-    header_incl_in_bytes: bool,
     meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
     done_var: Arc<AtomicBool>,
 ) -> anyhow::Result<()>
@@ -167,7 +179,7 @@ where
         if utils::has_data_left(&mut br).expect("encountered error reading input file") {
             //println!("reading header for chunk {}", chunk_num);
             let (nc, nr) = Chunk::<R>::read_header(&mut br);
-            nbytes_chunk = nc + if header_incl_in_bytes { 0 } else { 8 };
+            nbytes_chunk = nc;
             nrec_chunk = nr;
         } else {
             //println!("last chunk!");
@@ -226,18 +238,11 @@ pub struct ParallelRadReader<R: MappedRecord, T: BufRead> {
     pub file_tag_map: TagMap,
     reader: T,
     pub meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
-    // *NOTE*: The field below is a temporary hack, and shouldn't
-    // be necessary once the implementations converge.
-    pub header_incl_in_bytes: bool,
     done_var: Arc<AtomicBool>,
 }
 
 impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
-    pub fn new(
-        mut reader: T,
-        num_consumers: std::num::NonZeroUsize,
-        header_incl_in_bytes: bool,
-    ) -> Self {
+    pub fn new(mut reader: T, num_consumers: std::num::NonZeroUsize) -> Self {
         let prelude = RadPrelude::from_bytes(&mut reader).unwrap();
         let file_tag_map = prelude
             .file_tags
@@ -249,7 +254,6 @@ impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
             file_tag_map,
             reader,
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
-            header_incl_in_bytes,
             done_var: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -274,7 +278,6 @@ impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
         let mut pcr = ParallelChunkReader::<R> {
             prelude: &self.prelude,
             meta_chunk_queue: self.meta_chunk_queue.clone(),
-            header_incl_in_bytes: self.header_incl_in_bytes,
             done_var: self.done_var.clone(),
         };
 
@@ -294,9 +297,6 @@ impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
 pub struct ParallelChunkReader<'a, R: MappedRecord> {
     pub prelude: &'a RadPrelude,
     pub meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
-    // *NOTE*: The field below is a temporary hack, and shouldn't
-    // be necessary once the implementations converge.
-    pub header_incl_in_bytes: bool,
     pub done_var: Arc<AtomicBool>,
 }
 
@@ -304,17 +304,10 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     /// `prelude`: The `RadPrelude` corresponding to the file that will be parsed
     /// `num_consumers`: The estimated number of consumer threads that will draw `MetaChunk`s from
     /// this `ParallelChunkReader`
-    /// `header_incl_in_bytes`: Should be `true` if the number of bytes recorded for the header of
-    /// each chunk includes the size of the header itself, or false otherwise.
-    pub fn new(
-        prelude: &'a RadPrelude,
-        num_consumers: std::num::NonZeroUsize,
-        header_incl_in_bytes: bool,
-    ) -> Self {
+    pub fn new(prelude: &'a RadPrelude, num_consumers: std::num::NonZeroUsize) -> Self {
         Self {
             prelude,
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
-            header_incl_in_bytes,
             done_var: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -346,7 +339,6 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             fill_work_queue_until_eof(
                 br,
                 self.prelude,
-                self.header_incl_in_bytes,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;
@@ -356,7 +348,6 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             fill_work_queue_until_eof(
                 br,
                 self.prelude,
-                self.header_incl_in_bytes,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;
