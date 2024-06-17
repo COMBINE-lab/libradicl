@@ -9,6 +9,7 @@
 
 use crate::libradicl::chunk::Chunk;
 use crate::libradicl::header::RadPrelude;
+use crate::libradicl::rad_types::TagMap;
 use crate::libradicl::record::{MappedRecord, RecordContext};
 use crate::libradicl::utils;
 use anyhow::Context;
@@ -94,7 +95,194 @@ where
     }
 }
 
-/// Allows reading chunks from the underlying RAD file
+fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead>(
+    mut br: T,
+    prelude: &RadPrelude,
+    header_incl_in_bytes: bool,
+    meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
+    done_var: Arc<AtomicBool>,
+) -> anyhow::Result<()>
+where
+    <R as MappedRecord>::ParsingContext: RecordContext,
+    <R as MappedRecord>::ParsingContext: Clone,
+{
+    const BUFSIZE: usize = 524208;
+    // the buffer that will hold our records
+    let mut buf = vec![0u8; BUFSIZE];
+    // the number of bytes currently packed into the meta chunk
+    let mut cbytes = 0u32;
+    // the number of records currently packed into the meta chunk
+    let mut crec = 0u32;
+    // the number of chunks in the current meta chunk
+    let mut chunks_in_meta_chunk = 0usize;
+    // the offset of the first chunk in this chunk
+    let mut first_chunk = 0usize;
+    // if we had to expand the buffer already and should
+    // forcibly push the current buffer onto the queue
+    let mut force_push = false;
+    // the number of bytes and records in the next chunk header
+    let mut nbytes_chunk = 0u32;
+    let mut nrec_chunk = 0u32;
+    let mut last_chunk = false;
+
+    // we include the endpoint here because we will not actually
+    // copy a chunk in the first iteration (since we have not yet
+    // read the chunk header, which comes at the end of the loop).
+    let mut chunk_num = 0;
+    let record_context = prelude
+        .get_record_context::<<R as MappedRecord>::ParsingContext>()
+        .unwrap();
+    while utils::has_data_left(&mut br).expect("encountered error reading input file") {
+        // in the first iteration we've not read a header yet
+        // so we can't fill a chunk, otherwise we read the header
+        // at the bottom of the previous iteration of this loop, and
+        // we will fill in the buffer appropriately here.
+        if chunk_num > 0 {
+            println!("reading data for chunk {}", chunk_num - 1);
+            // if the current chunk (the chunk whose header we read in the last iteration of
+            // the loop) alone is too big for the buffer, then resize the buffer to be big enough
+            if nbytes_chunk as usize > buf.len() {
+                // if we had to resize the buffer to fit this cell, then make sure we push
+                // immediately in the next round
+                force_push = true;
+                let chunk_resize = nbytes_chunk as usize + cbytes as usize;
+                buf.resize(chunk_resize, 0);
+            }
+
+            // copy the data for the current chunk into the buffer
+            let boffset = cbytes as usize;
+            buf.pwrite::<u32>(nbytes_chunk, boffset)?;
+            buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
+            // read everything from the end of the eader into the buffer
+            br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
+                .context("failed to read from work queue.")?;
+            chunks_in_meta_chunk += 1;
+            cbytes += nbytes_chunk;
+            crec += nrec_chunk;
+        }
+
+        // in the last iteration of the loop, we will have read all headers already
+        // and we are just filling up the buffer with the last chunk, and there will be no more
+        // headers left to read
+        if utils::has_data_left(&mut br).expect("encountered error reading input file") {
+            //println!("reading header for chunk {}", chunk_num);
+            let (nc, nr) = Chunk::<R>::read_header(&mut br);
+            nbytes_chunk = nc + if header_incl_in_bytes { 0 } else { 8 };
+            nrec_chunk = nr;
+        } else {
+            //println!("last chunk!");
+            last_chunk = true;
+        }
+
+        // determine if we should dump the current buffer to the work queue
+        if force_push  // if we were told to push this chunk
+                || // or if adding the next cell to this chunk would exceed the buffer size
+                    ((cbytes + nbytes_chunk) as usize > buf.len() && chunks_in_meta_chunk > 0)
+                    || // of if this was the last chunk
+                    last_chunk
+        {
+            // launch off these cells on the queue
+            let mut bclone = MetaChunk::<R>::new(
+                first_chunk,
+                chunks_in_meta_chunk,
+                cbytes,
+                crec,
+                record_context.clone(),
+                buf.clone(),
+            );
+            // keep trying until we can push this payload
+            while let Err(t) = meta_chunk_queue.push(bclone) {
+                bclone = t;
+                // no point trying to push if the queue is full
+                while meta_chunk_queue.is_full() {}
+            }
+            // pbar.inc(cells_in_chunk as u64);
+
+            // offset of the first cell in the next chunk
+            first_chunk += chunks_in_meta_chunk;
+            // reset the counters
+            chunks_in_meta_chunk = 0;
+            cbytes = 0;
+            crec = 0;
+            buf.resize(BUFSIZE, 0);
+            force_push = false;
+        }
+        chunk_num += 1;
+    }
+    done_var.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Allows reading the underlying RAD file in parallel (for the chunks) by dedicating a single
+/// thread (the one running functions on this structure) to filling
+/// a work queue. The queue is filled with `MetaChunk`s, which themselves
+/// provide an iterator over `Chunk`s. The `ParallelRadReader` first parses the
+/// prelude and file tag values itself, and then the chunks.  The main distinction
+/// between this type and [ParallelChunkReader] is that this takes care of parsing
+/// the prelude and file-level tag values as well.
+#[derive(Debug)]
+pub struct ParallelRadReader<R: MappedRecord, T: BufRead> {
+    pub prelude: RadPrelude,
+    pub file_tag_map: TagMap,
+    reader: T,
+    pub meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
+    // *NOTE*: The field below is a temporary hack, and shouldn't
+    // be necessary once the implementations converge.
+    pub header_incl_in_bytes: bool,
+    done_var: Arc<AtomicBool>,
+}
+
+impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
+    pub fn new(
+        mut reader: T,
+        num_consumers: std::num::NonZeroUsize,
+        header_incl_in_bytes: bool,
+    ) -> Self {
+        let prelude = RadPrelude::from_bytes(&mut reader).unwrap();
+        let file_tag_map = prelude
+            .file_tags
+            .parse_tags_from_bytes(&mut reader)
+            .unwrap();
+
+        Self {
+            prelude,
+            file_tag_map,
+            reader,
+            meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
+            header_incl_in_bytes,
+            done_var: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Get an `std::sync::Arc` holding the underlying `ArrayQueue` associated with this reader.
+    /// This allows independent parser threads to obtain `MetaChunk`s, over which they can iterate
+    /// to parse records.
+    pub fn get_queue(&self) -> Arc<ArrayQueue<MetaChunk<R>>> {
+        self.meta_chunk_queue.clone()
+    }
+
+    pub fn is_done(&self) -> Arc<AtomicBool> {
+        self.done_var.clone()
+    }
+
+    /// NOTE: Blocking function; get the queue before calling this!
+    pub fn start_chunk_parsing(&mut self) -> anyhow::Result<()>
+    where
+        <R as MappedRecord>::ParsingContext: RecordContext,
+        <R as MappedRecord>::ParsingContext: Clone,
+    {
+        let mut pcr = ParallelChunkReader::<R> {
+            prelude: &self.prelude,
+            meta_chunk_queue: self.meta_chunk_queue.clone(),
+            header_incl_in_bytes: self.header_incl_in_bytes,
+            done_var: self.done_var.clone(),
+        };
+
+        pcr.start(&mut self.reader)
+    }
+}
+
+/// Allows reading chunks from the underlying RAD file chunks
 /// in parallel by dedicating a single thread (the one running
 /// functions on this structure) to filling a work queue.
 /// The queue is filled with `MetaChunk`s, which themselves
@@ -109,7 +297,7 @@ pub struct ParallelChunkReader<'a, R: MappedRecord> {
     // *NOTE*: The field below is a temporary hack, and shouldn't
     // be necessary once the implementations converge.
     pub header_incl_in_bytes: bool,
-    done_var: Arc<AtomicBool>,
+    pub done_var: Arc<AtomicBool>,
 }
 
 impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
@@ -155,125 +343,24 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
             // fill queue known number of chunks
             println!("known number of chunks");
-            self.fill_work_queue_until_eof(br)?;
+            fill_work_queue_until_eof(
+                br,
+                self.prelude,
+                self.header_incl_in_bytes,
+                self.meta_chunk_queue.clone(),
+                self.done_var.clone(),
+            )?;
         } else {
             // fill queue unknown
             println!("unknown number of chunks");
-            self.fill_work_queue_until_eof(br)?;
+            fill_work_queue_until_eof(
+                br,
+                self.prelude,
+                self.header_incl_in_bytes,
+                self.meta_chunk_queue.clone(),
+                self.done_var.clone(),
+            )?;
         }
-        Ok(())
-    }
-
-    fn fill_work_queue_until_eof<T: BufRead>(&mut self, mut br: T) -> anyhow::Result<()>
-    where
-        <R as MappedRecord>::ParsingContext: RecordContext,
-        <R as MappedRecord>::ParsingContext: Clone,
-    {
-        const BUFSIZE: usize = 524208;
-        // the buffer that will hold our records
-        let mut buf = vec![0u8; BUFSIZE];
-        // the number of bytes currently packed into the meta chunk
-        let mut cbytes = 0u32;
-        // the number of records currently packed into the meta chunk
-        let mut crec = 0u32;
-        // the number of chunks in the current meta chunk
-        let mut chunks_in_meta_chunk = 0usize;
-        // the offset of the first chunk in this chunk
-        let mut first_chunk = 0usize;
-        // if we had to expand the buffer already and should
-        // forcibly push the current buffer onto the queue
-        let mut force_push = false;
-        // the number of bytes and records in the next chunk header
-        let mut nbytes_chunk = 0u32;
-        let mut nrec_chunk = 0u32;
-        let mut last_chunk = false;
-
-        // we include the endpoint here because we will not actually
-        // copy a chunk in the first iteration (since we have not yet
-        // read the chunk header, which comes at the end of the loop).
-        let mut chunk_num = 0;
-        let record_context = self
-            .prelude
-            .get_record_context::<<R as MappedRecord>::ParsingContext>()
-            .unwrap();
-        while utils::has_data_left(&mut br).expect("encountered error reading input file") {
-            // in the first iteration we've not read a header yet
-            // so we can't fill a chunk, otherwise we read the header
-            // at the bottom of the previous iteration of this loop, and
-            // we will fill in the buffer appropriately here.
-            if chunk_num > 0 {
-                println!("reading data for chunk {}", chunk_num - 1);
-                // if the current chunk (the chunk whose header we read in the last iteration of
-                // the loop) alone is too big for the buffer, then resize the buffer to be big enough
-                if nbytes_chunk as usize > buf.len() {
-                    // if we had to resize the buffer to fit this cell, then make sure we push
-                    // immediately in the next round
-                    force_push = true;
-                    let chunk_resize = nbytes_chunk as usize + cbytes as usize;
-                    buf.resize(chunk_resize, 0);
-                }
-
-                // copy the data for the current chunk into the buffer
-                let boffset = cbytes as usize;
-                buf.pwrite::<u32>(nbytes_chunk, boffset)?;
-                buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
-                // read everything from the end of the eader into the buffer
-                br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
-                    .context("failed to read from work queue.")?;
-                chunks_in_meta_chunk += 1;
-                cbytes += nbytes_chunk;
-                crec += nrec_chunk;
-            }
-
-            // in the last iteration of the loop, we will have read all headers already
-            // and we are just filling up the buffer with the last chunk, and there will be no more
-            // headers left to read
-            if utils::has_data_left(&mut br).expect("encountered error reading input file") {
-                //println!("reading header for chunk {}", chunk_num);
-                let (nc, nr) = Chunk::<R>::read_header(&mut br);
-                nbytes_chunk = nc + if self.header_incl_in_bytes { 0 } else { 8 };
-                nrec_chunk = nr;
-            } else {
-                //println!("last chunk!");
-                last_chunk = true;
-            }
-
-            // determine if we should dump the current buffer to the work queue
-            if force_push  // if we were told to push this chunk
-                || // or if adding the next cell to this chunk would exceed the buffer size
-                    ((cbytes + nbytes_chunk) as usize > buf.len() && chunks_in_meta_chunk > 0)
-                    || // of if this was the last chunk
-                    last_chunk
-            {
-                // launch off these cells on the queue
-                let mut bclone = MetaChunk::<R>::new(
-                    first_chunk,
-                    chunks_in_meta_chunk,
-                    cbytes,
-                    crec,
-                    record_context.clone(),
-                    buf.clone(),
-                );
-                // keep trying until we can push this payload
-                while let Err(t) = self.meta_chunk_queue.push(bclone) {
-                    bclone = t;
-                    // no point trying to push if the queue is full
-                    while self.meta_chunk_queue.is_full() {}
-                }
-                // pbar.inc(cells_in_chunk as u64);
-
-                // offset of the first cell in the next chunk
-                first_chunk += chunks_in_meta_chunk;
-                // reset the counters
-                chunks_in_meta_chunk = 0;
-                cbytes = 0;
-                crec = 0;
-                buf.resize(BUFSIZE, 0);
-                force_push = false;
-            }
-            chunk_num += 1;
-        }
-        self.done_var.store(true, Ordering::SeqCst);
         Ok(())
     }
 }

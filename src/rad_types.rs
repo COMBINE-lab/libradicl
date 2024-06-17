@@ -943,15 +943,20 @@ impl TagDesc {
 /// This type represents a mapping from [TagDesc]s to a corresponding set of
 /// values conforming to these descriptions (i.e. in terms of types). The
 /// [TagMap] allows you to fetch the value for a specific tag by name or index, or
-/// to add values to a corresponding set of descriptions.
+/// to add values to a corresponding set of descriptions. This type is much like a
+/// [TagMap], except that it relies on a shared reference to the [TagDesc]s, rather
+/// than an owned copy (usually a clone) of them.
 #[derive(Debug, PartialEq)]
-pub struct TagMap<'a> {
+pub struct TagViewMap<'a> {
     keys: &'a [TagDesc],
     dat: Vec<TagValue>,
 }
 
-impl<'a> TagMap<'a> {
-    /// Create a new TagMap whose set of keys is determined by
+/// TODO: Figure out how to minimize duplcation between
+/// TagMap and TagViewMap
+
+impl<'a> TagViewMap<'a> {
+    /// Create a new TagViewMap whose set of keys is determined by
     /// the provided `keyset`. This will have one value slot for
     /// each provided key.
     pub fn with_keyset(keyset: &'a [TagDesc]) -> Self {
@@ -971,7 +976,7 @@ impl<'a> TagMap<'a> {
         Ok(())
     }
 
-    /// add the next TagValue to the data for this TagMap.
+    /// add the next TagValue to the data for this TagViewMap.
     /// This function doesn't check if the type is correct or
     /// if too many tag values have been added. It should
     /// only be used when one is certain that the next tag value
@@ -997,7 +1002,7 @@ impl<'a> TagMap<'a> {
         self.dat.get(idx)
     }
 
-    /// writes the values contained in this [TagMap], in order, to the provided
+    /// writes the values contained in this [TagViewMap], in order, to the provided
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         for (n, v) in self.keys.iter().zip(self.dat.iter()) {
@@ -1008,9 +1013,87 @@ impl<'a> TagMap<'a> {
     }
 }
 
-impl<'a> std::ops::Index<usize> for TagMap<'a> {
+impl<'a> std::ops::Index<usize> for TagViewMap<'a> {
     type Output = TagValue;
-    /// Returns a reference to the [TagValue] in the [TagMap] at the
+    /// Returns a reference to the [TagValue] in the [TagViewMap] at the
+    /// provided `index`, panics if `index` is out of bounds.
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.dat[index]
+    }
+}
+
+/// This type represents a mapping from [TagDesc]s to a corresponding set of
+/// values conforming to these descriptions (i.e. in terms of types). The
+/// [TagMap] allows you to fetch the value for a specific tag by name or index, or
+/// to add values to a corresponding set of descriptions.
+#[derive(Debug, PartialEq)]
+pub struct TagMap {
+    keys: Vec<TagDesc>,
+    dat: Vec<TagValue>,
+}
+
+impl TagMap {
+    /// Create a new TagMapView whose set of keys is determined by
+    /// the provided `keyset`. This will have one value slot for
+    /// each provided key.
+    pub fn with_keyset(keyset: &[TagDesc]) -> Self {
+        Self {
+            keys: Vec::from(keyset),
+            dat: Vec::with_capacity(keyset.len()),
+        }
+    }
+
+    /// Try to add the next tag value. If there is space and the type
+    /// matches, add it and return `true`, otherwise return `false`.
+    pub fn try_add(&mut self, val: TagValue) -> anyhow::Result<()> {
+        let next_idx = self.dat.len();
+        anyhow::ensure!(next_idx < self.keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", self.keys.len());
+        anyhow::ensure!(self.keys[next_idx].matches_value_type(&val), "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}", self.keys[next_idx]);
+        self.dat.push(val);
+        Ok(())
+    }
+
+    /// add the next TagValue to the data for this TagMapView.
+    /// This function doesn't check if the type is correct or
+    /// if too many tag values have been added. It should
+    /// only be used when one is certain that the next tag value
+    /// appropriately matches the next available key.
+    pub fn add(&mut self, val: TagValue) {
+        self.dat.push(val);
+    }
+
+    /// get the value for the tag associated with the name `key`, returns
+    /// Some(&TagValue) for the appropriate tag if it exists, and None otherwise.
+    pub fn get(&self, key: &str) -> Option<&TagValue> {
+        for (k, val) in self.keys.iter().zip(self.dat.iter()) {
+            if k.name == key {
+                return Some(val);
+            }
+        }
+        None
+    }
+
+    /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx`
+    /// is in bounds and None otherwise.
+    pub fn get_at_index(&self, idx: usize) -> Option<&TagValue> {
+        self.dat.get(idx)
+    }
+
+    /// writes the values contained in this [TagMapView], in order, to the provided
+    /// writer, propagating any errors or returning Ok(()) on success.
+    pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        for (n, v) in self.keys.iter().zip(self.dat.iter()) {
+            v.write_with_type(&n.typeid, writer)
+                .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Index<usize> for TagMap {
+    type Output = TagValue;
+    /// Returns a reference to the [TagValue] in the [TagMapView] at the
     /// provided `index`, panics if `index` is out of bounds.
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
@@ -1065,6 +1148,22 @@ impl TagSection {
     }
 
     /// Parse a set of tag **values**, having types described by this [TagSection], from the
+    /// provided `reader`. This function returns the [TagViewMap] on success, or an error if the
+    /// map could not be produced.
+    pub fn parse_tags_view_from_bytes<T: Read>(
+        &self,
+        reader: &mut T,
+    ) -> anyhow::Result<TagViewMap> {
+        // loop over all of the tag descriptions in this section, and parse a
+        // tag value for each.
+        let mut tm = TagViewMap::with_keyset(&self.tags);
+        for tag_desc in &self.tags {
+            tm.add(tag_desc.value_from_bytes(reader));
+        }
+        Ok(tm)
+    }
+
+    /// Parse a set of tag **values**, having types described by this [TagSection], from the
     /// provided `reader`. This function returns the [TagMap] on success, or an error if the
     /// map could not be produced. It propagates more errors than does `parse_tags_from_bytes`
     /// by checking that the number of values in this [TagMap] never exceeds the size of the
@@ -1074,6 +1173,25 @@ impl TagSection {
         // tag value for each.
         //let mut tv = Vec::<TagValue>::new();
         let mut tm = TagMap::with_keyset(&self.tags);
+        for tag_desc in &self.tags {
+            tm.try_add(tag_desc.value_from_bytes(reader))?;
+        }
+        Ok(tm)
+    }
+
+    /// Parse a set of tag **values**, having types described by this [TagSection], from the
+    /// provided `reader`. This function returns the [TagViewMap] on success, or an error if the
+    /// map could not be produced. It propagates more errors than does `parse_tags_from_bytes`
+    /// by checking that the number of values in this [TagViewMap] never exceeds the size of the
+    /// `keyset`.
+    pub fn try_parse_tags_view_from_bytes<T: Read>(
+        &self,
+        reader: &mut T,
+    ) -> anyhow::Result<TagViewMap> {
+        // loop over all of the tag descriptions in this section, and parse a
+        // tag value for each.
+        //let mut tv = Vec::<TagValue>::new();
+        let mut tm = TagViewMap::with_keyset(&self.tags);
         for tag_desc in &self.tags {
             tm.try_add(tag_desc.value_from_bytes(reader))?;
         }
