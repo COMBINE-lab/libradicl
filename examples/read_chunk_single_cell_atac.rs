@@ -45,7 +45,16 @@ fn main() {
         handles.push(handle);
     }
 
-    let _ = rad_reader.start_chunk_parsing();
+    // simple callback if we want to test one
+    /*
+    let mut tot = 0_u64;
+    let cb = |x: u64| {
+        tot += x;
+        println!("Saw {} chunks so far!", tot);
+    };
+    */
+
+    let _ = rad_reader.start_chunk_parsing(libradicl::readers::EMPTY_METACHUNK_CALLBACK);
     for handle in handles {
         handle.join().expect("The parsing thread panicked");
     }

@@ -21,6 +21,8 @@ use std::sync::{
     Arc,
 };
 
+pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64)>> = None;
+
 /// A [MetaChunk] consists of a series of [Chunk]s that may be grouped together
 /// for efficiency.  One can easily iterate over the [Chunk]s of a [MetaChunk] by
 /// calling the [MetaChunk::iter] method.
@@ -108,8 +110,9 @@ where
     }
 }
 
-fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead>(
+fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead, F: FnMut(u64)>(
     mut br: T,
+    mut callback: Option<F>,
     prelude: &RadPrelude,
     meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
     done_var: Arc<AtomicBool>,
@@ -208,6 +211,9 @@ where
                 // no point trying to push if the queue is full
                 while meta_chunk_queue.is_full() {}
             }
+            if let Some(ref mut f) = callback {
+                f(chunks_in_meta_chunk as u64);
+            }
             // pbar.inc(cells_in_chunk as u64);
 
             // offset of the first cell in the next chunk
@@ -270,7 +276,7 @@ impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
     }
 
     /// NOTE: Blocking function; get the queue before calling this!
-    pub fn start_chunk_parsing(&mut self) -> anyhow::Result<()>
+    pub fn start_chunk_parsing<F: FnMut(u64)>(&mut self, callback: Option<F>) -> anyhow::Result<()>
     where
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
@@ -281,7 +287,7 @@ impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
             done_var: self.done_var.clone(),
         };
 
-        pcr.start(&mut self.reader)
+        pcr.start(&mut self.reader, callback)
     }
 }
 
@@ -312,13 +318,18 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         }
     }
 
-    /// Get an `std::sync::Arc` holding the underlying `ArrayQueue` associated with this reader.
-    /// This allows independent parser threads to obtain `MetaChunk`s, over which they can iterate
+    /// Get an [std::sync::Arc] holding the underlying [ArrayQueue] associated with this reader.
+    /// This allows independent parser threads to obtain [MetaChunk]s, over which they can iterate
     /// to parse records.
     pub fn get_queue(&self) -> Arc<ArrayQueue<MetaChunk<R>>> {
         self.meta_chunk_queue.clone()
     }
 
+    /// Get an [std::sync::Arc] holding the [AtomicBool] that records the status of the parsing of
+    /// the input file.  If the [AtomicBool] is false, parsing of the input file has not completed,
+    /// and it is still possible that new [MetaChunk]s will be placed on the work queue.  However, once
+    /// the contained [AtomicBool] has been set to true, the parsing is done and no further
+    /// [MetaChunk]s will be placed on the queue, other than those that are already "in flight".
     pub fn is_done(&self) -> Arc<AtomicBool> {
         self.done_var.clone()
     }
@@ -328,7 +339,11 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     /// Start this `ParallelChunkReader` processing input from the `BufRead` `br`.
     /// Note that this reader should be positioned at the start of the chunks for this
     /// RAD file, so that the prelude and file tag values have already been parsed/consumded.
-    pub fn start<T: BufRead>(&mut self, br: T) -> anyhow::Result<()>
+    pub fn start<T: BufRead, F: FnMut(u64)>(
+        &mut self,
+        br: T,
+        callback: Option<F>,
+    ) -> anyhow::Result<()>
     where
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
@@ -338,6 +353,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             println!("known number of chunks");
             fill_work_queue_until_eof(
                 br,
+                callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
@@ -347,6 +363,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             println!("unknown number of chunks");
             fill_work_queue_until_eof(
                 br,
+                callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
