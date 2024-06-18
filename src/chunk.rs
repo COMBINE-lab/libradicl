@@ -63,6 +63,11 @@ pub struct ChunkConfig {
     pub umi_type: u8,
 }
 
+pub struct ChunkConfigAtac {
+    pub num_chunks: u64,
+    pub bc_type: u8
+}
+
 pub trait ChunkContext {}
 
 pub struct AlevinFryChunkContext {
