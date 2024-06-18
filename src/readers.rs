@@ -211,9 +211,9 @@ where
                 // no point trying to push if the queue is full
                 while meta_chunk_queue.is_full() {}
             }
-            if let Some(ref mut f) = callback {
-                f(chunks_in_meta_chunk as u64);
-            }
+            callback
+                .iter_mut()
+                .for_each(|f| f(chunks_in_meta_chunk as u64));
             // pbar.inc(cells_in_chunk as u64);
 
             // offset of the first cell in the next chunk
