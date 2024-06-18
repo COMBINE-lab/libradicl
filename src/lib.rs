@@ -34,7 +34,6 @@ use crate as libradicl;
 use self::libradicl::chunk::CorrectedCbChunk;
 use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
-#[allow(unused_imports)]
 use self::libradicl::record::AtacSeqReadRecord;
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
@@ -927,7 +926,7 @@ pub fn as_u8_slice_u16(v: &[u16]) -> &[u8] {
 }
 
 pub fn as_u8_slice_u8(v: &[u8]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+    unsafe { std::slice::from_raw_parts(v.as_ptr(), std::mem::size_of_val(v)) }
 }
 
 #[cfg(test)]

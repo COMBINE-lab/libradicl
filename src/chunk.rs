@@ -65,7 +65,7 @@ pub struct ChunkConfig {
 
 pub struct ChunkConfigAtac {
     pub num_chunks: u64,
-    pub bc_type: u8
+    pub bc_type: u8,
 }
 
 pub trait ChunkContext {}

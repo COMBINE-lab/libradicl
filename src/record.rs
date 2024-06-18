@@ -609,11 +609,7 @@ impl AtacSeqReadRecord {
         (bc, na)
     }
 
-    pub fn from_bytes_with_header<T: Read>(
-        reader: &mut T,
-        bc: u64,
-        na: u32,
-    ) -> Self {
+    pub fn from_bytes_with_header<T: Read>(reader: &mut T, bc: u64, na: u32) -> Self {
         let mut rbuf = [0u8; 255];
         let mut rec = Self {
             bc,
