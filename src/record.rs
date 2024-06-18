@@ -575,16 +575,16 @@ impl AtacSeqReadRecord {
         for _ in 0..(na as usize) {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let ref_id = rbuf.pread::<u32>(0).unwrap();
-
             rec.refs.push(ref_id);
+
             reader.read_exact(&mut rbuf[0..1]).unwrap();
             let map_type = rbuf.pread::<u8>(0).unwrap();
-
             rec.map_type.push(map_type);
+
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let start_pos = rbuf.pread::<u32>(0).unwrap();
-
             rec.start_pos.push(start_pos);
+            
             reader.read_exact(&mut rbuf[0..2]).unwrap();
             let frag_length = rbuf.pread::<u16>(0).unwrap();
             rec.frag_lengths.push(frag_length);
