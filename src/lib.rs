@@ -34,6 +34,7 @@ use crate as libradicl;
 use self::libradicl::chunk::CorrectedCbChunk;
 use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
+#[allow(unused_imports)]
 use self::libradicl::record::AtacSeqReadRecord;
 use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
