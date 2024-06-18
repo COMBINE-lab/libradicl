@@ -584,7 +584,7 @@ impl AtacSeqReadRecord {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let start_pos = rbuf.pread::<u32>(0).unwrap();
             rec.start_pos.push(start_pos);
-            
+
             reader.read_exact(&mut rbuf[0..2]).unwrap();
             let frag_length = rbuf.pread::<u16>(0).unwrap();
             rec.frag_lengths.push(frag_length);

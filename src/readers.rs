@@ -15,13 +15,13 @@ use crate::libradicl::utils;
 use anyhow::Context;
 use crossbeam_queue::ArrayQueue;
 use scroll::Pwrite;
-use std::io::{BufRead, Cursor};
+use std::io::{BufRead, Cursor, Seek};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64)>> = None;
+pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64, u64)>> = None;
 
 /// A [MetaChunk] consists of a series of [Chunk]s that may be grouped together
 /// for efficiency.  One can easily iterate over the [Chunk]s of a [MetaChunk] by
@@ -110,7 +110,7 @@ where
     }
 }
 
-fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead, F: FnMut(u64)>(
+fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead, F: FnMut(u64, u64)>(
     mut br: T,
     mut callback: Option<F>,
     prelude: &RadPrelude,
@@ -153,7 +153,6 @@ where
         // at the bottom of the previous iteration of this loop, and
         // we will fill in the buffer appropriately here.
         if chunk_num > 0 {
-            println!("reading data for chunk {}", chunk_num - 1);
             // if the current chunk (the chunk whose header we read in the last iteration of
             // the loop) alone is too big for the buffer, then resize the buffer to be big enough
             if nbytes_chunk as usize > buf.len() {
@@ -213,7 +212,7 @@ where
             }
             callback
                 .iter_mut()
-                .for_each(|f| f(chunks_in_meta_chunk as u64));
+                .for_each(|f| f(cbytes as u64, chunks_in_meta_chunk as u64));
             // pbar.inc(cells_in_chunk as u64);
 
             // offset of the first cell in the next chunk
@@ -239,7 +238,7 @@ where
 /// between this type and [ParallelChunkReader] is that this takes care of parsing
 /// the prelude and file-level tag values as well.
 #[derive(Debug)]
-pub struct ParallelRadReader<R: MappedRecord, T: BufRead> {
+pub struct ParallelRadReader<R: MappedRecord, T: BufRead + Seek> {
     pub prelude: RadPrelude,
     pub file_tag_map: TagMap,
     reader: T,
@@ -247,7 +246,7 @@ pub struct ParallelRadReader<R: MappedRecord, T: BufRead> {
     done_var: Arc<AtomicBool>,
 }
 
-impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
+impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     pub fn new(mut reader: T, num_consumers: std::num::NonZeroUsize) -> Self {
         let prelude = RadPrelude::from_bytes(&mut reader).unwrap();
         let file_tag_map = prelude
@@ -275,8 +274,15 @@ impl<R: MappedRecord, T: BufRead> ParallelRadReader<R, T> {
         self.done_var.clone()
     }
 
+    pub fn get_byte_offset(&mut self) -> u64 {
+        self.reader.stream_position().unwrap()
+    }
+
     /// NOTE: Blocking function; get the queue before calling this!
-    pub fn start_chunk_parsing<F: FnMut(u64)>(&mut self, callback: Option<F>) -> anyhow::Result<()>
+    pub fn start_chunk_parsing<F: FnMut(u64, u64)>(
+        &mut self,
+        callback: Option<F>,
+    ) -> anyhow::Result<()>
     where
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
@@ -339,7 +345,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     /// Start this `ParallelChunkReader` processing input from the `BufRead` `br`.
     /// Note that this reader should be positioned at the start of the chunks for this
     /// RAD file, so that the prelude and file tag values have already been parsed/consumded.
-    pub fn start<T: BufRead, F: FnMut(u64)>(
+    pub fn start<T: BufRead, F: FnMut(u64, u64)>(
         &mut self,
         br: T,
         callback: Option<F>,
