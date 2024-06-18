@@ -429,144 +429,145 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     cb_byte_map.len()
 }
 
-// pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
-//     reader: &mut BufReader<T>,
-//     bct: &RadIntId,
-//     nrec: u32,
-//     owriter: &Mutex<U>,
-//     compress: bool,
-//     cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
-// ) -> usize {
-//     let mut tbuf = vec![0u8; 65536];
-//     let mut total_bytes = 0usize;
-//     let header_size = 2 * std::mem::size_of::<u32>() as u64;
-//     let size_of_rec = std::mem::size_of::<u32>() +
-//                         std::mem::size_of::<u8>() +
-//                         std::mem::size_of::<u32>() +
-//                         std::mem::size_of::<u16>();
-//     let size_of_bc = bct.bytes_for_type();
+pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
+    reader: &mut BufReader<T>,
+    bct: &RadIntId,
+    nrec: u32,
+    owriter: &Mutex<U>,
+    compress: bool,
+    cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
+) -> usize {
+    let mut tbuf = vec![0u8; 65536];
+    let mut total_bytes = 0usize;
+    let header_size = 2 * std::mem::size_of::<u32>() as u64;
+    let size_of_bc = bct.bytes_for_type();
+    let size_of_rec = std::mem::size_of::<u32>() +
+                        std::mem::size_of::<u8>() +
+                        std::mem::size_of::<u32>() +
+                        std::mem::size_of::<u16>();
+    
+    let size_of_u32 = std::mem::size_of::<u32>();
+    let calc_record_bytes = |num_aln: usize| -> usize {
+        size_of_u32 + size_of_bc + (size_of_rec * num_aln)
+    };
 
-//     let calc_record_bytes = |num_aln: usize| -> usize {
-//         size_of_u32 + size_of_bc + (size_of_rec * num_aln)
-//     };
+    // read each record
+    for _ in 0..(nrec as usize) {
+        // read the header of the record
+        // we don't bother reading the whole thing here
+        // because we will just copy later as need be
+        let tup = AtacSeqReadRecord::from_bytes_record_header(reader, bct);
 
-//     // read each record
-//     for _ in 0..(nrec as usize) {
-//         // read the header of the record
-//         // we don't bother reading the whole thing here
-//         // because we will just copy later as need be
-//         let tup = AtacSeqReadRecord::from_bytes_record_header(reader, bct);
+        // get the entry for this chunk, or create a new one
+        let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
+            offset: header_size,
+            nbytes: header_size as u32,
+            nrec: 0_u32,
+        });
 
-//         // get the entry for this chunk, or create a new one
-//         let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
-//             offset: header_size,
-//             nbytes: header_size as u32,
-//             nrec: 0_u32,
-//         });
+        // read the alignment records from the input file
+        let na = tup.1 as usize;
+        let req_size = size_of_rec * na;
+        if tbuf.len() < req_size {
+            tbuf.resize(req_size, 0);
+        }
+        reader.read_exact(&mut tbuf[0..(size_of_rec * na)]).unwrap();
+        // compute the total number of bytes this record requires
+        let nbytes = calc_record_bytes(na);
+        v.offset += nbytes as u64;
+        v.nbytes += nbytes as u32;
+        v.nrec += 1;
+        total_bytes += nbytes;
+    }
 
-//         // read the alignment records from the input file
-//         let na = tup.1 as usize;
-//         let req_size = size_of_rec * na;
-//         if tbuf.len() < req_size {
-//             tbuf.resize(req_size, 0);
-//         }
-//         reader.read_exact(&mut tbuf[0..(size_of_rec * na)]).unwrap();
-//         // compute the total number of bytes this record requires
-//         let nbytes = calc_record_bytes(na);
-//         v.offset += nbytes as u64;
-//         v.nbytes += nbytes as u32;
-//         v.nrec += 1;
-//         total_bytes += nbytes;
-//     }
+    // each cell will have a header (8 bytes each)
+    total_bytes += cb_byte_map.len() * header_size as usize;
+    let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
 
-//     // each cell will have a header (8 bytes each)
-//     total_bytes += cb_byte_map.len() * header_size as usize;
-//     let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
+    // loop over all distinct cell barcodes, write their
+    // corresponding chunk header, and compute what the
+    // offset in `output_buffer` is where the corresponding
+    // records should start.
+    let mut next_offset = 0u64;
+    for (_, v) in cb_byte_map.iter_mut() {
+        // jump to the position where this chunk should start
+        // and write the header
+        output_buffer.set_position(next_offset);
+        let cell_bytes = v.nbytes;
+        let cell_rec = v.nrec;
+        output_buffer.write_all(&cell_bytes.to_le_bytes()).unwrap();
+        output_buffer.write_all(&cell_rec.to_le_bytes()).unwrap();
+        // where we will start writing records for this cell
+        v.offset = output_buffer.position();
+        // the number of bytes allocated to this chunk
+        let nbytes = v.nbytes as u64;
+        // the next record will start after this one
+        next_offset += nbytes;
+    }
 
-//     // loop over all distinct cell barcodes, write their
-//     // corresponding chunk header, and compute what the
-//     // offset in `output_buffer` is where the corresponding
-//     // records should start.
-//     let mut next_offset = 0u64;
-//     for (_, v) in cb_byte_map.iter_mut() {
-//         // jump to the position where this chunk should start
-//         // and write the header
-//         output_buffer.set_position(next_offset);
-//         let cell_bytes = v.nbytes;
-//         let cell_rec = v.nrec;
-//         output_buffer.write_all(&cell_bytes.to_le_bytes()).unwrap();
-//         output_buffer.write_all(&cell_rec.to_le_bytes()).unwrap();
-//         // where we will start writing records for this cell
-//         v.offset = output_buffer.position();
-//         // the number of bytes allocated to this chunk
-//         let nbytes = v.nbytes as u64;
-//         // the next record will start after this one
-//         next_offset += nbytes;
-//     }
+    // now each key points to where we should write the next record for the CB
+    // reset the input pointer
+    reader
+        .get_mut()
+        .seek(SeekFrom::Start(0))
+        .expect("could not get read pointer.");
 
-//     // now each key points to where we should write the next record for the CB
-//     // reset the input pointer
-//     reader
-//         .get_mut()
-//         .seek(SeekFrom::Start(0))
-//         .expect("could not get read pointer.");
+    // for each record, read it
+    for _ in 0..(nrec as usize) {
+        // read the header of the record
+        // we don't bother reading the whole thing here
+        // because we will just copy later as need be
+        let tup = AtacSeqReadRecord::from_bytes_record_header(reader, bct);
 
-//     // for each record, read it
-//     for _ in 0..(nrec as usize) {
-//         // read the header of the record
-//         // we don't bother reading the whole thing here
-//         // because we will just copy later as need be
-//         let tup = AtacSeqReadRecord::from_bytes_record_header(reader, bct);
+        // get the entry for this chunk, or create a new one
+        if let Some(v) = cb_byte_map.get_mut(&tup.0) {
+            output_buffer.set_position(v.offset);
 
-//         // get the entry for this chunk, or create a new one
-//         if let Some(v) = cb_byte_map.get_mut(&tup.0) {
-//             output_buffer.set_position(v.offset);
+            // write the num align
+            let na = tup.1 as usize;
+            let nau32 = na as u32;
+            output_buffer.write_all(&nau32.to_le_bytes()).unwrap();
 
-//             // write the num align
-//             let na = tup.1 as usize;
-//             let nau32 = na as u32;
-//             output_buffer.write_all(&nau32.to_le_bytes()).unwrap();
+            // write the corrected barcode
+            bct.write_to(tup.0, &mut output_buffer).unwrap();
 
-//             // write the corrected barcode
-//             bct.write_to(tup.0, &mut output_buffer).unwrap();
+            // read the alignment records
+            reader.read_exact(&mut tbuf[0..(size_of_rec * na)]).unwrap();
+            // write them
+            output_buffer
+                .write_all(&tbuf[..(size_of_rec * na)])
+                .unwrap();
 
-//             // read the alignment records
-//             reader.read_exact(&mut tbuf[0..(size_of_rec * na)]).unwrap();
-//             // write them
-//             output_buffer
-//                 .write_all(&tbuf[..(size_of_rec * na)])
-//                 .unwrap();
+            v.offset = output_buffer.position();
+        } else {
+            panic!("should not have any barcodes we can't find");
+        }
+    }
 
-//             v.offset = output_buffer.position();
-//         } else {
-//             panic!("should not have any barcodes we can't find");
-//         }
-//     }
+    output_buffer.set_position(0);
 
-//     output_buffer.set_position(0);
+    if compress {
+        // compress the contents of output_buffer to compressed_output
+        let mut compressed_output =
+            snap::write::FrameEncoder::new(Cursor::new(Vec::<u8>::with_capacity(total_bytes)));
+        compressed_output
+            .write_all(output_buffer.get_ref())
+            .expect("could not compress the output chunk.");
 
-//     if compress {
-//         // compress the contents of output_buffer to compressed_output
-//         let mut compressed_output =
-//             snap::write::FrameEncoder::new(Cursor::new(Vec::<u8>::with_capacity(total_bytes)));
-//         compressed_output
-//             .write_all(output_buffer.get_ref())
-//             .expect("could not compress the output chunk.");
+        output_buffer = compressed_output
+            .into_inner()
+            .expect("couldn't unwrap the FrameEncoder.");
+        output_buffer.set_position(0);
+    }
 
-//         output_buffer = compressed_output
-//             .into_inner()
-//             .expect("couldn't unwrap the FrameEncoder.");
-//         output_buffer.set_position(0);
-//     }
+    owriter
+        .lock()
+        .unwrap()
+        .write_all(output_buffer.get_ref())
+        .unwrap();
 
-//     owriter
-//         .lock()
-//         .unwrap()
-//         .write_all(output_buffer.get_ref())
-//         .unwrap();
-
-//     cb_byte_map.len()
-// }
+    cb_byte_map.len()
+}
 
 pub fn collate_temporary_bucket<T: Read>(
     reader: &mut T,
@@ -812,110 +813,119 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 /// reaches `flush_limit`, flush the buffer by writing
 /// it to the `output_cache`.
 #[allow(clippy::too_many_arguments)]
-// pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
-//     reader: &mut BufReader<T>,
-//     bct: &RadIntId,
-//     correct_map: &HashMap<u64, u64>,
-//     output_cache: &HashMap<u64, Arc<TempBucket>>,
-//     local_buffers: &mut [Cursor<&mut [u8]>],
-//     flush_limit: usize,
-// ) {
-//     let mut buf = [0u8; 8];
-//     let mut tbuf = vec![0u8; 4096];
-//     //let mut tcursor = Cursor::new(tbuf);
-//     //tcursor.set_position(0);
+pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
+    reader: &mut BufReader<T>,
+    bct: &RadIntId,
+    correct_map: &HashMap<u64, u64>,
+    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    local_buffers: &mut [Cursor<&mut [u8]>],
+    flush_limit: usize,
+) {
+    let mut buf = [0u8; 8];
+    let mut tbuf = vec![0u8; 4096];
+    //let mut tcursor = Cursor::new(tbuf);
+    //tcursor.set_position(0);
 
-//     // get the number of bytes and records for
-//     // the next chunk
-//     reader.read_exact(&mut buf).unwrap();
-//     let _nbytes = buf.pread::<u32>(0).unwrap();
-//     let nrec = buf.pread::<u32>(4).unwrap();
+    // get the number of bytes and records for
+    // the next chunk
+    reader.read_exact(&mut buf).unwrap();
+    let _nbytes = buf.pread::<u32>(0).unwrap();
+    let nrec = buf.pread::<u32>(4).unwrap();
 
-//     let bc_bytes = bct.bytes_for_type();
-//     let na_bytes = std::mem::size_of::<u32>();
-//     let target_id_bytes = std::mem::size_of::<u32>() + // ref id
-//                         std::mem::size_of::<u8>() + // type
-//                         std::mem::size_of::<u32>() + // position
-//                         std::mem::size_of::<u16>(); // frag_len
+    let bc_bytes = bct.bytes_for_type();
+    let na_bytes = std::mem::size_of::<u32>();
+    let target_id_bytes = std::mem::size_of::<u32>() + // ref id
+                        std::mem::size_of::<u8>() + // type
+                        std::mem::size_of::<u32>() + // position
+                        std::mem::size_of::<u16>(); // frag_len
 
-//     // for each record, read it
-//     for _ in 0..(nrec as usize) {
-//         let tup = AtacSeqReadRecord::from_bytes_record_header(reader, bct, umit);
+    // for each record, read it
+    for _ in 0..(nrec as usize) {
+        let tup = AtacSeqReadRecord::from_bytes_record_header(reader, bct);
 
-//         // if this record had a correct or correctable barcode
-//         if let Some(corrected_id) = correct_map.get(&tup.0) {
-//             // could be replaced with orientation
-//             let rr = AtacSeqReadRecord::from_bytes(
-//                 reader,
-//                 tup.0,
-//             );
+        // if this record had a correct or correctable barcode
+        if let Some(corrected_id) = correct_map.get(&tup.0) {
+            // could be replaced with orientation
+            let rr = AtacSeqReadRecord::from_bytes_with_header(
+                reader,
+                tup.0,
+                tup.1
+            );
 
-//             if rr.is_empty() {
-//                 continue;
-//             }
-//             if let Some(v) = output_cache.get(corrected_id) {
-//                 // if this is a valid barcode, then
-//                 // write the corresponding entry to the
-//                 // thread-local buffer for this bucket
+            if rr.is_empty() {
+                continue;
+            }
+            if let Some(v) = output_cache.get(corrected_id) {
+                // if this is a valid barcode, then
+                // write the corresponding entry to the
+                // thread-local buffer for this bucket
 
-//                 // the total number of bytes this record will take
-//                 let nb = (rr.refs.len() * target_id_bytes + na_bytes + bc_bytes) as u64;
+                // the total number of bytes this record will take
+                let nb = (rr.refs.len() * target_id_bytes + na_bytes + bc_bytes) as u64;
 
-//                 // the buffer index for this corrected barcode
-//                 let buffidx = v.bucket_id as usize;
-//                 // the current cursor for this buffer
-//                 let bcursor = &mut local_buffers[buffidx];
-//                 // the current position of the cursor
-//                 let len = bcursor.position() as usize;
+                // the buffer index for this corrected barcode
+                let buffidx = v.bucket_id as usize;
+                // the current cursor for this buffer
+                let bcursor = &mut local_buffers[buffidx];
+                // the current position of the cursor
+                let len = bcursor.position() as usize;
 
-//                 // if writing the next record (nb bytes) will put us over
-//                 // the flush size for the thread-local buffer for this bucket
-//                 // then first flush the buffer to file.
-//                 if len + nb as usize >= flush_limit {
-//                     let mut filebuf = v.bucket_writer.lock().unwrap();
-//                     filebuf.write_all(&bcursor.get_ref()[0..len]).unwrap();
-//                     // and reset the local buffer cursor
-//                     bcursor.set_position(0);
-//                 }
+                // if writing the next record (nb bytes) will put us over
+                // the flush size for the thread-local buffer for this bucket
+                // then first flush the buffer to file.
+                if len + nb as usize >= flush_limit {
+                    let mut filebuf = v.bucket_writer.lock().unwrap();
+                    filebuf.write_all(&bcursor.get_ref()[0..len]).unwrap();
+                    // and reset the local buffer cursor
+                    bcursor.set_position(0);
+                }
 
-//                 // now, write the record to the buffer
-//                 let na = rr.refs.len() as u32;
-//                 bcursor.write_all(&na.to_le_bytes()).unwrap();
-//                 bct.write_to(*corrected_id, bcursor).unwrap();
-//                 bcursor.write_all(as_u8_slice(&rr.refs[..])).unwrap();
-//                 bcursor.write_all(as_u8_slice(&rr.map_type[..])).unwrap();
-//                 bcursor.write_all(as_u8_slice(&rr.start_pos[..])).unwrap();
-//                 bcursor.write_all(as_u8_slice(&rr.frag_lengths[..])).unwrap();
+                // now, write the record to the buffer
+                let na = rr.refs.len() as u32;
+                bcursor.write_all(&na.to_le_bytes()).unwrap();
+                bct.write_to(*corrected_id, bcursor).unwrap();
+                bcursor.write_all(as_u8_slice(&rr.refs[..])).unwrap();
+                bcursor.write_all(as_u8_slice_u8(&rr.map_type[..])).unwrap();
+                bcursor.write_all(as_u8_slice(&rr.start_pos[..])).unwrap();
+                bcursor.write_all(as_u8_slice_u16(&rr.frag_lengths[..])).unwrap();
 
-//                 // update number of written records
-//                 v.num_records_written.fetch_add(1, Ordering::SeqCst);
-//                 // update number of written bytes
-//                 v.num_bytes_written.fetch_add(nb, Ordering::SeqCst);
-//             }
-//         } else {
-//             // in this branch, we don't have access to a correct barcode for
-//             // what we observed, so we need to discard the remaining part of
-//             // the record.
-//             let req_len = target_id_bytes * (tup.1 as usize);
-//             let do_resize = req_len > tbuf.len();
+                // update number of written records
+                v.num_records_written.fetch_add(1, Ordering::SeqCst);
+                // update number of written bytes
+                v.num_bytes_written.fetch_add(nb, Ordering::SeqCst);
+            }
+        } else {
+            // in this branch, we don't have access to a correct barcode for
+            // what we observed, so we need to discard the remaining part of
+            // the record.
+            let req_len = target_id_bytes * (tup.1 as usize);
+            let do_resize = req_len > tbuf.len();
 
-//             if do_resize {
-//                 tbuf.resize(req_len, 0);
-//             }
+            if do_resize {
+                tbuf.resize(req_len, 0);
+            }
 
-//             reader
-//                 .read_exact(&mut tbuf[0..(target_id_bytes * (tup.1 as usize))])
-//                 .unwrap();
+            reader
+                .read_exact(&mut tbuf[0..(target_id_bytes * (tup.1 as usize))])
+                .unwrap();
 
-//             if do_resize {
-//                 tbuf.resize(4096, 0);
-//                 tbuf.shrink_to_fit();
-//             }
-//         }
-//     }
-// }
+            if do_resize {
+                tbuf.resize(4096, 0);
+                tbuf.shrink_to_fit();
+            }
+        }
+    }
+}
 
 pub fn as_u8_slice(v: &[u32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+
+pub fn as_u8_slice_u16(v: &[u16]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+}
+
+pub fn as_u8_slice_u8(v: &[u8]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 

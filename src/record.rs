@@ -101,6 +101,14 @@ pub trait RecordContext {
         Self: Sized;
 }
 
+// Modified from https://stackoverflow.com/questions/69764050/how-to-get-the-indices-that-would-sort-a-vec
+// kmdreko
+pub fn argsort<T: Ord>(data: &[T]) -> Vec<usize> {
+    let mut indices = (0..data.len()).collect::<Vec<_>>();
+    indices.sort_unstable_by_key(|&i| &data[i]);
+    indices
+}
+
 /// context needed to read an alevin-fry record
 /// (the types of the barcode and umi)
 #[derive(Debug, Clone)]
@@ -584,7 +592,7 @@ impl AtacSeqReadRecord {
             reader.read_exact(&mut rbuf[0..4]).unwrap();
             let start_pos = rbuf.pread::<u32>(0).unwrap();
             rec.start_pos.push(start_pos);
-            
+
             reader.read_exact(&mut rbuf[0..2]).unwrap();
             let frag_length = rbuf.pread::<u16>(0).unwrap();
             rec.frag_lengths.push(frag_length);
@@ -599,6 +607,54 @@ impl AtacSeqReadRecord {
         let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
         let bc = rad_io::read_into_u64(reader, bct);
         (bc, na)
+    }
+
+    pub fn from_bytes_with_header<T: Read>(
+        reader: &mut T,
+        bc: u64,
+        na: u32,
+    ) -> Self {
+        let mut rbuf = [0u8; 255];
+        let mut rec = Self {
+            bc,
+            refs: Vec::with_capacity(na as usize),
+            map_type: Vec::with_capacity(na as usize),
+            start_pos: Vec::with_capacity(na as usize),
+            frag_lengths: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let ref_id = rbuf.pread::<u32>(0).unwrap();
+            rec.refs.push(ref_id);
+
+            reader.read_exact(&mut rbuf[0..1]).unwrap();
+            let map_type = rbuf.pread::<u8>(0).unwrap();
+            rec.map_type.push(map_type);
+
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let start_pos = rbuf.pread::<u32>(0).unwrap();
+            rec.start_pos.push(start_pos);
+
+            reader.read_exact(&mut rbuf[0..2]).unwrap();
+            let frag_length = rbuf.pread::<u16>(0).unwrap();
+            rec.frag_lengths.push(frag_length);
+        }
+
+        // make sure these are sorted in this step.
+        // reimplement in a better way
+        let indices = argsort(&rec.refs);
+        let refs = rec.refs.clone();
+        let map_type = rec.map_type.clone();
+        let start_pos = rec.start_pos.clone();
+        let f_len = rec.frag_lengths.clone();
+        for i in 0..indices.len() {
+            rec.refs[i] = refs[indices[i]];
+            rec.map_type[i] = map_type[indices[i]];
+            rec.start_pos[i] = start_pos[indices[i]];
+            rec.frag_lengths[i] = f_len[indices[i]];
+        }
+        rec
     }
 }
 
