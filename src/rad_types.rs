@@ -1034,7 +1034,7 @@ pub struct TagMap {
 }
 
 impl TagMap {
-    /// Create a new TagMapView whose set of keys is determined by
+    /// Create a new [TagMap] whose set of keys is determined by
     /// the provided `keyset`. This will have one value slot for
     /// each provided key.
     pub fn with_keyset(keyset: &[TagDesc]) -> Self {
@@ -1054,7 +1054,7 @@ impl TagMap {
         Ok(())
     }
 
-    /// add the next TagValue to the data for this TagMapView.
+    /// add the next TagValue to the data for this [TagMap].
     /// This function doesn't check if the type is correct or
     /// if too many tag values have been added. It should
     /// only be used when one is certain that the next tag value
@@ -1080,7 +1080,7 @@ impl TagMap {
         self.dat.get(idx)
     }
 
-    /// writes the values contained in this [TagMapView], in order, to the provided
+    /// writes the values contained in this [TagMap], in order, to the provided
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         for (n, v) in self.keys.iter().zip(self.dat.iter()) {
@@ -1093,7 +1093,7 @@ impl TagMap {
 
 impl std::ops::Index<usize> for TagMap {
     type Output = TagValue;
-    /// Returns a reference to the [TagValue] in the [TagMapView] at the
+    /// Returns a reference to the [TagValue] in the [TagMap] at the
     /// provided `index`, panics if `index` is out of bounds.
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {

@@ -7,6 +7,10 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
+//! This module contains types and traits that provide a high-level iterface to
+//! reading and parsing RAD files.  Additionally, it provides types that give an
+//! interface for parsing RAD chunks in parallel for improved processing performance.
+
 use crate::libradicl::chunk::Chunk;
 use crate::libradicl::header::RadPrelude;
 use crate::libradicl::rad_types::TagMap;
@@ -262,8 +266,8 @@ where
 
 /// Allows reading the underlying RAD file in parallel (for the chunks) by dedicating a single
 /// thread (the one running functions on this structure) to filling
-/// a work queue. The queue is filled with `MetaChunk`s, which themselves
-/// provide an iterator over `Chunk`s. The `ParallelRadReader` first parses the
+/// a work queue. The queue is filled with [MetaChunk]s, which themselves
+/// provide an iterator over [Chunk]s. The [ParallelRadReader] first parses the
 /// prelude and file tag values itself, and then the chunks.  The main distinction
 /// between this type and [ParallelChunkReader] is that this takes care of parsing
 /// the prelude and file-level tag values as well.
@@ -277,6 +281,9 @@ pub struct ParallelRadReader<R: MappedRecord, T: BufRead + Seek> {
 }
 
 impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
+    /// Create a new [ParallelRadReader] over the contents provided by `reader`.
+    /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
+    /// threads once the [Self::start_chunk_parsing()] method has been called.
     pub fn new(mut reader: T, num_consumers: std::num::NonZeroUsize) -> Self {
         let prelude = RadPrelude::from_bytes(&mut reader).unwrap();
         let file_tag_map = prelude
@@ -300,15 +307,32 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
         self.meta_chunk_queue.clone()
     }
 
+    /// Get an [std::sync::Arc] holding the [AtomicBool] that records the status of the parsing of
+    /// the input file.  If the [AtomicBool] is false, parsing of the input file has not completed,
+    /// and it is still possible that new [MetaChunk]s will be placed on the work queue.  However, once
+    /// the contained [AtomicBool] has been set to true, the parsing is done and no further
+    /// [MetaChunk]s will be placed on the queue, other than those that are already "in flight".
     pub fn is_done(&self) -> Arc<AtomicBool> {
         self.done_var.clone()
     }
 
+    /// Get the current byte offset into the underlying `reader` stream from which this
+    /// RAD file is being consumed.
     pub fn get_byte_offset(&mut self) -> u64 {
         self.reader.stream_position().unwrap()
     }
 
-    /// NOTE: Blocking function; get the queue before calling this!
+    /// This function starts the process of parsing the [Chunk]s of the underlying RAD
+    /// file into a work queue of [MetaChunk]s, which can then be consumed by multiple
+    /// worker threads in parallel.
+    /// <div class="warning">
+    /// NOTE: This function will attempt to populate the queue until the
+    /// file is exhausted (all Chunks have been placed on the queue). However, to control
+    /// potential memory use, we use a bounded work queue.  Therefore, if the queue is not being
+    /// emptied by workers, this function will spin endlessly waiting to put the next MetaChunk
+    /// on the work queue. Since this is a blocking function, be sure to have the worker threads
+    /// obtain a reference to the queue (via the get_queue() method) before calling this function!
+    /// </div>
     pub fn start_chunk_parsing<F: FnMut(u64, u64)>(
         &mut self,
         callback: Option<F>,
@@ -330,11 +354,11 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
 /// Allows reading chunks from the underlying RAD file chunks
 /// in parallel by dedicating a single thread (the one running
 /// functions on this structure) to filling a work queue.
-/// The queue is filled with `MetaChunk`s, which themselves
-/// provide an iterator over `Chunk`s.  The `ParallelChunkReader`
-/// takes a reference to the `RadPrelude` for this RAD file so
-/// that it can produce `MetaChunk`s that know how to be properly
-/// parsed into `Chunk`s.
+/// The queue is filled with [MetaChunk]s, which themselves
+/// provide an iterator over [Chunk]s.  The [ParallelChunkReader]
+/// takes a reference to the [RadPrelude] for this RAD file so
+/// that it can produce [MetaChunk]s that know how to be properly
+/// parsed into [Chunk]s.
 #[derive(Debug)]
 pub struct ParallelChunkReader<'a, R: MappedRecord> {
     pub prelude: &'a RadPrelude,
@@ -372,7 +396,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
 }
 
 impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
-    /// Start this `ParallelChunkReader` processing input from the `BufRead` `br`.
+    /// Start this [ParallelChunkReader] processing input from the [BufRead] `br`.
     /// Note that this reader should be positioned at the start of the chunks for this
     /// RAD file, so that the prelude and file tag values have already been parsed/consumded.
     pub fn start<T: BufRead, F: FnMut(u64, u64)>(
