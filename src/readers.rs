@@ -21,6 +21,8 @@ use std::sync::{
     Arc,
 };
 
+/// This represents an empty callback of the appropriate type for the [ParallelChunkReader] and
+/// [ParallelRadReader] functions.  Use this when you want the callback to be a no-op.
 pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64, u64)>> = None;
 
 /// A [MetaChunk] consists of a series of [Chunk]s that may be grouped together
@@ -46,6 +48,8 @@ pub struct MetaChunkIterator<'a, 'b, R: MappedRecord> {
 impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkIterator<'a, 'b, R> {
     type Item = Chunk<R>;
 
+    /// Return the next [Chunk] contained within this [MetaChunk], returns
+    /// [None] when no chunks remain.
     fn next(&mut self) -> Option<Self::Item> {
         if self.curr_sub_chunk < self.num_sub_chunks {
             self.curr_sub_chunk += 1;
@@ -58,6 +62,8 @@ impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkIterator<'a, 'b, R> {
         }
     }
 
+    /// Since we know how many [Chunk]s compose each [MetaChunk], we provide the
+    /// optimal `size_hint` directly
     fn size_hint(&self) -> (usize, Option<usize>) {
         let rem = self.num_sub_chunks - self.curr_sub_chunk;
         (rem, Some(rem))
@@ -72,6 +78,7 @@ impl<R: MappedRecord> MetaChunk<R>
 where
     <R as MappedRecord>::ParsingContext: RecordContext,
 {
+    /// Creates a new [MetaChunk]
     pub fn new(
         first_chunk_index: usize,
         num_sub_chunks: usize,
@@ -90,6 +97,8 @@ where
         }
     }
 
+    /// Returns a [MetaChunkIterator] that can iterate over the
+    /// [Chunk]s of this [MetaChunk].
     pub fn iter(&self) -> MetaChunkIterator<R> {
         MetaChunkIterator {
             curr_sub_chunk: 0,
@@ -99,17 +108,41 @@ where
         }
     }
 
+    /// The number of records present in this entire [MetaChunk]
     pub fn num_records(&self) -> u32 {
         self.num_records
     }
+
+    /// The number of bytes present in this entire [MetaChunk]
     pub fn num_bytes(&self) -> u32 {
         self.num_bytes
     }
+
+    /// The id of the first chunk present in this [MetaChunk]
     pub fn first_chunk_index(&self) -> usize {
         self.first_chunk_index
     }
 }
 
+/// This free function is used within the [ParallelRadReader] and [ParallelChunkReader] to
+/// fill a work queue with [MetaChunk]s from the current file position until the end of the
+/// file is reached.
+///
+/// <div class="warning">
+/// NOTE:: For this function to work correctly, it is assumed that, at the point this function is
+/// invoked, the reader `br` is offset at the start of the first [Chunk] in the file (directly
+/// after file-level tag values).
+/// </div>
+///
+/// * `br` - The underlying reader from which the [Chunk]s are drawn
+/// * `callback` - An optional callback to be invoked when each new [MetaChunk] is placed on the work
+/// queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
+/// [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
+/// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
+/// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
+/// placed
+/// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
+/// underlying file have been read and added to the work queue.
 fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead, F: FnMut(u64, u64)>(
     mut br: T,
     mut callback: Option<F>,
@@ -179,12 +212,10 @@ where
         // and we are just filling up the buffer with the last chunk, and there will be no more
         // headers left to read
         if utils::has_data_left(&mut br).expect("encountered error reading input file") {
-            //println!("reading header for chunk {}", chunk_num);
             let (nc, nr) = Chunk::<R>::read_header(&mut br);
             nbytes_chunk = nc;
             nrec_chunk = nr;
         } else {
-            //println!("last chunk!");
             last_chunk = true;
         }
 
@@ -213,7 +244,6 @@ where
             callback
                 .iter_mut()
                 .for_each(|f| f(cbytes as u64, chunks_in_meta_chunk as u64));
-            // pbar.inc(cells_in_chunk as u64);
 
             // offset of the first cell in the next chunk
             first_chunk += chunks_in_meta_chunk;

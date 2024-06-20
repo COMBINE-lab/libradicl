@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     let file_len = metadata.len();
     let ifile = BufReader::new(f);
 
-    const NWORKERS: usize = 4;
+    const NWORKERS: usize = 12;
     let mut rad_reader = ParallelRadReader::<AtacSeqReadRecord, BufReader<File>>::new(
         ifile,
         NonZeroUsize::new(NWORKERS).unwrap(),
