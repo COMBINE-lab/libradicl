@@ -40,6 +40,9 @@ pub fn read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> u64 {
             reader.read_exact(&mut rbuf[0..8]).unwrap();
             rbuf.pread::<u64>(0).unwrap()
         }
+        RadIntId::U128 => {
+            panic!("cannot read u128 into a u64");
+        }
     };
     v
 }
@@ -79,6 +82,9 @@ pub fn try_read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> anyhow::Resu
             rbuf.pread::<u64>(0)
                 .context("couldn't parse result as u8")?
         }
+        RadIntId::U128 => {
+            anyhow::bail!("cannot read u128 into u64");
+        }
     };
     Ok(v)
 }
@@ -105,6 +111,11 @@ pub fn write_str_bin(v: &str, type_id: &RadIntId, owriter: &mut Cursor<Vec<u8>>)
         RadIntId::U64 => {
             owriter
                 .write_all(&(v.len() as u64).to_le_bytes())
+                .expect("coudn't write to output file");
+        }
+        RadIntId::U128 => {
+            owriter
+                .write_all(&(v.len() as u128).to_le_bytes())
                 .expect("coudn't write to output file");
         }
     }
