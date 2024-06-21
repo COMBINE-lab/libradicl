@@ -58,6 +58,12 @@ macro_rules! write_tag_value_array {
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u64")?;
             }
+            RadIntId::U128 => {
+                let l: u128 = $v.len() as u128;
+                $writer
+                    .write_all(&l.to_le_bytes())
+                    .context("couldn't write array length as u128")?;
+            }
         }
         let $slice_name: &[u8] = bytemuck::try_cast_slice(&$v)
             .or_else(|_e| Err(anyhow::anyhow!("could't convert array contents to &[u8]")))
@@ -91,6 +97,13 @@ macro_rules! tag_value_try_into_int {
                     }
                     TagValue::U64(x) => {
                         if x as u64 > <$b>::MAX as u64 {
+                            bail!("Cannot convert value {x} to {}; too large", stringify!($b))
+                        } else {
+                            Ok(x as $b)
+                        }
+                    }
+                    TagValue::U128(x) => {
+                        if x as u128 > <$b>::MAX as u128 {
                             bail!("Cannot convert value {x} to {}; too large", stringify!($b))
                         } else {
                             Ok(x as $b)

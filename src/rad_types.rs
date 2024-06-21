@@ -127,6 +127,7 @@ pub enum RadIntId {
     U16,
     U32,
     U64,
+    U128,
 }
 
 impl RadIntId {
@@ -139,6 +140,7 @@ impl RadIntId {
             Self::U16 => mem::size_of::<u16>(),
             Self::U32 => mem::size_of::<u32>(),
             Self::U64 => mem::size_of::<u64>(),
+            Self::U128 => mem::size_of::<u128>(),
         }
     }
 
@@ -165,6 +167,40 @@ impl RadIntId {
                 reader.read_exact(&mut rbuf[0..8]).unwrap();
                 rbuf.pread::<u64>(0).unwrap()
             }
+            RadIntId::U128 => {
+                panic!("cannot read a u128 into a u64");
+            }
+        };
+        v
+    }
+
+    /// Read a value whose size matches this [RadIntId] and return
+    /// the value in a [u128] container
+    #[inline]
+    pub fn read_value_into_u128<R: Read>(&self, reader: &mut R) -> u128 {
+        let mut rbuf = [0u8; 16];
+
+        let v: u128 = match self {
+            RadIntId::U8 => {
+                reader.read_exact(&mut rbuf[0..1]).unwrap();
+                rbuf.pread::<u8>(0).unwrap() as u128
+            }
+            RadIntId::U16 => {
+                reader.read_exact(&mut rbuf[0..2]).unwrap();
+                rbuf.pread::<u16>(0).unwrap() as u128
+            }
+            RadIntId::U32 => {
+                reader.read_exact(&mut rbuf[0..4]).unwrap();
+                rbuf.pread::<u32>(0).unwrap() as u128
+            }
+            RadIntId::U64 => {
+                reader.read_exact(&mut rbuf[0..8]).unwrap();
+                rbuf.pread::<u64>(0).unwrap() as u128
+            }
+            RadIntId::U128 => {
+                reader.read_exact(&mut rbuf[0..16]).unwrap();
+                rbuf.pread::<u128>(0).unwrap()
+            }
         };
         v
     }
@@ -179,6 +215,7 @@ impl From<RadIntId> for u8 {
             RadIntId::U16 => 2_u8,
             RadIntId::U32 => 3_u8,
             RadIntId::U64 => 4_u8,
+            RadIntId::U128 => 9_u8,
         }
     }
 }
@@ -193,6 +230,7 @@ impl From<u8> for RadIntId {
             2 => Self::U16,
             3 => Self::U32,
             4 => Self::U64,
+            9 => Self::U128,
             _ => panic!("Should not happen"),
         }
     }
@@ -235,11 +273,13 @@ pub trait PrimitiveInteger:
     + AsPrimitive<u16>
     + AsPrimitive<u32>
     + AsPrimitive<u64>
+    + AsPrimitive<u128>
     + AsPrimitive<usize>
     + AsPrimitive<i8>
     + AsPrimitive<i16>
     + AsPrimitive<i32>
     + AsPrimitive<i64>
+    + AsPrimitive<i128>
     + AsPrimitive<isize>
 {
 }
@@ -249,11 +289,13 @@ impl<
             + AsPrimitive<u16>
             + AsPrimitive<u32>
             + AsPrimitive<u64>
+            + AsPrimitive<u128>
             + AsPrimitive<usize>
             + AsPrimitive<i8>
             + AsPrimitive<i16>
             + AsPrimitive<i32>
             + AsPrimitive<i64>
+            + AsPrimitive<i128>
             + AsPrimitive<isize>,
     > PrimitiveInteger for T
 {
@@ -296,6 +338,10 @@ impl RadIntId {
                 let vo: u64 = v.as_();
                 owriter.write_all(&vo.to_le_bytes())
             }
+            Self::U128 => {
+                let vo: u128 = v.as_();
+                owriter.write_all(&vo.to_le_bytes())
+            }
         }
     }
 
@@ -309,6 +355,9 @@ impl RadIntId {
             Self::U16 => buf.pread::<u16>(0).unwrap() as usize,
             Self::U32 => buf.pread::<u32>(0).unwrap() as usize,
             Self::U64 => buf.pread::<u64>(0).unwrap() as usize,
+            Self::U128 => {
+                panic!("cannot read u128 into usize!")
+            }
         }
     }
 }
@@ -350,6 +399,7 @@ impl From<RadAtomicId> for u8 {
             RadAtomicId::Int(RadIntId::U16) => 2,
             RadAtomicId::Int(RadIntId::U32) => 3,
             RadAtomicId::Int(RadIntId::U64) => 4,
+            RadAtomicId::Int(RadIntId::U128) => 9,
             RadAtomicId::Float(RadFloatId::F32) => 5,
             RadAtomicId::Float(RadFloatId::F64) => 6,
             RadAtomicId::String => 8,
@@ -368,6 +418,7 @@ impl From<u8> for RadAtomicId {
             2 => Self::Int(RadIntId::U16),
             3 => Self::Int(RadIntId::U32),
             4 => Self::Int(RadIntId::U64),
+            9 => Self::Int(RadIntId::U128),
             5 => Self::Float(RadFloatId::F32),
             6 => Self::Float(RadFloatId::F64),
             8 => Self::String,
@@ -460,6 +511,7 @@ pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
         RadType::Float(RadFloatId::F64) => Some(6),
         RadType::Array(_, _) => Some(7),
         RadType::String => Some(8), //_ => None,
+        RadType::Int(RadIntId::U128) => Some(9),
     }
 }
 
@@ -472,6 +524,7 @@ pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
         2 => Some(RadIntId::U16),
         3 => Some(RadIntId::U32),
         4 => Some(RadIntId::U64),
+        9 => Some(RadIntId::U128),
         _ => None,
     }
 }
@@ -624,6 +677,7 @@ impl From<u8> for RadType {
             6 => RadType::Float(RadFloatId::F64),
             7 => panic!("Should not happen"),
             8 => RadType::String,
+            9 => RadType::Int(RadIntId::U128),
             _ => panic!("Should not happen"),
         }
     }
@@ -640,6 +694,7 @@ pub enum TagValue {
     U16(u16),
     U32(u32),
     U64(u64),
+    U128(u128),
     F32(f32),
     F64(f64),
     ArrayBool(Vec<bool>),
@@ -647,6 +702,7 @@ pub enum TagValue {
     ArrayU16(Vec<u16>),
     ArrayU32(Vec<u32>),
     ArrayU64(Vec<u64>),
+    ArrayU128(Vec<u128>),
     ArrayF32(Vec<f32>),
     ArrayF64(Vec<f64>),
     ArrayString(Vec<String>),
@@ -681,17 +737,22 @@ impl TagValue {
             Self::U16(v) => {
                 writer
                     .write_all(&v.to_le_bytes())
-                    .context("couldn't write U8 tag value")?;
+                    .context("couldn't write U16 tag value")?;
             }
             Self::U32(v) => {
                 writer
                     .write_all(&v.to_le_bytes())
-                    .context("couldn't write U8 tag value")?;
+                    .context("couldn't write U32 tag value")?;
             }
             Self::U64(v) => {
                 writer
                     .write_all(&v.to_le_bytes())
-                    .context("couldn't write U8 tag value")?;
+                    .context("couldn't write U64 tag value")?;
+            }
+            Self::U128(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write U128 tag value")?;
             }
             Self::F32(v) => {
                 writer
@@ -734,6 +795,13 @@ impl TagValue {
             Self::ArrayU64(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
                     write_tag_value_array!(vb, len_t, u64, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayU128(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, u128, x, writer);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
@@ -827,7 +895,7 @@ impl TagDesc {
     /// will `panic` if it cannot succesfully read the [TagValue]
     /// from `reader`.
     pub fn value_from_bytes<T: Read>(&self, reader: &mut T) -> TagValue {
-        let mut small_buf = [0u8; 8];
+        let mut small_buf = [0u8; 16];
         match self.typeid {
             RadType::Bool => {
                 let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u8>()]);
@@ -848,6 +916,10 @@ impl TagDesc {
             RadType::Int(RadIntId::U64) => {
                 let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u64>()]);
                 TagValue::U64(small_buf.pread::<u64>(0).unwrap())
+            }
+            RadType::Int(RadIntId::U128) => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u128>()]);
+                TagValue::U128(small_buf.pread::<u128>(0).unwrap())
             }
             RadType::Float(RadFloatId::F32) => {
                 let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<f32>()]);
@@ -889,6 +961,9 @@ impl TagDesc {
                         RadAtomicId::Int(RadIntId::U64) => {
                             TagValue::ArrayU64(u8_to_vec_of!(data, u64))
                         }
+                        RadAtomicId::Int(RadIntId::U128) => {
+                            TagValue::ArrayU128(u8_to_vec_of!(data, u128))
+                        }
                         RadAtomicId::Float(RadFloatId::F32) => {
                             TagValue::ArrayF32(u8_to_vec_of!(data, f32))
                         }
@@ -924,6 +999,7 @@ impl TagDesc {
             (RadType::Int(RadIntId::U16), TagValue::U16(_)) => true,
             (RadType::Int(RadIntId::U32), TagValue::U32(_)) => true,
             (RadType::Int(RadIntId::U64), TagValue::U64(_)) => true,
+            (RadType::Int(RadIntId::U128), TagValue::U128(_)) => true,
             (RadType::Float(RadFloatId::F32), TagValue::F32(_)) => true,
             (RadType::Float(RadFloatId::F64), TagValue::F64(_)) => true,
             (RadType::Array(_, RadAtomicId::Bool), TagValue::ArrayBool(_)) => true,
@@ -931,6 +1007,7 @@ impl TagDesc {
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U16)), TagValue::ArrayU16(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U32)), TagValue::ArrayU32(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U64)), TagValue::ArrayU64(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::U128)), TagValue::ArrayU128(_)) => true,
             (RadType::Array(_, RadAtomicId::Float(RadFloatId::F32)), TagValue::ArrayF32(_)) => true,
             (RadType::Array(_, RadAtomicId::Float(RadFloatId::F64)), TagValue::ArrayF64(_)) => true,
             (RadType::Array(_, RadAtomicId::String), TagValue::ArrayString(_)) => true,
@@ -955,6 +1032,50 @@ pub struct TagViewMap<'a> {
 /// TODO: Figure out how to minimize duplcation between
 /// TagMap and TagViewMap
 
+/// Free functions that reduce redundancy in the implementations of
+/// TagMap and TagViewMap.
+///
+
+#[inline(always)]
+fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::Result<()> {
+    let next_idx = dat.len();
+    anyhow::ensure!(next_idx < keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", keys.len());
+    anyhow::ensure!(
+        keys[next_idx].matches_value_type(&val),
+        "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}",
+        keys[next_idx]
+    );
+    dat.push(val);
+    Ok(())
+}
+
+#[inline(always)]
+fn get_tag_by_name<'a>(
+    key: &str,
+    dat: &'a Vec<TagValue>,
+    keys: &[TagDesc],
+) -> Option<&'a TagValue> {
+    for (k, val) in keys.iter().zip(dat.iter()) {
+        if k.name == key {
+            return Some(val);
+        }
+    }
+    None
+}
+
+#[inline(always)]
+fn write_tag_map_values<W: Write>(
+    dat: &[TagValue],
+    keys: &[TagDesc],
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    for (n, v) in keys.iter().zip(dat.iter()) {
+        v.write_with_type(&n.typeid, writer)
+            .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
+    }
+    Ok(())
+}
+
 impl<'a> TagViewMap<'a> {
     /// Create a new TagViewMap whose set of keys is determined by
     /// the provided `keyset`. This will have one value slot for
@@ -969,11 +1090,7 @@ impl<'a> TagViewMap<'a> {
     /// Try to add the next tag value. If there is space and the type
     /// matches, add it and return `true`, otherwise return `false`.
     pub fn try_add(&mut self, val: TagValue) -> anyhow::Result<()> {
-        let next_idx = self.dat.len();
-        anyhow::ensure!(next_idx < self.keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", self.keys.len());
-        anyhow::ensure!(self.keys[next_idx].matches_value_type(&val), "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}", self.keys[next_idx]);
-        self.dat.push(val);
-        Ok(())
+        try_add(&mut self.dat, &self.keys, val)
     }
 
     /// add the next TagValue to the data for this TagViewMap.
@@ -988,12 +1105,7 @@ impl<'a> TagViewMap<'a> {
     /// get the value for the tag associated with the name `key`, returns
     /// Some(&TagValue) for the appropriate tag if it exists, and None otherwise.
     pub fn get(&self, key: &str) -> Option<&TagValue> {
-        for (k, val) in self.keys.iter().zip(self.dat.iter()) {
-            if k.name == key {
-                return Some(val);
-            }
-        }
-        None
+        get_tag_by_name(key, &self.dat, &self.keys)
     }
 
     /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx`
@@ -1005,11 +1117,7 @@ impl<'a> TagViewMap<'a> {
     /// writes the values contained in this [TagViewMap], in order, to the provided
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
-        for (n, v) in self.keys.iter().zip(self.dat.iter()) {
-            v.write_with_type(&n.typeid, writer)
-                .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
-        }
-        Ok(())
+        write_tag_map_values(&self.dat, &self.keys, writer)
     }
 }
 
@@ -1047,11 +1155,7 @@ impl TagMap {
     /// Try to add the next tag value. If there is space and the type
     /// matches, add it and return `true`, otherwise return `false`.
     pub fn try_add(&mut self, val: TagValue) -> anyhow::Result<()> {
-        let next_idx = self.dat.len();
-        anyhow::ensure!(next_idx < self.keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", self.keys.len());
-        anyhow::ensure!(self.keys[next_idx].matches_value_type(&val), "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}", self.keys[next_idx]);
-        self.dat.push(val);
-        Ok(())
+        try_add(&mut self.dat, &self.keys, val)
     }
 
     /// add the next TagValue to the data for this [TagMap].
@@ -1066,12 +1170,7 @@ impl TagMap {
     /// get the value for the tag associated with the name `key`, returns
     /// Some(&TagValue) for the appropriate tag if it exists, and None otherwise.
     pub fn get(&self, key: &str) -> Option<&TagValue> {
-        for (k, val) in self.keys.iter().zip(self.dat.iter()) {
-            if k.name == key {
-                return Some(val);
-            }
-        }
-        None
+        get_tag_by_name(key, &self.dat, &self.keys)
     }
 
     /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx`
@@ -1083,11 +1182,7 @@ impl TagMap {
     /// writes the values contained in this [TagMap], in order, to the provided
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
-        for (n, v) in self.keys.iter().zip(self.dat.iter()) {
-            v.write_with_type(&n.typeid, writer)
-                .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
-        }
-        Ok(())
+        write_tag_map_values(&self.dat, &self.keys, writer)
     }
 }
 
