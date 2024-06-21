@@ -271,12 +271,14 @@ impl MappedRecord for AlevinFryReadRecord {
             RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
             RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
         };
         let umi = match ctx.umit {
             RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
             RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
             RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
         };
         (bc, umi)
     }
@@ -483,6 +485,7 @@ impl MappedRecord for AtacSeqReadRecord {
             RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
             RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
         }
     }
 
