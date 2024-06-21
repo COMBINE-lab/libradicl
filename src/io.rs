@@ -17,8 +17,7 @@ use std::io::Write;
 use std::io::{Cursor, Read};
 
 /// A free function to read an integer, described by the provided [RadIntId]
-/// into a `u64` container (which is guaranteed to be large enough to
-/// fit any valid [RadIntId] type). Returns the u64 containing the value
+/// into a `u64` container. Returns the u64 containing the value
 /// read, panics on error.
 pub fn read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> u64 {
     let mut rbuf = [0u8; 8];
@@ -48,8 +47,21 @@ pub fn read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> u64 {
 }
 
 /// A free function to read an integer, described by the provided [RadIntId]
-/// into a `u64` container (which is guaranteed to be large enough to
-/// fit any valid [RadIntId] type).  Returns an [anyhow::Result] containing
+/// into a `u128` container (which is guaranteed to be large enough to
+/// fit any valid [RadIntId] type). Returns the u128 containing the value
+/// read, panics on error.
+pub fn read_into_u128<T: Read>(reader: &mut T, rt: &RadIntId) -> u128 {
+    if matches!(rt, RadIntId::U128) {
+        let mut rbuf = [0u8; 16];
+        reader.read_exact(&mut rbuf[0..16]).unwrap();
+        rbuf.pread::<u128>(0).unwrap()
+    } else {
+        read_into_u64(reader, rt) as u128
+    }
+}
+
+/// A free function to read an integer, described by the provided [RadIntId]
+/// into a `u64` container.  Returns an [anyhow::Result] containing
 /// the u64 value read on success, or an error otherwise.
 pub fn try_read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> anyhow::Result<u64> {
     let mut rbuf = [0u8; 8];
@@ -87,6 +99,25 @@ pub fn try_read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> anyhow::Resu
         }
     };
     Ok(v)
+}
+
+/// A free function to read an integer, described by the provided [RadIntId]
+/// into a `u128` container (which is guaranteed to be large enough to
+/// fit any valid [RadIntId] type).  Returns an [anyhow::Result] containing
+/// the u128 value read on success, or an error otherwise.
+pub fn try_read_into_u128<T: Read>(reader: &mut T, rt: &RadIntId) -> anyhow::Result<u128> {
+    if matches!(rt, RadIntId::U128) {
+        let mut rbuf = [0u8; 16];
+        reader
+            .read_exact(&mut rbuf[0..16])
+            .context("couldn't read u64 from the reader")?;
+        let v: u128 = rbuf
+            .pread::<u128>(0)
+            .context("couldn't parse result as u128")?;
+        Ok(v)
+    } else {
+        Ok(try_read_into_u64(reader, rt).unwrap() as u128)
+    }
 }
 
 /// A free function write a Name, RadIntId pair to the provided `owriter`.
