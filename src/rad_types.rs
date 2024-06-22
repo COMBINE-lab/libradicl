@@ -1029,12 +1029,8 @@ pub struct TagViewMap<'a> {
     dat: Vec<TagValue>,
 }
 
-/// TODO: Figure out how to minimize duplcation between
-/// TagMap and TagViewMap
-
 /// Free functions that reduce redundancy in the implementations of
 /// TagMap and TagViewMap.
-///
 
 #[inline(always)]
 fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::Result<()> {

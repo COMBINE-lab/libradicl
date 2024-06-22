@@ -31,6 +31,7 @@ pub struct TryWrapper<T>(pub T);
 macro_rules! as_u64 {
     ("NewU128") => {
         impl std::convert::From<$from_type> for u64 {
+            #[inline(always)]
             fn from(x: $from_type) -> Self {
                 panic!("cannot convert u128 into u64");
             }
@@ -38,6 +39,7 @@ macro_rules! as_u64 {
     };
     ($from_type: ty) => {
         impl std::convert::From<$from_type> for u64 {
+            #[inline(always)]
             fn from(x: $from_type) -> Self {
                 x.0 as u64
             }
@@ -48,6 +50,7 @@ macro_rules! as_u64 {
 macro_rules! as_u128 {
     ($from_type: ty) => {
         impl std::convert::From<$from_type> for u128 {
+            #[inline(always)]
             fn from(x: $from_type) -> Self {
                 x.0 as u128
             }
@@ -59,6 +62,7 @@ macro_rules! try_as_u64 {
     ("NewU128") => {
         impl std::convert::TryFrom<TryWrapper<$from_type>> for u64 {
             type Error = &'static str;
+            #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
                 Err("Cannot convert u128 into u64")
             }
@@ -67,6 +71,7 @@ macro_rules! try_as_u64 {
     ($from_type: ty) => {
         impl std::convert::TryFrom<TryWrapper<$from_type>> for u64 {
             type Error = &'static str;
+            #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
                 Ok(x.0 .0 as u64)
             }
@@ -78,6 +83,7 @@ macro_rules! try_as_u128 {
     ($from_type: ty) => {
         impl std::convert::TryFrom<TryWrapper<$from_type>> for u128 {
             type Error = &'static str;
+            #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
                 Ok(x.0 .0 as u128)
             }
