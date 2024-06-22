@@ -11,9 +11,12 @@
 //! traits for [MappedRecord]s and [RecordContext]s. It also defines concrete types
 //! implementing these traits for `alevin-fry` and `piscem-infer`.
 
+use crate::io::{NewU128, NewU16, NewU32, NewU64, NewU8, TryWrapper};
 use crate::{
     io as rad_io,
-    rad_types::{MappedFragmentOrientation, MappingType, RadIntId, RadType, TagSection},
+    rad_types::{
+        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType, TagSection,
+    },
     utils,
 };
 use anyhow::{self, bail, Context};
@@ -22,13 +25,17 @@ use scroll::Pread;
 use std::io::{Read, Write};
 use std::mem;
 
+pub type AlevinFryReadRecord = AlevinFryReadRecordT<u64>;
+pub type AlevinFryReadRecordU64 = AlevinFryReadRecordT<u64>;
+pub type AlevinFryReadRecordU128 = AlevinFryReadRecordT<u128>;
+
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
 /// This represents the set of alignments and relevant information
 /// for a basic alevin-fry record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AlevinFryReadRecord {
-    pub bc: u64,
+pub struct AlevinFryReadRecordT<B: ConvertiblePrimitiveInteger> {
+    pub bc: B,
     pub umi: u64,
     pub dirs: Vec<bool>,
     pub refs: Vec<u32>,
@@ -247,9 +254,9 @@ impl MappedRecord for PiscemBulkReadRecord {
     }
 }
 
-impl MappedRecord for AlevinFryReadRecord {
+impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     type ParsingContext = AlevinFryRecordContext;
-    type PeekResult = (u64, u64);
+    type PeekResult = (B, u64);
 
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -258,12 +265,12 @@ impl MappedRecord for AlevinFryReadRecord {
 
         let _na = buf.pread::<u32>(0).unwrap();
 
-        let bc = match ctx.bct {
-            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
-            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
-            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
-            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
-            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
+        let bc: B = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
         };
         let umi = match ctx.umit {
             RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
@@ -322,7 +329,38 @@ impl MappedRecord for AlevinFryReadRecord {
     }
 }
 
-impl AlevinFryReadRecord {
+pub trait ConvertiblePrimitiveInteger:
+    PrimitiveInteger
+    + std::convert::From<NewU8>
+    + std::convert::From<NewU16>
+    + std::convert::From<NewU32>
+    + std::convert::From<NewU64>
+    + std::convert::From<NewU128>
+    + std::convert::TryFrom<TryWrapper<NewU8>>
+    + std::convert::TryFrom<TryWrapper<NewU16>>
+    + std::convert::TryFrom<TryWrapper<NewU32>>
+    + std::convert::TryFrom<TryWrapper<NewU64>>
+    + std::convert::TryFrom<TryWrapper<NewU128>>
+{
+}
+
+impl<
+        T: PrimitiveInteger
+            + std::convert::From<NewU8>
+            + std::convert::From<NewU16>
+            + std::convert::From<NewU32>
+            + std::convert::From<NewU64>
+            + std::convert::From<NewU128>
+            + std::convert::TryFrom<TryWrapper<NewU8>>
+            + std::convert::TryFrom<TryWrapper<NewU16>>
+            + std::convert::TryFrom<TryWrapper<NewU32>>
+            + std::convert::TryFrom<TryWrapper<NewU64>>
+            + std::convert::TryFrom<TryWrapper<NewU128>>,
+    > ConvertiblePrimitiveInteger for T
+{
+}
+
+impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordT<B> {
     /// Returns `true` if this [AlevinFryReadRecord] contains no references and
     /// `false` otherwise.
     pub fn is_empty(&self) -> bool {
@@ -362,11 +400,12 @@ impl AlevinFryReadRecord {
         reader: &mut T,
         bct: &RadIntId,
         umit: &RadIntId,
-    ) -> (u64, u64, u32) {
+    ) -> (B, u64, u32) {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
-        let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
-        let bc = rad_io::read_into_u64(reader, bct);
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, bct);
+        // NOTE: We likely will want to make the UMI generic as well
         let umi = rad_io::read_into_u64(reader, umit);
         (bc, umi, na)
     }
@@ -379,7 +418,7 @@ impl AlevinFryReadRecord {
     #[inline]
     pub fn from_bytes_with_header_keep_ori<T: Read>(
         reader: &mut T,
-        bc: u64,
+        bc: B,
         umi: u64,
         na: u32,
         expected_ori: &Strand,

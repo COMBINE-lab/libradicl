@@ -1050,11 +1050,7 @@ fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::
 }
 
 #[inline(always)]
-fn get_tag_by_name<'a>(
-    key: &str,
-    dat: &'a Vec<TagValue>,
-    keys: &[TagDesc],
-) -> Option<&'a TagValue> {
+fn get_tag_by_name<'a>(key: &str, dat: &'a [TagValue], keys: &[TagDesc]) -> Option<&'a TagValue> {
     for (k, val) in keys.iter().zip(dat.iter()) {
         if k.name == key {
             return Some(val);
@@ -1090,7 +1086,7 @@ impl<'a> TagViewMap<'a> {
     /// Try to add the next tag value. If there is space and the type
     /// matches, add it and return `true`, otherwise return `false`.
     pub fn try_add(&mut self, val: TagValue) -> anyhow::Result<()> {
-        try_add(&mut self.dat, &self.keys, val)
+        try_add(&mut self.dat, self.keys, val)
     }
 
     /// add the next TagValue to the data for this TagViewMap.
@@ -1105,7 +1101,7 @@ impl<'a> TagViewMap<'a> {
     /// get the value for the tag associated with the name `key`, returns
     /// Some(&TagValue) for the appropriate tag if it exists, and None otherwise.
     pub fn get(&self, key: &str) -> Option<&TagValue> {
-        get_tag_by_name(key, &self.dat, &self.keys)
+        get_tag_by_name(key, &self.dat, self.keys)
     }
 
     /// get the value for the tag at index `idx` returns Some(&TagValue) if `idx`
@@ -1117,7 +1113,7 @@ impl<'a> TagViewMap<'a> {
     /// writes the values contained in this [TagViewMap], in order, to the provided
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
-        write_tag_map_values(&self.dat, &self.keys, writer)
+        write_tag_map_values(&self.dat, self.keys, writer)
     }
 }
 
