@@ -118,6 +118,10 @@ macro_rules! tag_value_try_into_int {
     };
 }
 
+/// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u64]. Note that
+/// conversion from a [crate::libradicl::io::NewU128] will [panic!] as the underlying native type
+/// is too narrow to hold the contents of the integer.
 #[macro_export]
 macro_rules! as_u64 {
     ("NewU128") => {
@@ -138,6 +142,8 @@ macro_rules! as_u64 {
     };
 }
 
+/// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128].
 #[macro_export]
 macro_rules! as_u128 {
     ($from_type: ty) => {
@@ -150,6 +156,10 @@ macro_rules! as_u128 {
     };
 }
 
+/// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u64]. If the
+/// conversion is successful, we produce an [Ok]\([u64]\), otherwise we produce an
+/// [std::result::Result::Err].
 #[macro_export]
 macro_rules! try_as_u64 {
     ("NewU128") => {
@@ -172,6 +182,9 @@ macro_rules! try_as_u64 {
     };
 }
 
+/// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128]. If the
+/// conversion is successful, we produce an [Ok]\([u128]\), otherwise we produce an [std::result::Result::Err].
 #[macro_export]
 macro_rules! try_as_u128 {
     ($from_type: ty) => {

@@ -17,6 +17,10 @@ use scroll::Pread;
 use std::io::{Cursor, Read};
 use std::io::{Seek, SeekFrom, Write};
 
+/// Represents a chunk of recrords in a RAD file. The record chunks constitute the
+/// bulk of the RAD file, and each has an associated number of bytes and number of
+/// records (encoded in the header).  This structure represents the parsed chunk and
+/// it holds the associated records in its `reads` field.
 #[derive(Debug, PartialEq)]
 pub struct Chunk<T: MappedRecord> {
     pub nbytes: u32,

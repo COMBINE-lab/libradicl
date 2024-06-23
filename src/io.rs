@@ -19,16 +19,31 @@ use scroll::Pread;
 use std::io::Write;
 use std::io::{Cursor, Read};
 
-/// Since we cannot implement [From] for the
-/// relevant builtin types ([u8], [u16], [u32],
-/// [u64], [u128]), we have to wrap them in a
-/// newtype to implement this trait. These are
-/// the corresponding newtypes for each of the
-/// supported primitive integer types.
+// Since we cannot implement [From] for the
+// relevant builtin types ([u8], [u16], [u32],
+// [u64], [u128]), we have to wrap them in a
+// newtype to implement this trait. These are
+// the corresponding newtypes for each of the
+// supported primitive integer types.
+
+/// Wrapper type for [u8] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
 pub struct NewU8(pub u8);
+
+/// Wrapper type for [u16] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
 pub struct NewU16(pub u16);
+
+/// Wrapper type for [u32] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
 pub struct NewU32(pub u32);
+
+/// Wrapper type for [u64] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
 pub struct NewU64(pub u64);
+
+/// Wrapper type for [u128] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
 pub struct NewU128(pub u128);
 
 /// Allows a distinct [TryFrom] implementation for
@@ -94,10 +109,12 @@ pub fn read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> u64 {
 /// an integer of the appropriate width.
 ///
 /// <section class="warning">
+///
 /// If the `rt` argument is a [RadIntId::U128] and the user is requesting to
 /// read into a u64, this will cause a runtime `panic!`.  All types can be
 /// safely converted into a `u128`, but only `u8`, `u16`, `u32`, and `u64` can be read
 /// into a `u64` safely.
+///
 /// </section>
 pub fn read_into<T: Read, B>(reader: &mut T, rt: &RadIntId) -> B
 where
@@ -148,7 +165,6 @@ where
                 .read_exact(&mut rbuf[0..1])
                 .context("couldn't read u8 from the reader")?;
 
-            //let r: Result<B, <B as TryFrom<TryWrapper<NewU8>>>::Error> =
             match TryWrapper(NewU8(
                 rbuf.pread::<u8>(0).context("couldn't parse result as u8")?,
             ))
