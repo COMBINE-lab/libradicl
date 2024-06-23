@@ -25,8 +25,13 @@ use scroll::Pread;
 use std::io::{Read, Write};
 use std::mem;
 
+/// The default [AlevinFryReadRecordT] holds the barcode in a [u64]
 pub type AlevinFryReadRecord = AlevinFryReadRecordT<u64>;
+
+/// An [AlevinFryReadRecordT] that also holds the barcode in a [u64] and is explicit about this
 pub type AlevinFryReadRecordU64 = AlevinFryReadRecordT<u64>;
+
+/// An [AlevinFryReadRecordT] that holds the barcode in a [u128] and is explicit about this
 pub type AlevinFryReadRecordU128 = AlevinFryReadRecordT<u128>;
 
 /// A concrete struct representing a [MappedRecord]
@@ -54,6 +59,10 @@ pub struct PiscemBulkReadRecord {
     pub frag_lengths: Vec<u16>,
 }
 
+/// A concrete struct representing a [MappedRecord] for
+/// reads processed upstream with `piscem` for ATAC-seq data.
+/// This represents a set of alignments and relevant information for
+/// a basic piscem ATAC record.
 #[derive(Debug)]
 pub struct AtacSeqReadRecord {
     pub bc: u64,
