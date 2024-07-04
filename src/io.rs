@@ -10,11 +10,67 @@
 //! Free functions to help with reading and writing specific `libradicl` types
 //! into and out of primitive types.
 
-use crate::libradicl::rad_types::RadIntId;
+use crate::{
+    as_u128, as_u64, libradicl::rad_types::RadIntId,
+    libradicl::record::ConvertiblePrimitiveInteger, try_as_u128, try_as_u64,
+};
 use anyhow::Context;
 use scroll::Pread;
 use std::io::Write;
 use std::io::{Cursor, Read};
+
+// Since we cannot implement [From] for the
+// relevant builtin types ([u8], [u16], [u32],
+// [u64], [u128]), we have to wrap them in a
+// newtype to implement this trait. These are
+// the corresponding newtypes for each of the
+// supported primitive integer types.
+
+/// Wrapper type for [u8] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
+pub struct NewU8(pub u8);
+
+/// Wrapper type for [u16] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
+pub struct NewU16(pub u16);
+
+/// Wrapper type for [u32] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
+pub struct NewU32(pub u32);
+
+/// Wrapper type for [u64] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
+pub struct NewU64(pub u64);
+
+/// Wrapper type for [u128] so that we can implement [From]
+/// to read into the relevant builtin type in a generic manner.
+pub struct NewU128(pub u128);
+
+/// Allows a distinct [TryFrom] implementation for
+/// converting types read from file into [u64] or [u128]
+pub struct TryWrapper<T>(pub T);
+
+as_u64!(NewU8);
+as_u64!(NewU16);
+as_u64!(NewU32);
+as_u64!(NewU64);
+as_u64!(NewU128);
+try_as_u64!(NewU8);
+try_as_u64!(NewU16);
+try_as_u64!(NewU32);
+try_as_u64!(NewU64);
+try_as_u64!(NewU128);
+
+as_u128!(NewU8);
+as_u128!(NewU16);
+as_u128!(NewU32);
+as_u128!(NewU64);
+as_u128!(NewU128);
+try_as_u128!(NewU8);
+try_as_u128!(NewU16);
+try_as_u128!(NewU32);
+try_as_u128!(NewU64);
+try_as_u128!(NewU128);
 
 /// A free function to read an integer, described by the provided [RadIntId]
 /// into a `u64` container. Returns the u64 containing the value
@@ -44,6 +100,140 @@ pub fn read_into_u64<T: Read>(reader: &mut T, rt: &RadIntId) -> u64 {
         }
     };
     v
+}
+
+/// A free function to read into an integer type that is generic over
+/// the size of the integer being returned.  Specifically, the type `B`
+/// can be either a [u64] or a [u128], and the approriate number of
+/// bytes of the underlying reader will be consumed and converted into
+/// an integer of the appropriate width.
+///
+/// <section class="warning">
+///
+/// If the `rt` argument is a [RadIntId::U128] and the user is requesting to
+/// read into a u64, this will cause a runtime `panic!`.  All types can be
+/// safely converted into a `u128`, but only `u8`, `u16`, `u32`, and `u64` can be read
+/// into a `u64` safely.
+///
+/// </section>
+pub fn read_into<T: Read, B>(reader: &mut T, rt: &RadIntId) -> B
+where
+    B: ConvertiblePrimitiveInteger,
+{
+    let mut rbuf = [0u8; 16];
+
+    let v: B = match rt {
+        RadIntId::U8 => {
+            reader.read_exact(&mut rbuf[0..1]).unwrap();
+            NewU8(rbuf.pread::<u8>(0).unwrap()).into()
+        }
+        RadIntId::U16 => {
+            reader.read_exact(&mut rbuf[0..2]).unwrap();
+            NewU16(rbuf.pread::<u16>(0).unwrap()).into()
+        }
+        RadIntId::U32 => {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            NewU32(rbuf.pread::<u32>(0).unwrap()).into()
+        }
+        RadIntId::U64 => {
+            reader.read_exact(&mut rbuf[0..8]).unwrap();
+            NewU64(rbuf.pread::<u64>(0).unwrap()).into()
+        }
+        RadIntId::U128 => {
+            reader.read_exact(&mut rbuf[0..16]).unwrap();
+            NewU128(rbuf.pread::<u128>(0).unwrap()).into()
+        }
+    };
+    v
+}
+
+/// A fallible free function to read into an integer type that is generic over
+/// the size of the integer being returned.  Specifically, the type `B`
+/// can be either a [u64] or a [u128], and the approriate number of
+/// bytes of the underlying reader will be consumed and converted into
+/// an integer of the appropriate width. Attempting to read a [RadIntId::U128] into
+/// a `u64` will produce an [anyhow::Error], while all other conversions should be
+/// successful.
+pub fn try_read_into<T: Read, B>(reader: &mut T, rt: &RadIntId) -> anyhow::Result<B>
+where
+    B: ConvertiblePrimitiveInteger,
+{
+    let mut rbuf = [0u8; 16];
+    match rt {
+        RadIntId::U8 => {
+            reader
+                .read_exact(&mut rbuf[0..1])
+                .context("couldn't read u8 from the reader")?;
+
+            match TryWrapper(NewU8(
+                rbuf.pread::<u8>(0).context("couldn't parse result as u8")?,
+            ))
+            .try_into()
+            {
+                Ok(x) => Ok(x),
+                Err(_) => anyhow::bail!("could not convert u8 to the requested type"),
+            }
+        }
+        RadIntId::U16 => {
+            reader
+                .read_exact(&mut rbuf[0..2])
+                .context("couldn't read u16 from the reader")?;
+
+            match TryWrapper(NewU16(
+                rbuf.pread::<u16>(0)
+                    .context("couldn't parse result as u16")?,
+            ))
+            .try_into()
+            {
+                Ok(x) => Ok(x),
+                Err(_) => anyhow::bail!("could not convert u16 to the requested type"),
+            }
+        }
+        RadIntId::U32 => {
+            reader
+                .read_exact(&mut rbuf[0..4])
+                .context("couldn't read u32 from the reader")?;
+
+            match TryWrapper(NewU32(
+                rbuf.pread::<u32>(0)
+                    .context("couldn't parse result as u32")?,
+            ))
+            .try_into()
+            {
+                Ok(x) => Ok(x),
+                Err(_) => anyhow::bail!("could not convert u32 to the requested type"),
+            }
+        }
+        RadIntId::U64 => {
+            reader
+                .read_exact(&mut rbuf[0..8])
+                .context("couldn't read u64 from the reader")?;
+
+            match TryWrapper(NewU64(
+                rbuf.pread::<u64>(0)
+                    .context("couldn't parse result as u64")?,
+            ))
+            .try_into()
+            {
+                Ok(x) => Ok(x),
+                Err(_) => anyhow::bail!("could not convert u64 to the requested type"),
+            }
+        }
+        RadIntId::U128 => {
+            reader
+                .read_exact(&mut rbuf[0..16])
+                .context("couldn't read u128 from the reader")?;
+            match TryWrapper(NewU128(
+                rbuf.pread::<u128>(0)
+                    .context("couldn't parse result as u128")?,
+            ))
+            .try_into()
+            {
+                Ok(x) => Ok(x),
+                Err(_) => anyhow::bail!("could not convert u128 to the requested type"),
+            }
+        }
+    }
 }
 
 /// A free function to read an integer, described by the provided [RadIntId]

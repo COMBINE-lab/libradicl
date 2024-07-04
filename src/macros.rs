@@ -117,3 +117,83 @@ macro_rules! tag_value_try_into_int {
         }
     };
 }
+
+/// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u64]. Note that
+/// conversion from a [crate::libradicl::io::NewU128] will [panic!] as the underlying native type
+/// is too narrow to hold the contents of the integer.
+#[macro_export]
+macro_rules! as_u64 {
+    ("NewU128") => {
+        impl std::convert::From<$from_type> for u64 {
+            #[inline(always)]
+            fn from(x: $from_type) -> Self {
+                panic!("cannot convert u128 into u64");
+            }
+        }
+    };
+    ($from_type: ty) => {
+        impl std::convert::From<$from_type> for u64 {
+            #[inline(always)]
+            fn from(x: $from_type) -> Self {
+                x.0 as u64
+            }
+        }
+    };
+}
+
+/// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128].
+#[macro_export]
+macro_rules! as_u128 {
+    ($from_type: ty) => {
+        impl std::convert::From<$from_type> for u128 {
+            #[inline(always)]
+            fn from(x: $from_type) -> Self {
+                x.0 as u128
+            }
+        }
+    };
+}
+
+/// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u64]. If the
+/// conversion is successful, we produce an [Ok]\([u64]\), otherwise we produce an
+/// [std::result::Result::Err].
+#[macro_export]
+macro_rules! try_as_u64 {
+    ("NewU128") => {
+        impl std::convert::TryFrom<TryWrapper<$from_type>> for u64 {
+            type Error = &'static str;
+            #[inline(always)]
+            fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
+                Err("Cannot convert u128 into u64")
+            }
+        }
+    };
+    ($from_type: ty) => {
+        impl std::convert::TryFrom<TryWrapper<$from_type>> for u64 {
+            type Error = &'static str;
+            #[inline(always)]
+            fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
+                Ok(x.0 .0 as u64)
+            }
+        }
+    };
+}
+
+/// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128]. If the
+/// conversion is successful, we produce an [Ok]\([u128]\), otherwise we produce an [std::result::Result::Err].
+#[macro_export]
+macro_rules! try_as_u128 {
+    ($from_type: ty) => {
+        impl std::convert::TryFrom<TryWrapper<$from_type>> for u128 {
+            type Error = &'static str;
+            #[inline(always)]
+            fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
+                Ok(x.0 .0 as u128)
+            }
+        }
+    };
+}
