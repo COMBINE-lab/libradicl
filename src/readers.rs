@@ -33,10 +33,10 @@ pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64, u64)>> = None;
 /// for efficiency.  One can easily iterate over the [Chunk]s of a [MetaChunk] by
 /// calling the [MetaChunk::iter] method.
 pub struct MetaChunk<R: MappedRecord> {
-    first_chunk_index: usize,
-    num_sub_chunks: usize,
-    num_bytes: u32,
-    num_records: u32,
+    pub first_chunk_index: usize,
+    pub num_sub_chunks: usize,
+    pub num_bytes: u32,
+    pub num_records: u32,
     chunk_blob: Vec<u8>,
     record_context: <R as MappedRecord>::ParsingContext,
 }
