@@ -431,4 +431,47 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         }
         Ok(())
     }
+
+    /*
+    /// Start this [ParallelChunkReader] processing input from the [BufRead] `br`.
+    /// Note that this reader should be positioned at the start of the chunks for this
+    /// RAD file, so that the prelude and file tag values have already been parsed/consumded.
+    /// The provided filter will be applied at the **chunk** level, and chunks passing the filter
+    /// for which the filter function returns `true` will be retained; others will be
+    /// discarded / skipped.
+    pub fn start<T: BufRead, FilterF, F: FnMut(u64, u64)>(
+        &mut self,
+        br: T,
+        filter_fn: FilterF,
+        callback: Option<F>,
+    ) -> anyhow::Result<()>
+    where
+        <R as MappedRecord>::ParsingContext: RecordContext,
+        <R as MappedRecord>::ParsingContext: Clone,
+        FilterF: Fn(&Chunk<R>) -> bool
+    {
+        if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
+            // fill queue known number of chunks
+            println!("known number of chunks");
+            fill_work_queue_until_eof(
+                br,
+                callback,
+                self.prelude,
+                self.meta_chunk_queue.clone(),
+                self.done_var.clone(),
+            )?;
+        } else {
+            // fill queue unknown
+            println!("unknown number of chunks");
+            fill_work_queue_until_eof(
+                br,
+                callback,
+                self.prelude,
+                self.meta_chunk_queue.clone(),
+                self.done_var.clone(),
+            )?;
+        }
+        Ok(())
+    }
+    */
 }
