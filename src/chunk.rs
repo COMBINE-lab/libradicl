@@ -46,6 +46,7 @@ pub struct CorrectedCbChunk {
     pub(crate) data: Cursor<Vec<u8>>,
 }
 
+/*
 impl CorrectedCbChunk {
     pub fn from_label_and_counter(corrected_bc_in: u64, num_remain: u32) -> CorrectedCbChunk {
         let mut cc = CorrectedCbChunk {
@@ -60,6 +61,7 @@ impl CorrectedCbChunk {
         cc
     }
 }
+*/
 
 #[deprecated(
     since = "0.9.0",

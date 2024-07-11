@@ -274,6 +274,7 @@ impl GlobalEqCellList {
     }
 }
 
+/*
 #[inline]
 pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
     v.data.set_position(0);
@@ -283,6 +284,7 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
     v.data.write_all(&nrec.to_le_bytes()).unwrap();
     owriter.lock().unwrap().write_all(v.data.get_ref()).unwrap();
 }
+*/
 
 /// Given a [BufReader]`<T>` from which to read a set of records that
 /// should reside in the same collated bucket, this function will
@@ -441,15 +443,14 @@ pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
     let mut total_bytes = 0usize;
     let header_size = 2 * std::mem::size_of::<u32>() as u64;
     let size_of_bc = bct.bytes_for_type();
-    let size_of_rec = std::mem::size_of::<u32>() +
-                        std::mem::size_of::<u8>() +
-                        std::mem::size_of::<u32>() +
-                        std::mem::size_of::<u16>();
-    
+    let size_of_rec = std::mem::size_of::<u32>()
+        + std::mem::size_of::<u8>()
+        + std::mem::size_of::<u32>()
+        + std::mem::size_of::<u16>();
+
     let size_of_u32 = std::mem::size_of::<u32>();
-    let calc_record_bytes = |num_aln: usize| -> usize {
-        size_of_u32 + size_of_bc + (size_of_rec * num_aln)
-    };
+    let calc_record_bytes =
+        |num_aln: usize| -> usize { size_of_u32 + size_of_bc + (size_of_rec * num_aln) };
 
     // read each record
     for _ in 0..(nrec as usize) {
@@ -569,6 +570,7 @@ pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
     cb_byte_map.len()
 }
 
+/*
 pub fn collate_temporary_bucket<T: Read>(
     reader: &mut T,
     bct: &RadIntId,
@@ -670,6 +672,7 @@ pub fn process_corrected_cb_chunk<T: Read>(
         }
     }
 }
+*/
 
 /// Represents a temporary bucket of barcodes whose records will
 /// be written together and then collated later in memory.
@@ -846,11 +849,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.0) {
             // could be replaced with orientation
-            let rr = AtacSeqReadRecord::from_bytes_with_header(
-                reader,
-                tup.0,
-                tup.1
-            );
+            let rr = AtacSeqReadRecord::from_bytes_with_header(reader, tup.0, tup.1);
 
             if rr.is_empty() {
                 continue;
@@ -887,7 +886,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
                 bcursor.write_all(as_u8_slice(&rr.refs[..])).unwrap();
                 bcursor.write_all(as_u8_slice_u8(&rr.map_type[..])).unwrap();
                 bcursor.write_all(as_u8_slice(&rr.start_pos[..])).unwrap();
-                bcursor.write_all(as_u8_slice_u16(&rr.frag_lengths[..])).unwrap();
+                bcursor
+                    .write_all(as_u8_slice_u16(&rr.frag_lengths[..]))
+                    .unwrap();
 
                 // update number of written records
                 v.num_records_written.fetch_add(1, Ordering::SeqCst);
