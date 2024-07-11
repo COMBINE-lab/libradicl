@@ -212,7 +212,7 @@ where
             br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
                 .context("failed to read from work queue.")?;
             // apply the filter
-            if filter_fn(&buf[boffset + 8..], &record_context) {
+            if filter_fn(&buf[boffset..], &record_context) {
                 chunks_in_meta_chunk += 1;
                 cbytes += nbytes_chunk;
                 crec += nrec_chunk;
