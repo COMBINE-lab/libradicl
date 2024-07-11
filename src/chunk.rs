@@ -31,6 +31,12 @@ pub struct Chunk<T: MappedRecord> {
 /// A [CorrectedCbChunk] represents a [Chunk] of RAD records
 /// that share the same underlying corrected cell barcode
 /// `corrected_bc`.
+#[deprecated(
+    since = "0.9.1",
+    note = "This type is not actually used, and its existence in the library may therefore be \
+            confusing. Therefore it is being deprecated and is likelty to be removed in a future \
+            release."
+)]
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct CorrectedCbChunk {
