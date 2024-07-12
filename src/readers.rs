@@ -128,6 +128,10 @@ where
     }
 }
 
+fn until_eof<T: BufRead>(_ctr: usize, br: &mut T) -> bool {
+    utils::has_data_left(br).expect("encountered error reading input file")
+}
+
 /// This free function is used within the [ParallelRadReader] and [ParallelChunkReader] to
 /// fill a work queue with [MetaChunk]s from the current file position until the end of the
 /// file is reached. It applies the "filter" function to each chunk to determine if the chunk
@@ -149,8 +153,15 @@ where
 /// placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
 /// underlying file have been read and added to the work queue.
-fn fill_work_queue_filtered_until_eof<R: MappedRecord, T: BufRead, FilterF, F: FnMut(u64, u64)>(
+fn fill_work_queue_filtered_until<
+    R: MappedRecord,
+    T: BufRead,
+    UntilF,
+    FilterF,
+    F: FnMut(u64, u64),
+>(
     mut br: T,
+    until_fn: UntilF,
     filter_fn: FilterF,
     mut callback: Option<F>,
     prelude: &RadPrelude,
@@ -160,6 +171,7 @@ fn fill_work_queue_filtered_until_eof<R: MappedRecord, T: BufRead, FilterF, F: F
 where
     <R as MappedRecord>::ParsingContext: RecordContext,
     <R as MappedRecord>::ParsingContext: Clone,
+    UntilF: Fn(usize, &mut T) -> bool,
     FilterF: Fn(&[u8], &<R as MappedRecord>::ParsingContext) -> bool,
 {
     const BUFSIZE: usize = 524208;
@@ -188,7 +200,7 @@ where
     let record_context = prelude
         .get_record_context::<<R as MappedRecord>::ParsingContext>()
         .unwrap();
-    while utils::has_data_left(&mut br).expect("encountered error reading input file") {
+    while until_fn(chunk_num, &mut br) {
         // in the first iteration we've not read a header yet
         // so we can't fill a chunk, otherwise we read the header
         // at the bottom of the previous iteration of this loop, and
@@ -226,7 +238,8 @@ where
         // in the last iteration of the loop, we will have read all headers already
         // and we are just filling up the buffer with the last chunk, and there will be no more
         // headers left to read
-        if utils::has_data_left(&mut br).expect("encountered error reading input file") {
+        if until_fn(chunk_num, &mut br) {
+            //utils::has_data_left(&mut br).expect("encountered error reading input file") {
             let (nc, nr) = Chunk::<R>::read_header(&mut br);
             nbytes_chunk = nc;
             nrec_chunk = nr;
@@ -294,8 +307,9 @@ where
 /// placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
 /// underlying file have been read and added to the work queue.
-fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead, F: FnMut(u64, u64)>(
+fn fill_work_queue_until<R: MappedRecord, T: BufRead, UntilF, F: FnMut(u64, u64)>(
     mut br: T,
+    until_fn: UntilF,
     mut callback: Option<F>,
     prelude: &RadPrelude,
     meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
@@ -304,6 +318,7 @@ fn fill_work_queue_until_eof<R: MappedRecord, T: BufRead, F: FnMut(u64, u64)>(
 where
     <R as MappedRecord>::ParsingContext: RecordContext,
     <R as MappedRecord>::ParsingContext: Clone,
+    UntilF: Fn(usize, &mut T) -> bool,
 {
     const BUFSIZE: usize = 524208;
     // the buffer that will hold our records
@@ -331,7 +346,7 @@ where
     let record_context = prelude
         .get_record_context::<<R as MappedRecord>::ParsingContext>()
         .unwrap();
-    while utils::has_data_left(&mut br).expect("encountered error reading input file") {
+    while until_fn(chunk_num, &mut br) {
         // in the first iteration we've not read a header yet
         // so we can't fill a chunk, otherwise we read the header
         // at the bottom of the previous iteration of this loop, and
@@ -362,7 +377,7 @@ where
         // in the last iteration of the loop, we will have read all headers already
         // and we are just filling up the buffer with the last chunk, and there will be no more
         // headers left to read
-        if utils::has_data_left(&mut br).expect("encountered error reading input file") {
+        if until_fn(chunk_num, &mut br) {
             let (nc, nr) = Chunk::<R>::read_header(&mut br);
             nbytes_chunk = nc;
             nrec_chunk = nr;
@@ -587,11 +602,20 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
     {
-        if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
+        if let Some(nchunks) = self.prelude.hdr.num_chunks() {
+            let num_chunks: usize = nchunks.into();
+            let until_equal_chunk = |observed_chunk: usize, br: &mut T| -> bool {
+                // first we check the cheap condition
+                // then the more expensive one
+                observed_chunk < num_chunks
+                    || utils::has_data_left(br).expect("encountered error reading input file")
+            };
+
             // fill queue known number of chunks
             println!("known number of chunks");
-            fill_work_queue_until_eof(
+            fill_work_queue_until(
                 br,
+                until_equal_chunk,
                 callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
@@ -600,8 +624,9 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         } else {
             // fill queue unknown
             println!("unknown number of chunks");
-            fill_work_queue_until_eof(
+            fill_work_queue_until(
                 br,
+                until_eof,
                 callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
@@ -628,11 +653,19 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         <R as MappedRecord>::ParsingContext: Clone,
         FilterF: Fn(&[u8], &<R as MappedRecord>::ParsingContext) -> bool,
     {
-        if let Some(_nchunks) = self.prelude.hdr.num_chunks() {
+        if let Some(nchunks) = self.prelude.hdr.num_chunks() {
+            let num_chunks: usize = nchunks.into();
+            let until_equal_chunk = |observed_chunk: usize, br: &mut T| -> bool {
+                // first we check the cheap condition
+                // then the more expensive one
+                observed_chunk < num_chunks
+                    || utils::has_data_left(br).expect("encountered error reading input file")
+            };
             // fill queue known number of chunks
             println!("known number of chunks");
-            fill_work_queue_filtered_until_eof(
+            fill_work_queue_filtered_until(
                 br,
+                until_equal_chunk,
                 filter_fn,
                 callback,
                 self.prelude,
@@ -642,8 +675,9 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
         } else {
             // fill queue unknown
             println!("unknown number of chunks");
-            fill_work_queue_filtered_until_eof(
+            fill_work_queue_filtered_until(
                 br,
+                until_eof,
                 filter_fn,
                 callback,
                 self.prelude,
