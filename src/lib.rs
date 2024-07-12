@@ -31,7 +31,6 @@
 
 use crate as libradicl;
 
-use self::libradicl::chunk::CorrectedCbChunk;
 use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
@@ -39,7 +38,6 @@ use self::libradicl::schema::TempCellInfo;
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
 use bio_types::strand::*;
-use dashmap::DashMap;
 use scroll::Pread;
 use serde::{Deserialize, Serialize};
 
