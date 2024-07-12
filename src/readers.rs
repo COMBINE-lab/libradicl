@@ -156,12 +156,11 @@ fn until_eof<T: BufRead>(_ctr: usize, br: &mut T) -> bool {
 fn fill_work_queue_filtered_until<
     R: MappedRecord,
     T: BufRead,
-    UntilF,
+    ChunkIt: Iterator<Item = usize> + BufReadProvider<T> + LastChunkSignaler,
     FilterF,
     F: FnMut(u64, u64),
 >(
-    mut br: T,
-    until_fn: UntilF,
+    mut chunk_iter: ChunkIt,
     filter_fn: FilterF,
     mut callback: Option<F>,
     prelude: &RadPrelude,
@@ -171,7 +170,6 @@ fn fill_work_queue_filtered_until<
 where
     <R as MappedRecord>::ParsingContext: RecordContext,
     <R as MappedRecord>::ParsingContext: Clone,
-    UntilF: Fn(usize, &mut T) -> bool,
     FilterF: Fn(&[u8], &<R as MappedRecord>::ParsingContext) -> bool,
 {
     const BUFSIZE: usize = 524208;
@@ -191,16 +189,15 @@ where
     // the number of bytes and records in the next chunk header
     let mut nbytes_chunk = 0u32;
     let mut nrec_chunk = 0u32;
-    let mut last_chunk = false;
 
     // we include the endpoint here because we will not actually
     // copy a chunk in the first iteration (since we have not yet
     // read the chunk header, which comes at the end of the loop).
-    let mut chunk_num = 0;
     let record_context = prelude
         .get_record_context::<<R as MappedRecord>::ParsingContext>()
         .unwrap();
-    while until_fn(chunk_num, &mut br) {
+    while let Some(chunk_num) = chunk_iter.next() {
+        // while until_fn(chunk_num, &mut br) {
         // in the first iteration we've not read a header yet
         // so we can't fill a chunk, otherwise we read the header
         // at the bottom of the previous iteration of this loop, and
@@ -215,6 +212,7 @@ where
                 let chunk_resize = nbytes_chunk as usize + cbytes as usize;
                 buf.resize(chunk_resize, 0);
             }
+            let br = chunk_iter.get_mut_buf_read();
 
             // copy the data for the current chunk into the buffer
             let boffset = cbytes as usize;
@@ -238,13 +236,11 @@ where
         // in the last iteration of the loop, we will have read all headers already
         // and we are just filling up the buffer with the last chunk, and there will be no more
         // headers left to read
-        if until_fn(chunk_num, &mut br) {
-            //utils::has_data_left(&mut br).expect("encountered error reading input file") {
-            let (nc, nr) = Chunk::<R>::read_header(&mut br);
+        let last_chunk = chunk_iter.is_last_chunk();
+        if !last_chunk {
+            let (nc, nr) = Chunk::<R>::read_header(chunk_iter.get_mut_buf_read());
             nbytes_chunk = nc;
             nrec_chunk = nr;
-        } else {
-            last_chunk = true;
         }
 
         // determine if we should dump the current buffer to the work queue
@@ -282,7 +278,7 @@ where
             buf.resize(BUFSIZE, 0);
             force_push = false;
         }
-        chunk_num += 1;
+        //chunk_num += 1;
     }
     done_var.store(true, Ordering::SeqCst);
     Ok(())
@@ -307,9 +303,13 @@ where
 /// placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
 /// underlying file have been read and added to the work queue.
-fn fill_work_queue_until<R: MappedRecord, T: BufRead, UntilF, F: FnMut(u64, u64)>(
-    mut br: T,
-    until_fn: UntilF,
+fn fill_work_queue_until<
+    R: MappedRecord,
+    T: BufRead,
+    ChunkIt: Iterator<Item = usize> + BufReadProvider<T> + LastChunkSignaler,
+    F: FnMut(u64, u64),
+>(
+    mut chunk_iter: ChunkIt,
     mut callback: Option<F>,
     prelude: &RadPrelude,
     meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
@@ -318,7 +318,6 @@ fn fill_work_queue_until<R: MappedRecord, T: BufRead, UntilF, F: FnMut(u64, u64)
 where
     <R as MappedRecord>::ParsingContext: RecordContext,
     <R as MappedRecord>::ParsingContext: Clone,
-    UntilF: Fn(usize, &mut T) -> bool,
 {
     const BUFSIZE: usize = 524208;
     // the buffer that will hold our records
@@ -337,16 +336,16 @@ where
     // the number of bytes and records in the next chunk header
     let mut nbytes_chunk = 0u32;
     let mut nrec_chunk = 0u32;
-    let mut last_chunk = false;
 
     // we include the endpoint here because we will not actually
     // copy a chunk in the first iteration (since we have not yet
     // read the chunk header, which comes at the end of the loop).
-    let mut chunk_num = 0;
     let record_context = prelude
         .get_record_context::<<R as MappedRecord>::ParsingContext>()
         .unwrap();
-    while until_fn(chunk_num, &mut br) {
+
+    while let Some(chunk_num) = chunk_iter.next() {
+        //while until_fn(chunk_num, &mut br) {
         // in the first iteration we've not read a header yet
         // so we can't fill a chunk, otherwise we read the header
         // at the bottom of the previous iteration of this loop, and
@@ -361,6 +360,7 @@ where
                 let chunk_resize = nbytes_chunk as usize + cbytes as usize;
                 buf.resize(chunk_resize, 0);
             }
+            let br = chunk_iter.get_mut_buf_read();
 
             // copy the data for the current chunk into the buffer
             let boffset = cbytes as usize;
@@ -377,12 +377,11 @@ where
         // in the last iteration of the loop, we will have read all headers already
         // and we are just filling up the buffer with the last chunk, and there will be no more
         // headers left to read
-        if until_fn(chunk_num, &mut br) {
-            let (nc, nr) = Chunk::<R>::read_header(&mut br);
+        let last_chunk = chunk_iter.is_last_chunk();
+        if !last_chunk {
+            let (nc, nr) = Chunk::<R>::read_header(chunk_iter.get_mut_buf_read());
             nbytes_chunk = nc;
             nrec_chunk = nr;
-        } else {
-            last_chunk = true;
         }
 
         // determine if we should dump the current buffer to the work queue
@@ -420,7 +419,7 @@ where
             buf.resize(BUFSIZE, 0);
             force_push = false;
         }
-        chunk_num += 1;
+        //chunk_num += 1;
     }
     done_var.store(true, Ordering::SeqCst);
     Ok(())
@@ -545,6 +544,95 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     }
 }
 
+trait LastChunkSignaler {
+    fn is_last_chunk(&mut self) -> bool;
+}
+
+trait BufReadProvider<T: BufRead> {
+    fn get_buf_read(&self) -> &T;
+    fn get_mut_buf_read(&mut self) -> &mut T;
+}
+
+struct ChunkCountIterator<T: BufRead> {
+    num_chunks: usize,
+    current_chunk: usize,
+    buf_reader: T,
+}
+
+impl<T: BufRead> Iterator for ChunkCountIterator<T> {
+    type Item = usize;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let c = self.current_chunk;
+        self.current_chunk += 1;
+        if c <= self.num_chunks {
+            Some(c)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let rem = self.num_chunks - self.current_chunk + 1;
+        (rem, Some(rem))
+    }
+}
+
+impl<T: BufRead> ExactSizeIterator for ChunkCountIterator<T> {}
+
+impl<T: BufRead> LastChunkSignaler for ChunkCountIterator<T> {
+    fn is_last_chunk(&mut self) -> bool {
+        self.current_chunk == self.num_chunks
+    }
+}
+
+impl<T: BufRead> BufReadProvider<T> for ChunkCountIterator<T> {
+    fn get_buf_read(&self) -> &T {
+        &self.buf_reader
+    }
+    fn get_mut_buf_read(&mut self) -> &mut T {
+        &mut self.buf_reader
+    }
+}
+
+impl<T: BufRead> LastChunkSignaler for ReadUntilEOFIter<T> {
+    fn is_last_chunk(&mut self) -> bool {
+        !utils::has_data_left(&mut self.buf_reader).expect("encountered error reading input file")
+    }
+}
+
+struct ReadUntilEOFIter<T: BufRead> {
+    current_chunk: usize,
+    buf_reader: T,
+}
+
+impl<T: BufRead> Iterator for ReadUntilEOFIter<T> {
+    type Item = usize;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let c = self.current_chunk;
+        self.current_chunk += 1;
+        if utils::has_data_left(&mut self.buf_reader).expect("encountered error reading input file")
+        {
+            Some(c)
+        } else {
+            None
+        }
+    }
+}
+
+impl<T: BufRead> BufReadProvider<T> for ReadUntilEOFIter<T> {
+    fn get_buf_read(&self) -> &T {
+        &self.buf_reader
+    }
+    fn get_mut_buf_read(&mut self) -> &mut T {
+        &mut self.buf_reader
+    }
+}
+
 /// Allows reading chunks from the underlying RAD file chunks
 /// in parallel by dedicating a single thread (the one running
 /// functions on this structure) to filling a work queue.
@@ -604,29 +692,29 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     {
         if let Some(nchunks) = self.prelude.hdr.num_chunks() {
             let num_chunks: usize = nchunks.into();
-            let until_equal_chunk = |observed_chunk: usize, br: &mut T| -> bool {
-                // first we check the cheap condition
-                // then the more expensive one
-                observed_chunk < num_chunks
-                    || utils::has_data_left(br).expect("encountered error reading input file")
+            let chunk_iter = ChunkCountIterator::<T> {
+                num_chunks,
+                current_chunk: 0,
+                buf_reader: br,
             };
-
             // fill queue known number of chunks
             println!("known number of chunks");
             fill_work_queue_until(
-                br,
-                until_eof,
+                chunk_iter,
                 callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;
         } else {
+            let chunk_iter = ReadUntilEOFIter::<T> {
+                current_chunk: 0,
+                buf_reader: br,
+            };
             // fill queue unknown
             println!("unknown number of chunks");
             fill_work_queue_until(
-                br,
-                until_eof,
+                chunk_iter,
                 callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
@@ -655,17 +743,15 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     {
         if let Some(nchunks) = self.prelude.hdr.num_chunks() {
             let num_chunks: usize = nchunks.into();
-            let until_equal_chunk = |observed_chunk: usize, br: &mut T| -> bool {
-                // first we check the cheap condition
-                // then the more expensive one
-                observed_chunk < num_chunks
-                    || utils::has_data_left(br).expect("encountered error reading input file")
+            let chunk_iter = ChunkCountIterator::<T> {
+                num_chunks,
+                current_chunk: 0,
+                buf_reader: br,
             };
             // fill queue known number of chunks
             println!("known number of chunks");
             fill_work_queue_filtered_until(
-                br,
-                until_eof,
+                chunk_iter,
                 filter_fn,
                 callback,
                 self.prelude,
@@ -673,11 +759,14 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
                 self.done_var.clone(),
             )?;
         } else {
+            let chunk_iter = ReadUntilEOFIter::<T> {
+                current_chunk: 0,
+                buf_reader: br,
+            };
             // fill queue unknown
             println!("unknown number of chunks");
             fill_work_queue_filtered_until(
-                br,
-                until_eof,
+                chunk_iter,
                 filter_fn,
                 callback,
                 self.prelude,
