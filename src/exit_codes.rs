@@ -7,4 +7,7 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
+//! This module contains custom exit codes that designate
+//! specific error conditions.
+
 pub static EXIT_UNSUPPORTED_TAG_TYPE: i32 = 65;
