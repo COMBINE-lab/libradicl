@@ -575,7 +575,7 @@ impl<T: BufRead> Iterator for ChunkCountIterator<T> {
 
     #[inline(always)]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let rem = self.num_chunks - self.current_chunk + 1;
+        let rem = self.num_chunks + 1 - self.current_chunk;
         (rem, Some(rem))
     }
 }
@@ -584,7 +584,7 @@ impl<T: BufRead> ExactSizeIterator for ChunkCountIterator<T> {}
 
 impl<T: BufRead> LastChunkSignaler for ChunkCountIterator<T> {
     fn is_last_chunk(&mut self) -> bool {
-        self.current_chunk == self.num_chunks
+        self.current_chunk > self.num_chunks
     }
 }
 
