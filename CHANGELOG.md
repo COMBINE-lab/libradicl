@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/COMBINE-lab/libradicl/compare/v0.8.2...v0.9.0) (2024-07-12)
+
+
+### Features
+
+* deprecated some types, made parallel readers more generic ([5dd74da](https://github.com/COMBINE-lab/libradicl/commit/5dd74da16309409ed75287f611d54f2398b85ae5))
+
+
+### Bug Fixes
+
+* make some fields public ([6f15db7](https://github.com/COMBINE-lab/libradicl/commit/6f15db72760fe41646caa0233cabd4165e506006))
+* removed some unused code, adding filter version of rad and chunk reader ([7bfc668](https://github.com/COMBINE-lab/libradicl/commit/7bfc668ff8ea1408e77f472782beb2aca7f12cf8))
+
 ## [0.8.2](https://github.com/COMBINE-lab/libradicl/compare/v0.8.1...v0.8.2) (2024-03-08)
 
 
