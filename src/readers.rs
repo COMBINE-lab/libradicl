@@ -615,7 +615,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             println!("known number of chunks");
             fill_work_queue_until(
                 br,
-                until_equal_chunk,
+                until_eof,
                 callback,
                 self.prelude,
                 self.meta_chunk_queue.clone(),
@@ -665,7 +665,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             println!("known number of chunks");
             fill_work_queue_filtered_until(
                 br,
-                until_equal_chunk,
+                until_eof,
                 filter_fn,
                 callback,
                 self.prelude,
