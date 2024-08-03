@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.9.0"
+version = "0.9.1"
 authors = [
   "Avi Srivastava <avi.srivastava@nyu.edu>",
   "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
@@ -32,13 +32,13 @@ num = "0.4.3"
 ahash = "0.8.11"
 serde = { version = "1.0.204", features = ["derive"] }
 dashmap = "^6.0.1"
-bio-types = "1.0.1"
+bio-types = "1.0.3"
 smallvec = "1.13.2"
-noodles-bam = "0.64.0"
-noodles-sam = "0.61.0"
+noodles-bam = "0.65.0"
+noodles-sam = "0.62.0"
 anyhow = "1.0.86"
 itertools = "0.13.0"
-bytemuck = { version = "1.16.1", features = ["aarch64_simd"] }
+bytemuck = { version = "1.16.3", features = ["aarch64_simd"] }
 derivative = "2.2.0"
 crossbeam-queue = "0.3.11"
 
