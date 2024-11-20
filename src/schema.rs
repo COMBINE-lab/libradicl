@@ -28,3 +28,8 @@ pub struct ProtocolInfo {
     // right now.  Expand to be generic.
     pub expected_ori: Strand,
 }
+
+pub enum CollateKey<'a> {
+    Barcode,
+    Pos(Box<dyn Fn(u32, usize) -> usize + 'a>)
+}
