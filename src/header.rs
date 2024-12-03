@@ -16,7 +16,7 @@ use crate::{self as libradicl, constants};
 use anyhow::{self, Context};
 use libradicl::rad_types::{TagSection, TagSectionLabel};
 use libradicl::record::RecordContext;
-use noodles_sam as sam;
+use noodles::sam;
 use scroll::Pread;
 use std::cmp::{Eq, PartialEq};
 use std::io::{Read, Write};

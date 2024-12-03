@@ -41,6 +41,7 @@ itertools = "0.13.0"
 bytemuck = { version = "1.16.3", features = ["aarch64_simd"] }
 derivative = "2.2.0"
 crossbeam-queue = "0.3.11"
+noodles = { version = "0.85.0", features = ["bam", "sam"] }
 
 [dev-dependencies]
 needletail="0.5.1"
