@@ -23,7 +23,6 @@ keywords = [
   "RNA-seq",
   "ATAC-seq",
   "single-nucleus",
-  "RNA-velocity",
 ]
 categories = ["command-line-utilities", "science"]
 
