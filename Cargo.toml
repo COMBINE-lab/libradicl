@@ -6,6 +6,7 @@ authors = [
   "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
   "Dongze He <dhe17@umd.edu>",
   "Mohsen Zakeri <mzakeri@cs.umd.edu>",
+  "Noor Pratab Singh <npsingh@umd.edu>",
   "Rob Patro <rob@cs.umd.edu>",
 ]
 edition = "2021"
@@ -20,6 +21,7 @@ keywords = [
   "single-cell",
   "preprocessing",
   "RNA-seq",
+  "ATAC-seq",
   "single-nucleus",
   "RNA-velocity",
 ]
@@ -42,5 +44,5 @@ crossbeam-queue = "0.3.11"
 noodles = { version = "0.85.0", features = ["bam", "sam"] }
 
 [dev-dependencies]
-needletail="0.5.1"
-indicatif="0.17.8"
+needletail = "0.6.1"
+indicatif = "0.17.9"
