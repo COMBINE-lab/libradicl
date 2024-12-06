@@ -34,7 +34,7 @@ use crate as libradicl;
 use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
-use self::libradicl::schema::TempCellInfo;
+use self::libradicl::schema::{TempCellInfo,CollateKey};
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
 use bio_types::strand::*;
@@ -821,7 +821,12 @@ pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
     output_cache: &HashMap<u64, Arc<TempBucket>>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
-) {
+    ck: CollateKey
+    // f: F
+)
+where
+    // F: Fn(u32)
+{
     let mut buf = [0u8; 8];
     let mut tbuf = vec![0u8; 4096];
     //let mut tcursor = Cursor::new(tbuf);
@@ -849,10 +854,16 @@ pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
             // could be replaced with orientation
             let rr = AtacSeqReadRecord::from_bytes_with_header(reader, tup.0, tup.1);
 
-            if rr.is_empty() {
+            if rr.is_empty() || tup.1 > 1 {
                 continue;
             }
-            if let Some(v) = output_cache.get(corrected_id) {
+            let pos = rr.start_pos[0];
+            let ref_id = rr.refs[0];
+            let check_id = match ck {
+                CollateKey::Barcode => *corrected_id,
+                CollateKey::Pos(ref f) => f(pos, ref_id as usize) as u64,
+            };
+            if let Some(v) = output_cache.get(&check_id) {
                 // if this is a valid barcode, then
                 // write the corresponding entry to the
                 // thread-local buffer for this bucket
