@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/COMBINE-lab/libradicl/compare/v0.9.0...v0.10.0) (2024-12-06)
+
+
+### Features
+
+* add atac-seq-support ([8704b54](https://github.com/COMBINE-lab/libradicl/commit/8704b54215d0adef6183631dbf61170254101767))
+
 ## [0.9.0](https://github.com/COMBINE-lab/libradicl/compare/v0.8.2...v0.9.0) (2024-07-12)
 
 
