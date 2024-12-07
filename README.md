@@ -1,9 +1,6 @@
-# libradicl
+# libradicl - A library for reading parsing and writing RAD files for high-throughput genomic data
 
 Libradicl is a [Rust](https://www.rust-lang.org/) library for reading (and eventually writing and manipulating) 
-Reduced Alignment Data (RAD) format files.  These files are produced by [salmon](https://github.com/COMBINE-lab/salmon)
-when preparing data for single-cell quantification with [alevin-fry](https://github.com/COMBINE-lab/alevin-fry).
+Reduced Alignment Data (RAD) format files.  These files are produced by [`piscem`](https://github.com/COMBINE-lab/piscem) and [`salmon`](https://github.com/COMBINE-lab/salmon) when preparing sc/snRNA-seq or scATAC-seq data for single-cell quantification with [`alevin-fry`](https://github.com/COMBINE-lab/alevin-fry).
 
-Currently, libradicl has primarily been developed in support of alevin-fry, so it has not been fully developed as 
-as a general library quite yet.  Eventually, we anticipate there will be a reorganization and a stabalization 
-of the API.
+Currently, `libradicl` has primarily been developed in support of `alevin-fry`, though we aim for it to be a general library with a useful API for reading, writing and parsing RAD files.
