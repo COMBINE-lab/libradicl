@@ -59,6 +59,23 @@ pub struct PiscemBulkReadRecord {
     pub frag_lengths: Vec<u16>,
 }
 
+
+/// A concrete struct representing a [MappedRecord] for
+/// reads processed upstream with `alevin-fry` for long read data.
+/// This represents a set of alignments and relevant information for
+/// long read single cell data.
+#[derive(Debug)]
+pub struct ScLongReadRecord {
+    pub bc: u64,
+    pub umi: u64,
+    pub dirs: Vec<bool>,
+    pub refs: Vec<u32>,
+    pub as_scores: Vec<i32>,
+    pub starts: Vec<u32>,
+    pub ends: Vec<u32>,
+    pub tlens: Vec<u32>,
+}
+
 /// A concrete struct representing a [MappedRecord] for
 /// reads processed upstream with `piscem` for ATAC-seq data.
 /// This represents a set of alignments and relevant information for
@@ -704,6 +721,210 @@ impl AtacSeqReadRecord {
         rec
     }
 }
+
+
+
+
+//implementing the single cell long read record
+#[derive(Debug, Clone)]
+pub struct ScLongReadRecordContext {
+    pub bct: RadIntId,
+    pub umit: RadIntId,
+}
+
+
+impl RecordContext for ScLongReadRecordContext {
+    fn get_context_from_tag_section(
+        _ft: &TagSection,
+        rt: &TagSection,
+        _at: &TagSection,
+    ) -> anyhow::Result<Self>
+    {
+        let bct = rt.get_tag_type("b")
+            .expect("scLongRead record requires a 'b' barcode tag");
+
+        let umit = rt.get_tag_type("u")
+            .expect("scLongRead record requires a 'u' umi tag");
+
+        match (bct, umit) {
+            (RadType::Int(bct), RadType::Int(umit)) => {
+                Ok(Self { bct, umit })
+            }
+            _ => bail!("barcode/umi must be RadType::Int"),
+        }
+    }
+}
+
+impl ScLongReadRecordContext {
+    /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
+    pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
+        Self { bct, umit }
+    }
+}
+
+
+impl MappedRecord for ScLongReadRecord {
+    type ParsingContext = ScLongReadRecordContext;
+    type PeekResult = (u64, u64);
+
+    #[inline]
+    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
+        let na_size = mem::size_of::<u32>();
+        let bc_size = ctx.bct.bytes_for_type();
+
+        let _na = buf.pread::<u32>(0).unwrap();
+
+        let bc = match ctx.bct {
+            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
+        };
+
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
+        };
+
+        (bc, umi)
+    }
+
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        let (bc, umi, na) = Self::from_bytes_record_header(reader, &ctx.bct, &ctx.umit);
+        let mut rec = Self {
+            bc,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+            as_scores: Vec::with_capacity(na as usize),
+            starts: Vec::with_capacity(na as usize),
+            ends: Vec::with_capacity(na as usize),
+            tlens: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            // 1) direction + ref_id, if you’re packing them like AF
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+            let ref_id = v & utils::MASK_TOP_BIT_U32;
+            rec.dirs.push(dir);
+            rec.refs.push(ref_id);
+
+            // 2) AS score
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let as_score = rbuf.pread::<i32>(0).unwrap();
+            rec.as_scores.push(as_score);
+
+            // 3) start
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let start = rbuf.pread::<u32>(0).unwrap();
+            rec.starts.push(start);
+
+            // 4) end
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let end = rbuf.pread::<u32>(0).unwrap();
+            rec.ends.push(end);
+
+            // 5) tlen
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let tlen = rbuf.pread::<u32>(0).unwrap();
+            rec.tlens.push(tlen);
+        }
+        rec
+    }
+
+    #[inline]
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len() as u32;
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for record")?;
+
+        fn encode_i32_as_u32(v: i32) -> u32 {
+            unsafe { std::mem::transmute::<i32, u32>(v) }
+        }
+
+        for i in 0..(na as usize) {
+            let ref_idx = self.refs[i];
+            let dir = self.dirs[i];
+            let as_i32 = self.as_scores[i];
+            let start = self.starts[i];
+            let end = self.ends[i];
+            let tlen = self.tlens[i];
+
+            let encoded_dir: u32 = if dir { 1_u32 << 31 } else { 0_u32 };
+            let encoded_dir_ref: u32 = ref_idx | encoded_dir;
+            writer
+                .write_all(&encoded_dir_ref.to_le_bytes())
+                .context("couldn't write compressed_ori_refid for record")?;
+
+            let as_u32 = encode_i32_as_u32(as_i32);
+            writer
+                .write_all(&as_u32.to_le_bytes())
+                .context("couldn't write AS for record")?;
+
+            writer
+                .write_all(&start.to_le_bytes())
+                .context("couldn't write start for record")?;
+            writer
+                .write_all(&end.to_le_bytes())
+                .context("couldn't write end for record")?;
+            writer
+                .write_all(&tlen.to_le_bytes())
+                .context("couldn't write tlen for record")?;
+        }
+        Ok(())
+    }
+}
+
+
+impl ScLongReadRecord {
+    /// Returns `true` if this [ScLongReadRecord] contains no references and
+    /// `false` otherwise.
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+
+    /// Obtains the next [ScLongReadRecord] in the stream from the reader `reader`.
+    /// The barcode should be encoded with the [RadIntId] type `bct` and
+    /// the umi should be encoded with the [RadIntId] type `umit`.
+    pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
+        let ctx = ScLongReadRecordContext::from_bct_umit(*bct, *umit);
+        ScLongReadRecord::from_bytes_with_context(reader, &ctx)
+    }
+
+    #[inline]
+    pub fn from_bytes_record_header<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> (u64, u64, u32) {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
+        let bc = rad_io::read_into_u64(reader, bct);
+        let umi = rad_io::read_into_u64(reader, umit);
+        (bc, umi, na)
+    }
+
+    pub fn from_bytes_with_header<T: Read>(_reader: &mut T, _bc: u64, _umi: u64, _na: u32) -> Self {
+        
+        unimplemented!("from_bytes_with_header is not implemented for extended AlevinFryReadRecordT");
+
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
