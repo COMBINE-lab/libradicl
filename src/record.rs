@@ -11,7 +11,7 @@
 //! traits for [MappedRecord]s and [RecordContext]s. It also defines concrete types
 //! implementing these traits for `alevin-fry` and `piscem-infer`.
 
-use crate::io::{NewU128, NewU16, NewU32, NewU64, NewU8, TryWrapper};
+use crate::io::{NewU128, NewU16, NewU32, NewU64, NewU8, NewI128, NewI16, NewI32, NewI64, NewI8, TryWrapper};
 use crate::{
     io as rad_io,
     rad_types::{
@@ -33,6 +33,15 @@ pub type AlevinFryReadRecordU64 = AlevinFryReadRecordT<u64>;
 
 /// An [AlevinFryReadRecordT] that holds the barcode in a [u128] and is explicit about this
 pub type AlevinFryReadRecordU128 = AlevinFryReadRecordT<u128>;
+
+/// The default [ScLongReadRecordT] holds the barcode in a [u64]
+pub type ScLongReadRecord = ScLongReadRecordT<u64>;
+
+/// An [ScLongReadRecordT] that also holds the barcode in a [u64] and is explicit about this
+pub type ScLongReadRecordU64 = ScLongReadRecordT<u64>;
+
+/// An [ScLongReadRecordT] that holds the barcode in a [u128] and is explicit about this
+pub type ScLongReadRecordU128 = ScLongReadRecordT<u128>;
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
@@ -64,15 +73,16 @@ pub struct PiscemBulkReadRecord {
 /// reads processed upstream with `alevin-fry` for long read data.
 /// This represents a set of alignments and relevant information for
 /// long read single cell data.
-#[derive(Debug)]
-pub struct ScLongReadRecord {
-    pub bc: u64,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScLongReadRecordT<B: ConvertiblePrimitiveInteger> {
+    pub bc: B,
     pub umi: u64,
     pub dirs: Vec<bool>,
     pub refs: Vec<u32>,
     pub as_scores: Vec<i32>,
     pub starts: Vec<u32>,
     pub ends: Vec<u32>,
+    // TODO: Move this to a file-level tag
     pub tlens: Vec<u32>,
 }
 
@@ -305,6 +315,7 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
             RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
             RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
             RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
         };
         let umi = match ctx.umit {
             RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
@@ -312,6 +323,7 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
             RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
             RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported")
         };
         (bc, umi)
     }
@@ -363,8 +375,68 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     }
 }
 
+
+// TODO: The below is a mess, think about how to clean it up. 
+// We have to provide these now because our number trait encoding 
+// does not quite fit right. We want certain types to only be allowed
+// to be unsigned, but it's unclear how to model this with our
+// existing PrimitiveInteger and ConvertiblePrimitiveInteger types.
+// The below implementations allow everything to compile but say that
+// we cannot convert from a signed type (NewIX or TryWrapper<NewIX>) 
+// into a u64.
+impl From<NewI8> for u64 {
+    fn from(_x: NewI8) -> Self {
+        unimplemented!()
+    }
+}
+impl From<NewI16> for u64 {
+    fn from(_x: NewI16) -> Self {
+        unimplemented!()
+    }
+}
+impl From<NewI32> for u64 {
+    fn from(_x: NewI32) -> Self {
+        unimplemented!()
+    }
+}
+impl From<NewI64> for u64 {
+    fn from(_x: NewI64) -> Self {
+        unimplemented!()
+    }
+}
+impl From<NewI128> for u64 {
+    fn from(_x: NewI128) -> Self {
+        unimplemented!()
+    }
+}
+impl From<TryWrapper<NewI8>> for u64 {
+    fn from(_x: TryWrapper<NewI8>) -> Self {
+        unimplemented!()
+    }
+}
+impl From<TryWrapper<NewI16>> for u64 {
+    fn from(_x: TryWrapper<NewI16>) -> Self {
+        unimplemented!()
+    }
+}
+impl From<TryWrapper<NewI32>> for u64 {
+    fn from(_x: TryWrapper<NewI32>) -> Self {
+        unimplemented!()
+    }
+}
+impl From<TryWrapper<NewI64>> for u64 {
+    fn from(_x: TryWrapper<NewI64>) -> Self {
+        unimplemented!()
+    }
+}
+impl From<TryWrapper<NewI128>> for u64 {
+    fn from(_x: TryWrapper<NewI128>) -> Self {
+        unimplemented!()
+    }
+}
+
 pub trait ConvertiblePrimitiveInteger:
-    PrimitiveInteger
+    PrimitiveInteger 
     + std::convert::From<NewU8>
     + std::convert::From<NewU16>
     + std::convert::From<NewU32>
@@ -375,21 +447,44 @@ pub trait ConvertiblePrimitiveInteger:
     + std::convert::TryFrom<TryWrapper<NewU32>>
     + std::convert::TryFrom<TryWrapper<NewU64>>
     + std::convert::TryFrom<TryWrapper<NewU128>>
+    + std::convert::From<NewI8>
+    + std::convert::From<NewI16>
+    + std::convert::From<NewI32>
+    + std::convert::From<NewI64>
+    + std::convert::From<NewI128>
+    + std::convert::TryFrom<TryWrapper<NewI8>>
+    + std::convert::TryFrom<TryWrapper<NewI16>>
+    + std::convert::TryFrom<TryWrapper<NewI32>>
+    + std::convert::TryFrom<TryWrapper<NewI64>>
+    + std::convert::TryFrom<TryWrapper<NewI128>>
+   + std::convert::TryFrom<TryWrapper<NewI128>>
 {
 }
 
 impl<
-        T: PrimitiveInteger
-            + std::convert::From<NewU8>
-            + std::convert::From<NewU16>
-            + std::convert::From<NewU32>
-            + std::convert::From<NewU64>
-            + std::convert::From<NewU128>
-            + std::convert::TryFrom<TryWrapper<NewU8>>
-            + std::convert::TryFrom<TryWrapper<NewU16>>
-            + std::convert::TryFrom<TryWrapper<NewU32>>
-            + std::convert::TryFrom<TryWrapper<NewU64>>
-            + std::convert::TryFrom<TryWrapper<NewU128>>,
+    T: PrimitiveInteger 
+    + std::convert::From<NewU8>
+    + std::convert::From<NewU16>
+    + std::convert::From<NewU32>
+    + std::convert::From<NewU64>
+    + std::convert::From<NewU128>
+    + std::convert::TryFrom<TryWrapper<NewU8>>
+    + std::convert::TryFrom<TryWrapper<NewU16>>
+    + std::convert::TryFrom<TryWrapper<NewU32>>
+    + std::convert::TryFrom<TryWrapper<NewU64>>
+    + std::convert::TryFrom<TryWrapper<NewU128>>
+    + std::convert::From<NewI8>
+    + std::convert::From<NewI16>
+    + std::convert::From<NewI32>
+    + std::convert::From<NewI64>
+    + std::convert::From<NewI128>
+    + std::convert::TryFrom<TryWrapper<NewI8>>
+    + std::convert::TryFrom<TryWrapper<NewI16>>
+    + std::convert::TryFrom<TryWrapper<NewI32>>
+    + std::convert::TryFrom<TryWrapper<NewI64>>
+    + std::convert::TryFrom<TryWrapper<NewI128>>
+   + std::convert::TryFrom<TryWrapper<NewI128>>
+
     > ConvertiblePrimitiveInteger for T
 {
 }
@@ -551,6 +646,7 @@ impl MappedRecord for AtacSeqReadRecord {
             RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
             RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
+            _ => panic!("signed integer types are not supported as a barcode type"),
         }
     }
 
@@ -732,7 +828,6 @@ pub struct ScLongReadRecordContext {
     pub umit: RadIntId,
 }
 
-
 impl RecordContext for ScLongReadRecordContext {
     fn get_context_from_tag_section(
         _ft: &TagSection,
@@ -762,10 +857,9 @@ impl ScLongReadRecordContext {
     }
 }
 
-
-impl MappedRecord for ScLongReadRecord {
+impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B>{
     type ParsingContext = ScLongReadRecordContext;
-    type PeekResult = (u64, u64);
+    type PeekResult = (B, u64);
 
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -774,22 +868,22 @@ impl MappedRecord for ScLongReadRecord {
 
         let _na = buf.pread::<u32>(0).unwrap();
 
-        let bc = match ctx.bct {
-            RadIntId::U8 => buf.pread::<u8>(na_size).unwrap() as u64,
-            RadIntId::U16 => buf.pread::<u16>(na_size).unwrap() as u64,
-            RadIntId::U32 => buf.pread::<u32>(na_size).unwrap() as u64,
-            RadIntId::U64 => buf.pread::<u64>(na_size).unwrap(),
-            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
+        let bc: B = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
         };
-
         let umi = match ctx.umit {
             RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
             RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
             RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
             RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
-            RadIntId::U128 => panic!("u128 is currently not supported as a barcode type"),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported")
         };
-
         (bc, umi)
     }
 
@@ -854,10 +948,6 @@ impl MappedRecord for ScLongReadRecord {
             .write_to(self.umi, writer)
             .context("couldn't write umi field for record")?;
 
-        fn encode_i32_as_u32(v: i32) -> u32 {
-            unsafe { std::mem::transmute::<i32, u32>(v) }
-        }
-
         for i in 0..(na as usize) {
             let ref_idx = self.refs[i];
             let dir = self.dirs[i];
@@ -871,12 +961,9 @@ impl MappedRecord for ScLongReadRecord {
             writer
                 .write_all(&encoded_dir_ref.to_le_bytes())
                 .context("couldn't write compressed_ori_refid for record")?;
-
-            let as_u32 = encode_i32_as_u32(as_i32);
             writer
-                .write_all(&as_u32.to_le_bytes())
+                .write_all(&as_i32.to_le_bytes())
                 .context("couldn't write AS for record")?;
-
             writer
                 .write_all(&start.to_le_bytes())
                 .context("couldn't write start for record")?;
@@ -892,7 +979,7 @@ impl MappedRecord for ScLongReadRecord {
 }
 
 
-impl ScLongReadRecord {
+impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
     /// Returns `true` if this [ScLongReadRecord] contains no references and
     /// `false` otherwise.
     pub fn is_empty(&self) -> bool {
@@ -904,23 +991,21 @@ impl ScLongReadRecord {
     /// the umi should be encoded with the [RadIntId] type `umit`.
     pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
         let ctx = ScLongReadRecordContext::from_bct_umit(*bct, *umit);
-        ScLongReadRecord::from_bytes_with_context(reader, &ctx)
+        Self::from_bytes_with_context(reader, &ctx)
     }
 
     #[inline]
-    pub fn from_bytes_record_header<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> (u64, u64, u32) {
+    pub fn from_bytes_record_header<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> (B, u64, u32) {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf); //.pread::<u32>(0).unwrap();
-        let bc = rad_io::read_into_u64(reader, bct);
+        let bc: B = rad_io::read_into(reader, bct);
         let umi = rad_io::read_into_u64(reader, umit);
         (bc, umi, na)
     }
 
     pub fn from_bytes_with_header<T: Read>(_reader: &mut T, _bc: u64, _umi: u64, _na: u32) -> Self {
-        
         unimplemented!("from_bytes_with_header is not implemented for extended AlevinFryReadRecordT");
-
     }
 }
 

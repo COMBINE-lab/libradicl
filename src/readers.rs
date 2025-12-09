@@ -103,7 +103,7 @@ where
 
     /// Returns a [MetaChunkIterator] that can iterate over the
     /// [Chunk]s of this [MetaChunk].
-    pub fn iter(&self) -> MetaChunkIterator<R> {
+    pub fn iter(&self) -> MetaChunkIterator<'_, '_, R> {
         MetaChunkIterator {
             curr_sub_chunk: 0,
             num_sub_chunks: self.num_sub_chunks,

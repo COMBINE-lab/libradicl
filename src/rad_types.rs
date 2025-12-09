@@ -22,6 +22,17 @@ use std::io::Read;
 use std::io::Write;
 use std::mem;
 
+const U8ID  : u8 = 1_u8;
+const U16ID : u8 = 2_u8;
+const U32ID : u8 = 3_u8;
+const U64ID : u8 = 4_u8;
+const U128ID: u8 = 9_u8;
+const I8ID  : u8 = 10_u8;
+const I16ID : u8 = 11_u8;
+const I32ID : u8 = 12_u8;
+const I64ID : u8 = 13_u8;
+const I128ID: u8 = 14_u8;
+
 /// A **description** for a type tag. This  specifies the name
 /// that the tag should be given, and the type of value that it
 /// holds.  At other points in the file, when this tag is used
@@ -128,6 +139,11 @@ pub enum RadIntId {
     U32,
     U64,
     U128,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128
 }
 
 impl RadIntId {
@@ -141,6 +157,11 @@ impl RadIntId {
             Self::U32 => mem::size_of::<u32>(),
             Self::U64 => mem::size_of::<u64>(),
             Self::U128 => mem::size_of::<u128>(),
+            Self::I8 => mem::size_of::<i8>(),
+            Self::I16 => mem::size_of::<i16>(),
+            Self::I32 => mem::size_of::<i32>(),
+            Self::I64 => mem::size_of::<i64>(),
+            Self::I128 => mem::size_of::<i128>(),
         }
     }
 
@@ -170,6 +191,43 @@ impl RadIntId {
             RadIntId::U128 => {
                 panic!("cannot read a u128 into a u64");
             }
+            _ => {
+                panic!("cannot read signed RadIntId into a u64")
+            }
+        };
+        v
+    }
+
+    /// Read a value whose size matches this [RadIntId] and return
+    /// the value in a [i64] container
+    #[inline]
+    pub fn read_value_into_i64<R: Read>(&self, reader: &mut R) -> i64 {
+        let mut rbuf = [0u8; 8];
+
+        let v: i64 = match self {
+            RadIntId::I8 => {
+                reader.read_exact(&mut rbuf[0..1]).unwrap();
+                rbuf.pread::<i8>(0).unwrap() as i64
+            }
+            RadIntId::I16 => {
+                reader.read_exact(&mut rbuf[0..2]).unwrap();
+                rbuf.pread::<i16>(0).unwrap() as i64
+            }
+            RadIntId::I32 => {
+                reader.read_exact(&mut rbuf[0..4]).unwrap();
+                rbuf.pread::<i32>(0).unwrap() as i64
+            }
+            RadIntId::I64 => {
+                reader.read_exact(&mut rbuf[0..8]).unwrap();
+                rbuf.pread::<i64>(0).unwrap()
+            }
+            RadIntId::I128 => {
+                panic!("cannot read a i128 into a i64");
+            }
+            _ => {
+                panic!("cannot read an unsigned RadIntId into a i64")
+            }
+
         };
         v
     }
@@ -201,21 +259,65 @@ impl RadIntId {
                 reader.read_exact(&mut rbuf[0..16]).unwrap();
                 rbuf.pread::<u128>(0).unwrap()
             }
+            _ => {
+                panic!("cannot read a signed RadIntId into a u128")
+            }
         };
         v
     }
+
+    /// Read a value whose size matches this [RadIntId] and return
+    /// the value in a [i128] container
+    #[inline]
+    pub fn read_value_into_i128<R: Read>(&self, reader: &mut R) -> i128 {
+        let mut rbuf = [0u8; 16];
+
+        let v: i128 = match self {
+            RadIntId::I8 => {
+                reader.read_exact(&mut rbuf[0..1]).unwrap();
+                rbuf.pread::<i8>(0).unwrap() as i128
+            }
+            RadIntId::I16 => {
+                reader.read_exact(&mut rbuf[0..2]).unwrap();
+                rbuf.pread::<i16>(0).unwrap() as i128
+            }
+            RadIntId::I32 => {
+                reader.read_exact(&mut rbuf[0..4]).unwrap();
+                rbuf.pread::<i32>(0).unwrap() as i128
+            }
+            RadIntId::I64 => {
+                reader.read_exact(&mut rbuf[0..8]).unwrap();
+                rbuf.pread::<i64>(0).unwrap() as i128
+            }
+            RadIntId::I128 => {
+                reader.read_exact(&mut rbuf[0..16]).unwrap();
+                rbuf.pread::<i128>(0).unwrap()
+            }
+            _ => {
+                panic!("cannot read an unsigned RadIntId into a i128")
+            }
+        };
+        v
+    }
+
 }
+
 
 /// Convert from a [RadIntId], to the corresponding type id (`u8`)
 /// encoding.
 impl From<RadIntId> for u8 {
     fn from(r: RadIntId) -> Self {
         match r {
-            RadIntId::U8 => 1_u8,
-            RadIntId::U16 => 2_u8,
-            RadIntId::U32 => 3_u8,
-            RadIntId::U64 => 4_u8,
-            RadIntId::U128 => 9_u8,
+            RadIntId::U8 => U8ID,
+            RadIntId::U16 => U16ID,
+            RadIntId::U32 => U32ID,
+            RadIntId::U64 => U64ID,
+            RadIntId::U128 => U128ID,
+            RadIntId::I8 => I8ID,
+            RadIntId::I16 => I16ID,
+            RadIntId::I32 => I32ID,
+            RadIntId::I64 => I64ID,
+            RadIntId::I128 => I128ID,
         }
     }
 }
@@ -226,11 +328,16 @@ impl From<RadIntId> for u8 {
 impl From<u8> for RadIntId {
     fn from(x: u8) -> Self {
         match x {
-            1 => Self::U8,
-            2 => Self::U16,
-            3 => Self::U32,
-            4 => Self::U64,
-            9 => Self::U128,
+            U8ID => Self::U8,
+            U16ID => Self::U16,
+            U32ID => Self::U32,
+            U64ID => Self::U64,
+            U128ID => Self::U128,
+            I8ID => Self::I8,
+            I16ID => Self::I16,
+            I32ID => Self::I32,
+            I64ID => Self::I64,
+            I128ID => Self::I128,
             _ => panic!("Should not happen"),
         }
     }
@@ -281,25 +388,41 @@ pub trait PrimitiveInteger:
     + AsPrimitive<i64>
     + AsPrimitive<i128>
     + AsPrimitive<isize>
+{}
+
+impl<T: 
+    AsPrimitive<u8>
+    + AsPrimitive<u16>
+    + AsPrimitive<u32>
+    + AsPrimitive<u64>
+    + AsPrimitive<u128>
+    + AsPrimitive<usize>
+    + AsPrimitive<i8>
+    + AsPrimitive<i16>
+    + AsPrimitive<i32>
+    + AsPrimitive<i64>
+    + AsPrimitive<i128>
+    + AsPrimitive<isize>> PrimitiveInteger for T
 {
 }
 
-impl<
-        T: AsPrimitive<u8>
-            + AsPrimitive<u16>
-            + AsPrimitive<u32>
-            + AsPrimitive<u64>
-            + AsPrimitive<u128>
-            + AsPrimitive<usize>
-            + AsPrimitive<i8>
-            + AsPrimitive<i16>
-            + AsPrimitive<i32>
-            + AsPrimitive<i64>
-            + AsPrimitive<i128>
-            + AsPrimitive<isize>,
-    > PrimitiveInteger for T
+pub trait PrimitiveUnsignedInteger:
+    PrimitiveInteger + num::Unsigned 
 {
 }
+
+impl<T: PrimitiveInteger + num::Unsigned> PrimitiveUnsignedInteger for T
+{
+}
+
+pub trait PrimitiveSignedInteger: PrimitiveInteger + num::Signed
+{
+}
+
+impl<T: PrimitiveInteger + num::Signed> PrimitiveSignedInteger for T
+{
+}
+
 
 impl RadIntId {
     /// Return the number of bytes required
@@ -342,6 +465,26 @@ impl RadIntId {
                 let vo: u128 = v.as_();
                 owriter.write_all(&vo.to_le_bytes())
             }
+            Self::I8 => {
+                let vo: i8 = v.as_();
+                owriter.write_all(&vo.to_le_bytes())
+            }
+            Self::I16 => {
+                let vo: i16 = v.as_();
+                owriter.write_all(&vo.to_le_bytes())
+            }
+            Self::I32 => {
+                let vo: i32 = v.as_();
+                owriter.write_all(&vo.to_le_bytes())
+            }
+            Self::I64 => {
+                let vo: i64 = v.as_();
+                owriter.write_all(&vo.to_le_bytes())
+            }
+            Self::I128 => {
+                let vo: i128 = v.as_();
+                owriter.write_all(&vo.to_le_bytes())
+            }
         }
     }
 
@@ -356,6 +499,13 @@ impl RadIntId {
             Self::U32 => buf.pread::<u32>(0).unwrap() as usize,
             Self::U64 => buf.pread::<u64>(0).unwrap() as usize,
             Self::U128 => {
+                panic!("cannot read u128 into usize!")
+            }
+            Self::I8 => buf.pread::<i8>(0).unwrap() as usize,
+            Self::I16 => buf.pread::<i16>(0).unwrap() as usize,
+            Self::I32 => buf.pread::<i32>(0).unwrap() as usize,
+            Self::I64 => buf.pread::<i64>(0).unwrap() as usize,
+            Self::I128 => {
                 panic!("cannot read u128 into usize!")
             }
         }
@@ -395,11 +545,16 @@ impl From<RadAtomicId> for u8 {
     fn from(x: RadAtomicId) -> Self {
         match x {
             RadAtomicId::Bool => 0,
-            RadAtomicId::Int(RadIntId::U8) => 1,
-            RadAtomicId::Int(RadIntId::U16) => 2,
-            RadAtomicId::Int(RadIntId::U32) => 3,
-            RadAtomicId::Int(RadIntId::U64) => 4,
-            RadAtomicId::Int(RadIntId::U128) => 9,
+            RadAtomicId::Int(RadIntId::U8) => U8ID,
+            RadAtomicId::Int(RadIntId::U16) => U16ID,
+            RadAtomicId::Int(RadIntId::U32) => U32ID,
+            RadAtomicId::Int(RadIntId::U64) => U64ID,
+            RadAtomicId::Int(RadIntId::U128) => U128ID,
+            RadAtomicId::Int(RadIntId::I8) => I8ID,
+            RadAtomicId::Int(RadIntId::I16) => I16ID,
+            RadAtomicId::Int(RadIntId::I32) => I32ID,
+            RadAtomicId::Int(RadIntId::I64) => I64ID,
+            RadAtomicId::Int(RadIntId::I128) => I128ID,
             RadAtomicId::Float(RadFloatId::F32) => 5,
             RadAtomicId::Float(RadFloatId::F64) => 6,
             RadAtomicId::String => 8,
@@ -414,11 +569,16 @@ impl From<u8> for RadAtomicId {
     fn from(x: u8) -> Self {
         match x {
             0 => Self::Bool,
-            1 => Self::Int(RadIntId::U8),
-            2 => Self::Int(RadIntId::U16),
-            3 => Self::Int(RadIntId::U32),
-            4 => Self::Int(RadIntId::U64),
-            9 => Self::Int(RadIntId::U128),
+            U8ID   => Self::Int(RadIntId::U8),
+            U16ID  => Self::Int(RadIntId::U16),
+            U32ID  => Self::Int(RadIntId::U32),
+            U64ID  => Self::Int(RadIntId::U64),
+            U128ID => Self::Int(RadIntId::U128),
+            I8ID   => Self::Int(RadIntId::I8),
+            I16ID  => Self::Int(RadIntId::I16),
+            I32ID  => Self::Int(RadIntId::I32),
+            I64ID  => Self::Int(RadIntId::I64),
+            I128ID => Self::Int(RadIntId::I128),
             5 => Self::Float(RadFloatId::F32),
             6 => Self::Float(RadFloatId::F64),
             8 => Self::String,
@@ -503,15 +663,20 @@ impl RadType {
 pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
     match type_tag {
         RadType::Bool => Some(0),
-        RadType::Int(RadIntId::U8) => Some(1),
-        RadType::Int(RadIntId::U16) => Some(2),
-        RadType::Int(RadIntId::U32) => Some(3),
-        RadType::Int(RadIntId::U64) => Some(4),
+        RadType::Int(RadIntId::U8) => Some(U8ID),
+        RadType::Int(RadIntId::U16) => Some(U16ID),
+        RadType::Int(RadIntId::U32) => Some(U32ID),
+        RadType::Int(RadIntId::U64) => Some(U64ID),
+        RadType::Int(RadIntId::U128) => Some(U128ID),
+        RadType::Int(RadIntId::I8) => Some(I8ID),
+        RadType::Int(RadIntId::I16) => Some(I16ID),
+        RadType::Int(RadIntId::I32) => Some(I32ID),
+        RadType::Int(RadIntId::I64) => Some(I64ID),
+        RadType::Int(RadIntId::I128) => Some(I128ID),
         RadType::Float(RadFloatId::F32) => Some(5),
         RadType::Float(RadFloatId::F64) => Some(6),
         RadType::Array(_, _) => Some(7),
         RadType::String => Some(8), //_ => None,
-        RadType::Int(RadIntId::U128) => Some(9),
     }
 }
 
@@ -520,11 +685,16 @@ pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
 /// then return `Some(`[RadIntId]`)`, otherwise return [None].
 pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     match type_id {
-        1 => Some(RadIntId::U8),
-        2 => Some(RadIntId::U16),
-        3 => Some(RadIntId::U32),
-        4 => Some(RadIntId::U64),
-        9 => Some(RadIntId::U128),
+        U8ID    => Some(RadIntId::U8),
+        U16ID   => Some(RadIntId::U16),
+        U32ID   => Some(RadIntId::U32),
+        U64ID   => Some(RadIntId::U64),
+        U128ID  => Some(RadIntId::U128),
+        I8ID    => Some(RadIntId::I8),
+        I16ID   => Some(RadIntId::I16),
+        I32ID   => Some(RadIntId::I32),
+        I64ID   => Some(RadIntId::I64),
+        I128ID  => Some(RadIntId::I128),
         _ => None,
     }
 }
@@ -669,15 +839,20 @@ impl From<u8> for RadType {
     fn from(x: u8) -> Self {
         match x {
             0 => RadType::Bool,
-            1 => RadType::Int(RadIntId::U8),
-            2 => RadType::Int(RadIntId::U16),
-            3 => RadType::Int(RadIntId::U32),
-            4 => RadType::Int(RadIntId::U64),
+            U8ID   => RadType::Int(RadIntId::U8),
+            U16ID  => RadType::Int(RadIntId::U16),
+            U32ID  => RadType::Int(RadIntId::U32),
+            U64ID  => RadType::Int(RadIntId::U64),
+            U128ID => RadType::Int(RadIntId::U128),
+            I8ID   => RadType::Int(RadIntId::I8),
+            I16ID  => RadType::Int(RadIntId::I16),
+            I32ID  => RadType::Int(RadIntId::I32),
+            I64ID  => RadType::Int(RadIntId::I64),
+            I128ID => RadType::Int(RadIntId::I128),
             5 => RadType::Float(RadFloatId::F32),
             6 => RadType::Float(RadFloatId::F64),
             7 => panic!("Should not happen"),
             8 => RadType::String,
-            9 => RadType::Int(RadIntId::U128),
             _ => panic!("Should not happen"),
         }
     }
@@ -695,6 +870,11 @@ pub enum TagValue {
     U32(u32),
     U64(u64),
     U128(u128),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    I128(i128),
     F32(f32),
     F64(f64),
     ArrayBool(Vec<bool>),
@@ -703,6 +883,11 @@ pub enum TagValue {
     ArrayU32(Vec<u32>),
     ArrayU64(Vec<u64>),
     ArrayU128(Vec<u128>),
+    ArrayI8(Vec<i8>),
+    ArrayI16(Vec<i16>),
+    ArrayI32(Vec<i32>),
+    ArrayI64(Vec<i64>),
+    ArrayI128(Vec<i128>),
     ArrayF32(Vec<f32>),
     ArrayF64(Vec<f64>),
     ArrayString(Vec<String>),
@@ -713,6 +898,10 @@ tag_value_try_into_int!(u8);
 tag_value_try_into_int!(u16);
 tag_value_try_into_int!(u32);
 tag_value_try_into_int!(u64);
+tag_value_try_into_int!(i8);
+tag_value_try_into_int!(i16);
+tag_value_try_into_int!(i32);
+tag_value_try_into_int!(i64);
 
 impl TagValue {
     /// Write this tag value to the provided writer
@@ -753,6 +942,31 @@ impl TagValue {
                 writer
                     .write_all(&v.to_le_bytes())
                     .context("couldn't write U128 tag value")?;
+            }
+            Self::I8(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write I8 tag value")?;
+            }
+            Self::I16(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write I16 tag value")?;
+            }
+            Self::I32(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write I32 tag value")?;
+            }
+            Self::I64(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write I64 tag value")?;
+            }
+            Self::I128(v) => {
+                writer
+                    .write_all(&v.to_le_bytes())
+                    .context("couldn't write I128 tag value")?;
             }
             Self::F32(v) => {
                 writer
@@ -802,6 +1016,41 @@ impl TagValue {
             Self::ArrayU128(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
                     write_tag_value_array!(vb, len_t, u128, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayI8(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, i8, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayI16(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, i16, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayI32(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, i32, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayI64(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, i64, x, writer);
+                } else {
+                    bail!("Array TagValue didn't correspond to an Array RadType");
+                }
+            }
+            Self::ArrayI128(vb) => {
+                if let RadType::Array(len_t, _) = tag_type {
+                    write_tag_value_array!(vb, len_t, i128, x, writer);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
@@ -866,7 +1115,7 @@ impl TagDesc {
         // the length and element type, otherwise just turn the
         // id into a proper RatType and we're done.
         let rad_t = match typeid {
-            0..=6 | 8 => typeid.into(),
+            0..=6 | 8 | 10..=14 => typeid.into(),
             7 => {
                 reader.read_exact(&mut buf[0..2]).context("failed to read aggregate type parameters (array length and element types) from the reader.")?;
                 let t1: RadIntId = buf
@@ -921,6 +1170,26 @@ impl TagDesc {
                 let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<u128>()]);
                 TagValue::U128(small_buf.pread::<u128>(0).unwrap())
             }
+            RadType::Int(RadIntId::I8) => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<i8>()]);
+                TagValue::I8(small_buf[0] as i8)
+            }
+            RadType::Int(RadIntId::I16) => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<i16>()]);
+                TagValue::I16(small_buf.pread::<i16>(0).unwrap())
+            }
+            RadType::Int(RadIntId::I32) => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<i32>()]);
+                TagValue::I32(small_buf.pread::<i32>(0).unwrap())
+            }
+            RadType::Int(RadIntId::I64) => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<i64>()]);
+                TagValue::I64(small_buf.pread::<i64>(0).unwrap())
+            }
+            RadType::Int(RadIntId::I128) => {
+                let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<i128>()]);
+                TagValue::I128(small_buf.pread::<i128>(0).unwrap())
+            }
             RadType::Float(RadFloatId::F32) => {
                 let _ = reader.read_exact(&mut small_buf[0..std::mem::size_of::<f32>()]);
                 TagValue::F32(small_buf.pread::<f32>(0).unwrap())
@@ -964,6 +1233,19 @@ impl TagDesc {
                         RadAtomicId::Int(RadIntId::U128) => {
                             TagValue::ArrayU128(u8_to_vec_of!(data, u128))
                         }
+                        RadAtomicId::Int(RadIntId::I8) => TagValue::ArrayI8(bytemuck::try_cast_vec::<u8, i8>(data).expect("should be valid to cast from Vec<u8> to Vec<i8>")),
+                        RadAtomicId::Int(RadIntId::I16) => {
+                            TagValue::ArrayI16(u8_to_vec_of!(data, i16))
+                        }
+                        RadAtomicId::Int(RadIntId::I32) => {
+                            TagValue::ArrayI32(u8_to_vec_of!(data, i32))
+                        }
+                        RadAtomicId::Int(RadIntId::I64) => {
+                            TagValue::ArrayI64(u8_to_vec_of!(data, i64))
+                        }
+                        RadAtomicId::Int(RadIntId::I128) => {
+                            TagValue::ArrayI128(u8_to_vec_of!(data, i128))
+                        }
                         RadAtomicId::Float(RadFloatId::F32) => {
                             TagValue::ArrayF32(u8_to_vec_of!(data, f32))
                         }
@@ -1000,6 +1282,11 @@ impl TagDesc {
             (RadType::Int(RadIntId::U32), TagValue::U32(_)) => true,
             (RadType::Int(RadIntId::U64), TagValue::U64(_)) => true,
             (RadType::Int(RadIntId::U128), TagValue::U128(_)) => true,
+            (RadType::Int(RadIntId::I8), TagValue::I8(_)) => true,
+            (RadType::Int(RadIntId::I16), TagValue::I16(_)) => true,
+            (RadType::Int(RadIntId::I32), TagValue::I32(_)) => true,
+            (RadType::Int(RadIntId::I64), TagValue::I64(_)) => true,
+            (RadType::Int(RadIntId::I128), TagValue::I128(_)) => true,
             (RadType::Float(RadFloatId::F32), TagValue::F32(_)) => true,
             (RadType::Float(RadFloatId::F64), TagValue::F64(_)) => true,
             (RadType::Array(_, RadAtomicId::Bool), TagValue::ArrayBool(_)) => true,
@@ -1008,6 +1295,11 @@ impl TagDesc {
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U32)), TagValue::ArrayU32(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U64)), TagValue::ArrayU64(_)) => true,
             (RadType::Array(_, RadAtomicId::Int(RadIntId::U128)), TagValue::ArrayU128(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::I8)), TagValue::ArrayI8(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::I16)), TagValue::ArrayI16(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::I32)), TagValue::ArrayI32(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::I64)), TagValue::ArrayI64(_)) => true,
+            (RadType::Array(_, RadAtomicId::Int(RadIntId::I128)), TagValue::ArrayI128(_)) => true,
             (RadType::Array(_, RadAtomicId::Float(RadFloatId::F32)), TagValue::ArrayF32(_)) => true,
             (RadType::Array(_, RadAtomicId::Float(RadFloatId::F64)), TagValue::ArrayF64(_)) => true,
             (RadType::Array(_, RadAtomicId::String), TagValue::ArrayString(_)) => true,
@@ -1240,7 +1532,7 @@ impl TagSection {
     pub fn parse_tags_view_from_bytes<T: Read>(
         &self,
         reader: &mut T,
-    ) -> anyhow::Result<TagViewMap> {
+    ) -> anyhow::Result<TagViewMap<'_>> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
         let mut tm = TagViewMap::with_keyset(&self.tags);
@@ -1274,7 +1566,7 @@ impl TagSection {
     pub fn try_parse_tags_view_from_bytes<T: Read>(
         &self,
         reader: &mut T,
-    ) -> anyhow::Result<TagViewMap> {
+    ) -> anyhow::Result<TagViewMap<'_>> {
         // loop over all of the tag descriptions in this section, and parse a
         // tag value for each.
         //let mut tv = Vec::<TagValue>::new();
