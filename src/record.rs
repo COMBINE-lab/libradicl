@@ -15,7 +15,7 @@ use crate::io::{NewU128, NewU16, NewU32, NewU64, NewU8, NewI128, NewI16, NewI32,
 use crate::{
     io as rad_io,
     rad_types::{
-        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType, TagSection,
+        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType, TagSection, TagValue, TagMap
     },
     utils,
 };
@@ -42,6 +42,28 @@ pub type ScLongReadRecordU64 = ScLongReadRecordT<u64>;
 
 /// An [ScLongReadRecordT] that holds the barcode in a [u128] and is explicit about this
 pub type ScLongReadRecordU128 = ScLongReadRecordT<u128>;
+
+/// A concrete struct representing a [MappedRecord]
+/// that is as generic as possible. Here, the tags should
+/// be as arbitrary as possible. This record type should
+/// **not** be used for high-throughput processing as it will
+/// induce much more overhead than the specialized implementations
+/// but should allow us to easily test out RAD files containing 
+/// different information
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenericReadRecord {
+    pub naln: u32,
+    pub naln_tags: u32,
+    pub rtags: Vec<TagValue>,
+    pub atags: Vec<TagValue>,
+}
+
+/// context needed to read a generic record
+#[derive(Debug, Clone)]
+pub struct GenericReadRecordContext {
+    pub read_tags: TagSection,
+    pub aln_tags: TagSection,
+}
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
@@ -151,6 +173,20 @@ pub fn argsort<T: Ord>(data: &[T]) -> Vec<usize> {
     indices.sort_unstable_by_key(|&i| &data[i]);
     indices
 }
+
+impl RecordContext for GenericReadRecordContext {
+    /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
+    /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
+    /// corresponding [TagSection].
+    fn get_context_from_tag_section(
+        _ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        Ok(Self { read_tags: rt.clone(), aln_tags: at.clone() })
+    }
+}
+
 
 /// context needed to read an alevin-fry record
 /// (the types of the barcode and umi)
@@ -375,6 +411,51 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     }
 }
 
+impl MappedRecord for GenericReadRecord {
+    type ParsingContext = GenericReadRecordContext;
+    type PeekResult = Option<u64>;
+
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        // fixed field, must always be present
+        reader.read_exact(&mut rbuf[0..4]).unwrap();
+        let na = rbuf.pread::<u32>(0).unwrap();
+
+        // now any read level information
+        let rtags = &ctx.read_tags.iter_desc().map(|td| 
+            td.value_from_bytes(&mut reader)
+        ).collect();
+            
+        let naln_tags = &ctx.aln_tags.iter_desc().len();
+        let atags = Vec::<TagValue>::new()
+        for _ in 0..(na as usize) {
+            let aln_tags = &ctx.aln_tags.iter_desc().map(|td|
+                td.value_from_bytes(&mut reader)
+            ).collect();
+            atags.extend(aln_tags);
+        }
+
+        let mut rec = Self {
+            naln,
+            naln_tags: *naln_tags as u32,
+            rtags,
+            atags,
+        };
+        rec
+    }
+
+    #[inline]
+    fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
+        unimplemented!("Currently there is no implementation for peek_record for GenericRecord. This should not be needed");
+    }
+
+    #[inline]
+    fn write<W: Write>(&self, writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        unimplemented!("Currently there is no implementation for write for the GenericReadRecord");
+    }
+}
 
 // TODO: The below is a mess, think about how to clean it up. 
 // We have to provide these now because our number trait encoding 

@@ -130,6 +130,11 @@ impl TagSection {
         }
         Ok(())
     }
+
+    /// return an iterator over the tag descriptions
+    pub fn iter_desc(&self) -> impl std::iter::ExactSizeIterator + use<'_> {
+        self.tags.iter()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -862,7 +867,7 @@ impl From<u8> for RadType {
 /// in a RAD tag. For the aggregate (i.e. array) types, the type
 /// of the element being stored in the array is encoded in the
 /// [TagValue] variant, but the length of the array is not.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TagValue {
     Bool(bool),
     U8(u8),
@@ -892,6 +897,16 @@ pub enum TagValue {
     ArrayF64(Vec<f64>),
     ArrayString(Vec<String>),
     String(String),
+}
+
+impl std::cmp::Eq for TagValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::F32(s), Self::F32(o)) => (s - o).abs() < f32::EPSILON,
+            (Self::F64(s), Self::F64(o)) => (s - o).abs() < f64::EPSILON,
+            (x, y) => {x == y}
+        }
+    }
 }
 
 tag_value_try_into_int!(u8);
@@ -1467,6 +1482,11 @@ impl TagMap {
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         write_tag_map_values(&self.dat, &self.keys, writer)
+    }
+
+    /// return an iterator over the [TagDesc] for the keys
+    pub fn iter_keys(&self) -> impl std::iter::ExactSizeIterator + use<'_> {
+        self.keys.iter()
     }
 }
 
