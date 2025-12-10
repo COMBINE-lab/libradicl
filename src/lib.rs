@@ -34,6 +34,7 @@ use crate as libradicl;
 use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
+use self::libradicl::record::{MappedRecord, KnownSize};
 use self::libradicl::schema::{TempCellInfo,CollateKey};
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -283,6 +284,151 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
     owriter.lock().unwrap().write_all(v.data.get_ref()).unwrap();
 }
 */
+
+/// Given a [BufReader]`<T>` from which to read a set of records that
+/// should reside in the same collated bucket, this function will
+/// collate the records by cell barcode, filling them into a chunk of
+/// memory exactly as they will reside on disk.  If `compress` is true
+/// the collated chunk will be compressed, and then the result will be
+/// written to the output guarded by `owriter`.
+pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedRecord + KnownSize>(
+    reader: &mut BufReader<T>,
+    bct: &RadIntId,
+    umit: &RadIntId,
+    nrec: u32,
+    owriter: &Mutex<U>,
+    compress: bool,
+    cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
+) -> usize {
+    let mut tbuf = vec![0u8; 65536];
+    let mut total_bytes = 0usize;
+    let header_size = 2 * std::mem::size_of::<u32>() as u64;
+    let size_of_u32 = std::mem::size_of::<u32>();
+    let size_of_bc = bct.bytes_for_type();
+    let size_of_umi = umit.bytes_for_type();
+
+    let calc_record_bytes = |num_aln: usize| -> usize {
+        size_of_u32 + size_of_bc + size_of_umi + (size_of_u32 * num_aln)
+    };
+
+    // read each record
+    for _ in 0..(nrec as usize) {
+        // read the header of the record
+        // we don't bother reading the whole thing here
+        // because we will just copy later as need be
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
+
+        // get the entry for this chunk, or create a new one
+        let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
+            offset: header_size,
+            nbytes: header_size as u32,
+            nrec: 0_u32,
+        });
+
+        // read the alignment records from the input file
+        let na = tup.2 as usize;
+        let req_size = size_of_u32 * na;
+        if tbuf.len() < req_size {
+            tbuf.resize(req_size, 0);
+        }
+        reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
+        // compute the total number of bytes this record requires
+        let nbytes = calc_record_bytes(na);
+        v.offset += nbytes as u64;
+        v.nbytes += nbytes as u32;
+        v.nrec += 1;
+        total_bytes += nbytes;
+    }
+
+    // each cell will have a header (8 bytes each)
+    total_bytes += cb_byte_map.len() * header_size as usize;
+    let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
+
+    // loop over all distinct cell barcodes, write their
+    // corresponding chunk header, and compute what the
+    // offset in `output_buffer` is where the corresponding
+    // records should start.
+    let mut next_offset = 0u64;
+    for (_, v) in cb_byte_map.iter_mut() {
+        // jump to the position where this chunk should start
+        // and write the header
+        output_buffer.set_position(next_offset);
+        let cell_bytes = v.nbytes;
+        let cell_rec = v.nrec;
+        output_buffer.write_all(&cell_bytes.to_le_bytes()).unwrap();
+        output_buffer.write_all(&cell_rec.to_le_bytes()).unwrap();
+        // where we will start writing records for this cell
+        v.offset = output_buffer.position();
+        // the number of bytes allocated to this chunk
+        let nbytes = v.nbytes as u64;
+        // the next record will start after this one
+        next_offset += nbytes;
+    }
+
+    // now each key points to where we should write the next record for the CB
+    // reset the input pointer
+    reader
+        .get_mut()
+        .seek(SeekFrom::Start(0))
+        .expect("could not get read pointer.");
+
+    // for each record, read it
+    for _ in 0..(nrec as usize) {
+        // read the header of the record
+        // we don't bother reading the whole thing here
+        // because we will just copy later as need be
+        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
+
+        // get the entry for this chunk, or create a new one
+        if let Some(v) = cb_byte_map.get_mut(&tup.0) {
+            output_buffer.set_position(v.offset);
+
+            // write the num align
+            let na = tup.2 as usize;
+            let nau32 = na as u32;
+            output_buffer.write_all(&nau32.to_le_bytes()).unwrap();
+
+            // write the corrected barcode
+            bct.write_to(tup.0, &mut output_buffer).unwrap();
+            umit.write_to(tup.1, &mut output_buffer).unwrap();
+
+            // read the alignment records
+            reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
+            // write them
+            output_buffer
+                .write_all(&tbuf[..(size_of_u32 * na)])
+                .unwrap();
+
+            v.offset = output_buffer.position();
+        } else {
+            panic!("should not have any barcodes we can't find");
+        }
+    }
+
+    output_buffer.set_position(0);
+
+    if compress {
+        // compress the contents of output_buffer to compressed_output
+        let mut compressed_output =
+            snap::write::FrameEncoder::new(Cursor::new(Vec::<u8>::with_capacity(total_bytes)));
+        compressed_output
+            .write_all(output_buffer.get_ref())
+            .expect("could not compress the output chunk.");
+
+        output_buffer = compressed_output
+            .into_inner()
+            .expect("couldn't unwrap the FrameEncoder.");
+        output_buffer.set_position(0);
+    }
+
+    owriter
+        .lock()
+        .unwrap()
+        .write_all(output_buffer.get_ref())
+        .unwrap();
+
+    cb_byte_map.len()
+}
 
 /// Given a [BufReader]`<T>` from which to read a set of records that
 /// should reside in the same collated bucket, this function will

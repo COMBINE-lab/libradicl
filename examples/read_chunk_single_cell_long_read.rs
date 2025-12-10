@@ -1,7 +1,7 @@
 use anyhow::{self, Context};
 use libradicl::chunk::Chunk;
 use libradicl::header;
-use libradicl::record::{ScLongReadRecord, ScLongReadRecordContext};
+use libradicl::record::{ScLongReadRecord, ScLongReadRecordContext, KnownSize};
 use std::io::BufReader;
 
 fn main() -> anyhow::Result<()> {
@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
     );
     assert_eq!(first_chunk.nrec as usize, first_chunk.reads.len());
     for (i, r) in first_chunk.reads.iter().take(10).enumerate() {
-        println!("record {i}: {:?}", r);
+        println!("record {i}: {:?} [[bytes : {}]]", r, ScLongReadRecord::nbytes(r.refs.len() as u32, &tag_context));
     }
     println!(
         "printed first 10 records of {} in the first chunk",
