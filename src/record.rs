@@ -81,6 +81,56 @@ pub struct GenericReadRecordContext {
     pub aln_tags: TagSection,
 }
 
+pub trait KnownSize {
+    // returns the number of bytes taken for a record of the given type 
+    // with na alignments
+    fn nbytes(na: u32) -> usize;
+}
+
+impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
+    fn nbytes(na: u32) -> usize {
+        // for na field
+        std::mem::size_of::<u32>() +
+        // for bc
+        std::mem::size_of::<B>() + 
+        // for umi
+        std::mem::size_of::<u32>() + 
+        // an ori_ref for each alignment
+        (na as usize * std::mem::size_of::<u32>())
+    }
+}
+
+impl KnownSize for PiscemBulkReadRecord {
+    fn nbytes(na: u32) -> usize {
+        // for na field
+        std::mem::size_of::<u32>() +
+        // for frag type
+        std::mem::size_of::<u8>() + 
+        // for each alignment a 
+        // (mapped_fragment_orientation + reference): u32, 
+        // position: u32
+        // frag length: u16
+        (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>()))
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
+    fn nbytes(na: u32) -> usize {
+        // for na field
+        std::mem::size_of::<u32>() +
+        // for barcode type
+        std::mem::size_of::<B>() + 
+        // for the umi
+        std::mem::size_of::<u32>() +
+        // for each alignment a 
+        // (ori_refernce): u32, 
+        // read_start : u32, 
+        // read_end: u32, 
+        // alignment_score: i32, 
+        (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()))
+    }
+}
+
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
 /// This represents the set of alignments and relevant information
