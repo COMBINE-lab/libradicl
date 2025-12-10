@@ -84,28 +84,28 @@ pub struct GenericReadRecordContext {
 pub trait KnownSize {
     // returns the number of bytes taken for a record of the given type 
     // with na alignments
-    fn nbytes(na: u32) -> usize;
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize where Self : MappedRecord;
 }
 
 impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
-    fn nbytes(na: u32) -> usize {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
         // for na field
         std::mem::size_of::<u32>() +
         // for bc
-        std::mem::size_of::<B>() + 
-        // for umi
-        std::mem::size_of::<u32>() + 
+        ctx.bct.bytes_for_type() +
+        // for umi 
+        ctx.umit.bytes_for_type() +
         // an ori_ref for each alignment
         (na as usize * std::mem::size_of::<u32>())
     }
 }
 
 impl KnownSize for PiscemBulkReadRecord {
-    fn nbytes(na: u32) -> usize {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
         // for na field
         std::mem::size_of::<u32>() +
         // for frag type
-        std::mem::size_of::<u8>() + 
+        ctx.frag_map_t.bytes_for_type() +
         // for each alignment a 
         // (mapped_fragment_orientation + reference): u32, 
         // position: u32
@@ -115,13 +115,13 @@ impl KnownSize for PiscemBulkReadRecord {
 }
 
 impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
-    fn nbytes(na: u32) -> usize {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
         // for na field
         std::mem::size_of::<u32>() +
         // for barcode type
-        std::mem::size_of::<B>() + 
+        ctx.bct.bytes_for_type() +
         // for the umi
-        std::mem::size_of::<u32>() +
+        ctx.umit.bytes_for_type() +
         // for each alignment a 
         // (ori_refernce): u32, 
         // read_start : u32, 
@@ -130,6 +130,23 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
         (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()))
     }
 }
+
+impl KnownSize for AtacSeqReadRecord {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // for na field
+        std::mem::size_of::<u32>() +
+        // for barcode type
+        ctx.bct.bytes_for_type() +
+        // for each alignment a 
+        // (ori_refernce): u32, 
+        // read_start : u32, 
+        // read_end: u32, 
+        // alignment_score: i32, 
+        (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()))
+    }
+}
+
+
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
