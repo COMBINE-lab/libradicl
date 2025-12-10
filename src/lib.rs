@@ -293,6 +293,7 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
 /// written to the output guarded by `owriter`.
 pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedRecord + KnownSize>(
     reader: &mut BufReader<T>,
+    rec_context: &<R as MappedRecord>::ParsingContext,
     bct: &RadIntId,
     umit: &RadIntId,
     nrec: u32,
@@ -304,12 +305,9 @@ pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedR
     let mut total_bytes = 0usize;
     let header_size = 2 * std::mem::size_of::<u32>() as u64;
     let size_of_u32 = std::mem::size_of::<u32>();
-    let size_of_bc = bct.bytes_for_type();
-    let size_of_umi = umit.bytes_for_type();
+    let size_of_aln = R::nbytes_aln(rec_context);
 
-    let calc_record_bytes = |num_aln: usize| -> usize {
-        size_of_u32 + size_of_bc + size_of_umi + (size_of_u32 * num_aln)
-    };
+    let calc_record_bytes = |num_aln: usize| -> usize { R::nbytes(num_aln as u32, rec_context) };
 
     // read each record
     for _ in 0..(nrec as usize) {
@@ -327,11 +325,11 @@ pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedR
 
         // read the alignment records from the input file
         let na = tup.2 as usize;
-        let req_size = size_of_u32 * na;
+        let req_size = size_of_aln * na;
         if tbuf.len() < req_size {
             tbuf.resize(req_size, 0);
         }
-        reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
+        reader.read_exact(&mut tbuf[0..(size_of_aln * na)]).unwrap();
         // compute the total number of bytes this record requires
         let nbytes = calc_record_bytes(na);
         v.offset += nbytes as u64;
@@ -392,11 +390,11 @@ pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedR
             bct.write_to(tup.0, &mut output_buffer).unwrap();
             umit.write_to(tup.1, &mut output_buffer).unwrap();
 
-            // read the alignment records
-            reader.read_exact(&mut tbuf[0..(size_of_u32 * na)]).unwrap();
-            // write them
+            let bytes_for_aln_rec = R::nbytes_aln(rec_context);
+            // copy over the alignment records
+            reader.read_exact(&mut tbuf[0..(bytes_for_aln_rec * na)]).unwrap();
             output_buffer
-                .write_all(&tbuf[..(size_of_u32 * na)])
+                .write_all(&tbuf[..(bytes_for_aln_rec * na)])
                 .unwrap();
 
             v.offset = output_buffer.position();

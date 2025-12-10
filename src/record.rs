@@ -46,6 +46,21 @@ pub type ScLongReadRecordU64 = ScLongReadRecordT<u64>;
 /// An [ScLongReadRecordT] that holds the barcode in a [u128] and is explicit about this
 pub type ScLongReadRecordU128 = ScLongReadRecordT<u128>;
 
+/// Trait for a RecordHeader, contains at least the number of alignments
+/// but might contain other information
+pub trait RecordHeader {
+    fn naln(&self) -> u32;
+}
+
+/*
+pub trait SingleCellRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader {
+    fn collate_key(&self) -> B;
+    fn write_fields<W: Write>(&self, writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+) -> B;
+}
+*/
+
+
 /// A concrete struct representing a [MappedRecord]
 /// that is as generic as possible. Here, the tags should
 /// be as arbitrary as possible. This record type should
@@ -103,6 +118,7 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // ori_ref 
         std::mem::size_of::<u32>()
     }
 }
@@ -114,13 +130,13 @@ impl KnownSize for PiscemBulkReadRecord {
         // for frag type
         ctx.frag_map_t.bytes_for_type() +
         // for each alignment a 
-        // (mapped_fragment_orientation + reference): u32, 
-        // position: u32
-        // frag length: u16
         (na as usize * Self::nbytes_aln(ctx))
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // (mapped_fragment_orientation + reference): u32, 
+        // position: u32
+        // frag length: u16
         std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>()
     }
 }
@@ -134,14 +150,14 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
         // for the umi
         ctx.umit.bytes_for_type() +
         // for each alignment a 
-        // (ori_refernce): u32, 
-        // read_start : u32, 
-        // read_end: u32, 
-        // alignment_score: i32, 
         (na as usize * Self::nbytes_aln(ctx))
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // (ori_refernce): u32, 
+        // read_start : u32, 
+        // read_end: u32, 
+        // alignment_score: i32, 
         std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()
     }
 
@@ -154,15 +170,15 @@ impl KnownSize for AtacSeqReadRecord {
         // for barcode type
         ctx.bct.bytes_for_type() +
         // for each alignment a 
-        // (ori_refernce): u32, 
-        // read_start : u32, 
-        // read_end: u32, 
-        // alignment_score: i32, 
         (na as usize * Self::nbytes_aln(ctx))
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
-        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()
+        // start_pos: u32, 
+        // ref: u32, 
+        // frag_len: u16, 
+        // map_type: u8, 
+        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>() + std::mem::size_of::<u8>()
     }
 }
 
@@ -1192,7 +1208,7 @@ impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
 
     pub fn from_bytes_with_header<T: Read>(_reader: &mut T, _bc: u64, _umi: u64, _na: u32) -> Self {
         unimplemented!(
-            "from_bytes_with_header is not implemented for extended AlevinFryReadRecordT"
+            "from_bytes_with_header is not implemented for ScLongReadRecordT"
         );
     }
 }
