@@ -85,6 +85,9 @@ pub trait KnownSize {
     // returns the number of bytes taken for a record of the given type 
     // with na alignments
     fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize where Self : MappedRecord;
+
+    /// number of bytes for an individual alignment record
+    fn nbytes_aln(ctx: &<Self as MappedRecord>::ParsingContext) -> usize where Self : MappedRecord;
 }
 
 impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
@@ -96,7 +99,11 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
         // for umi 
         ctx.umit.bytes_for_type() +
         // an ori_ref for each alignment
-        (na as usize * std::mem::size_of::<u32>())
+        (na as usize * Self::nbytes_aln(ctx))
+    }
+
+    fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        std::mem::size_of::<u32>()
     }
 }
 
@@ -110,7 +117,11 @@ impl KnownSize for PiscemBulkReadRecord {
         // (mapped_fragment_orientation + reference): u32, 
         // position: u32
         // frag length: u16
-        (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>()))
+        (na as usize * Self::nbytes_aln(ctx))
+    }
+
+    fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>()
     }
 }
 
@@ -127,8 +138,13 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
         // read_start : u32, 
         // read_end: u32, 
         // alignment_score: i32, 
-        (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()))
+        (na as usize * Self::nbytes_aln(ctx))
     }
+
+    fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()
+    }
+
 }
 
 impl KnownSize for AtacSeqReadRecord {
@@ -142,7 +158,11 @@ impl KnownSize for AtacSeqReadRecord {
         // read_start : u32, 
         // read_end: u32, 
         // alignment_score: i32, 
-        (na as usize * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()))
+        (na as usize * Self::nbytes_aln(ctx))
+    }
+
+    fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()
     }
 }
 
