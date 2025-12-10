@@ -132,7 +132,7 @@ impl TagSection {
     }
 
     /// return an iterator over the tag descriptions
-    pub fn iter_desc(&self) -> impl std::iter::ExactSizeIterator + use<'_> {
+    pub fn iter_desc(&self) -> impl std::iter::ExactSizeIterator<Item=&TagDesc> + use<'_> {
         self.tags.iter()
     }
 }
@@ -867,7 +867,7 @@ impl From<u8> for RadType {
 /// in a RAD tag. For the aggregate (i.e. array) types, the type
 /// of the element being stored in the array is encoded in the
 /// [TagValue] variant, but the length of the array is not.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum TagValue {
     Bool(bool),
     U8(u8),
@@ -899,7 +899,7 @@ pub enum TagValue {
     String(String),
 }
 
-impl std::cmp::Eq for TagValue {
+impl std::cmp::PartialEq for TagValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::F32(s), Self::F32(o)) => (s - o).abs() < f32::EPSILON,
@@ -908,6 +908,8 @@ impl std::cmp::Eq for TagValue {
         }
     }
 }
+
+impl std::cmp::Eq for TagValue {}
 
 tag_value_try_into_int!(u8);
 tag_value_try_into_int!(u16);
