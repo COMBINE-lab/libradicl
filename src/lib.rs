@@ -34,7 +34,7 @@ use crate as libradicl;
 use self::libradicl::rad_types::RadIntId;
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
-use self::libradicl::record::{MappedRecord, KnownSize};
+use self::libradicl::record::{MappedRecord, KnownSize, CollatableRecord, ConvertiblePrimitiveInteger, RecordHeader, CollatableRecordHeader};
 use self::libradicl::schema::{TempCellInfo,CollateKey};
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -291,16 +291,14 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
 /// memory exactly as they will reside on disk.  If `compress` is true
 /// the collated chunk will be compressed, and then the result will be
 /// written to the output guarded by `owriter`.
-pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedRecord + KnownSize>(
+pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableRecord<B>>(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
-    bct: &RadIntId,
-    umit: &RadIntId,
     nrec: u32,
     owriter: &Mutex<U>,
     compress: bool,
     cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
-) -> usize {
+) -> usize where u64: From<B> {
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
     let header_size = 2 * std::mem::size_of::<u32>() as u64;
@@ -314,17 +312,17 @@ pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedR
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = <R as CollatableRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
 
         // get the entry for this chunk, or create a new one
-        let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
+        let v = cb_byte_map.entry(tup.collate_key().into()).or_insert(TempCellInfo {
             offset: header_size,
             nbytes: header_size as u32,
             nrec: 0_u32,
         });
 
         // read the alignment records from the input file
-        let na = tup.2 as usize;
+        let na = tup.naln() as usize;
         let req_size = size_of_aln * na;
         if tbuf.len() < req_size {
             tbuf.resize(req_size, 0);
@@ -375,20 +373,15 @@ pub fn collate_temporary_bucket_twopass_new<T: Read + Seek, U: Write, R: MappedR
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = AlevinFryReadRecord::from_bytes_record_header(reader, bct, umit);
+        let tup = <R as CollatableRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
 
         // get the entry for this chunk, or create a new one
-        if let Some(v) = cb_byte_map.get_mut(&tup.0) {
+        if let Some(v) = cb_byte_map.get_mut(&tup.collate_key().into()) {
             output_buffer.set_position(v.offset);
 
-            // write the num align
-            let na = tup.2 as usize;
-            let nau32 = na as u32;
-            output_buffer.write_all(&nau32.to_le_bytes()).unwrap();
-
-            // write the corrected barcode
-            bct.write_to(tup.0, &mut output_buffer).unwrap();
-            umit.write_to(tup.1, &mut output_buffer).unwrap();
+            let na = tup.naln() as usize;
+            // write the header
+            tup.write_fields(&mut output_buffer, rec_context).expect("could write header");
 
             let bytes_for_aln_rec = R::nbytes_aln(rec_context);
             // copy over the alignment records

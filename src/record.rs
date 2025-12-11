@@ -49,17 +49,165 @@ pub type ScLongReadRecordU128 = ScLongReadRecordT<u128>;
 /// Trait for a RecordHeader, contains at least the number of alignments
 /// but might contain other information
 pub trait RecordHeader {
+    type RecordType: MappedRecord;
     fn naln(&self) -> u32;
 }
 
-/*
-pub trait SingleCellRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader {
-    fn collate_key(&self) -> B;
-    fn write_fields<W: Write>(&self, writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
-) -> B;
-}
-*/
 
+pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader {
+    fn collate_key(&self) -> B;
+    fn write_fields<W: Write>(&self, writer: &mut W, _ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()>;
+}
+
+
+// === standard alevin-fry reads
+
+pub struct AlevinFryReadRecordHeader<B: ConvertiblePrimitiveInteger> {
+    pub naln: u32,
+    pub bc: B,
+    pub umi: u64
+}
+
+impl<B: ConvertiblePrimitiveInteger> RecordHeader for AlevinFryReadRecordHeader<B> {
+    type RecordType = AlevinFryReadRecordT<B>;
+    fn naln(&self) -> u32 { self.naln }
+}
+
+impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for AlevinFryReadRecordHeader<B> {
+    fn collate_key(&self) -> B { self.bc }
+    fn write_fields<W: Write>(&self, writer: &mut W, ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.naln();
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for record")?;
+        Ok(())
+    }
+}
+
+// === long reads 
+
+pub struct ScLongReadRecordHeader<B: ConvertiblePrimitiveInteger> {
+    pub naln: u32,
+    pub bc: B,
+    pub umi: u64
+}
+
+impl<B: ConvertiblePrimitiveInteger> RecordHeader for ScLongReadRecordHeader<B> {
+    type RecordType = ScLongReadRecordT<B>;
+    fn naln(&self) -> u32 { self.naln }
+}
+
+impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for ScLongReadRecordHeader<B> {
+    fn collate_key(&self) -> B { self.bc }
+    fn write_fields<W: Write>(&self, writer: &mut W, ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.naln();
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for record")?;
+        Ok(())
+    }
+}
+
+// ==== ATAC seq read
+
+pub struct AtacSeqReadRecordHeader {
+    pub naln: u32,
+    pub bc: u64
+}
+
+impl RecordHeader for AtacSeqReadRecordHeader {
+    type RecordType = AtacSeqReadRecord;
+    fn naln(&self) -> u32 { self.naln }
+}
+
+impl CollatableRecordHeader<u64> for AtacSeqReadRecordHeader {
+    fn collate_key(&self) -> u64 { self.bc }
+    fn write_fields<W: Write>(&self, writer: &mut W, ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.naln();
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        Ok(())
+    }
+}
+
+pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
+    // to help the trait solver
+    Self::RecordHeader: RecordHeader,
+    <Self::RecordHeader as RecordHeader>::RecordType: MappedRecord<ParsingContext = Self::ParsingContext> {
+    type RecordHeader: CollatableRecordHeader<B>;
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader>;
+}
+impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for AlevinFryReadRecordT<B> {
+    type RecordHeader = AlevinFryReadRecordHeader<B>;
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
+        // NOTE: We likely will want to make the UMI generic as well
+        let umi = rad_io::read_into_u64(reader, &context.umit);
+        Ok(Self::RecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for ScLongReadRecordT<B> {
+    type RecordHeader = ScLongReadRecordHeader<B>;
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
+        // NOTE: We likely will want to make the UMI generic as well
+        let umi = rad_io::read_into_u64(reader, &context.umit);
+        Ok(Self::RecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
+}
+
+impl CollatableRecord<u64> for AtacSeqReadRecord {
+    type RecordHeader = AtacSeqReadRecordHeader;
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into_u64(reader, &context.bct);
+        Ok(Self::RecordHeader {
+            naln: na,
+            bc,
+        })
+    }
+}
 
 /// A concrete struct representing a [MappedRecord]
 /// that is as generic as possible. Here, the tags should
