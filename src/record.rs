@@ -156,59 +156,9 @@ pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
         context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
 }
 */
-impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
-    type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
-    fn from_bytes_collatable_header<T: Read>(
-        reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
-        let mut rbuf = [0u8; 4];
-        reader.read_exact(&mut rbuf).unwrap();
-        let na = u32::from_le_bytes(rbuf);
-        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
-        // NOTE: We likely will want to make the UMI generic as well
-        let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
-    }
-}
 
-impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRecordT<B> {
-    type CollatableRecordHeader = ScLongReadRecordHeader<B>;
-    fn from_bytes_collatable_header<T: Read>(
-        reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
-        let mut rbuf = [0u8; 4];
-        reader.read_exact(&mut rbuf).unwrap();
-        let na = u32::from_le_bytes(rbuf);
-        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
-        // NOTE: We likely will want to make the UMI generic as well
-        let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
-    }
-}
 
-impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
-    type CollatableRecordHeader = AtacSeqReadRecordHeader;
-    fn from_bytes_collatable_header<T: Read>(
-        reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
-        let mut rbuf = [0u8; 4];
-        reader.read_exact(&mut rbuf).unwrap();
-        let na = u32::from_le_bytes(rbuf);
-        let bc = rad_io::read_into_u64(reader, &context.bct);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-        })
-    }
-}
+
 
 // ====== bulk
 
@@ -412,12 +362,12 @@ pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord 
     // to help the trait solver
     <Self as CollatableMappedRecord<B>>::CollatableRecordHeader: RecordHeader,
     <<Self as CollatableMappedRecord<B>>::CollatableRecordHeader as RecordHeader>::RecordType: MappedRecord<ParsingContext = Self::ParsingContext> {
-{
+
     type CollatableRecordHeader: CollatableRecordHeader<B>;
     /// Given a [RecordHeader] for this record (which has already been read and parsed), read 
     /// a set of alignments for the record while retaining only those matching the prescribed 
     /// oreientation
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
 
     /// set the key by which this record should be collated
     fn set_collate_key(&mut self, k: B);
@@ -650,12 +600,28 @@ impl MappedRecord for PiscemBulkReadRecord {
 }
 
 impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
+    type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into())
     }
 
     fn set_collate_key(&mut self, k: B) { self.bc = k; }
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
+        // NOTE: We likely will want to make the UMI generic as well
+        let umi = rad_io::read_into_u64(reader, &context.umit);
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
 }
 
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
@@ -1077,12 +1043,26 @@ impl AtacSeqRecordContext {
 }
 
 impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
+    type CollatableRecordHeader = AtacSeqReadRecordHeader;
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into_u64(reader, &context.bct);
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+        })
+    }
+
     fn set_collate_key(&mut self, k: u64) {
         self.bc = k;
     }
 
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<u64>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         // NOTE: No orientation recorded for ATACSeq records, so everything is retained
         let mut rbuf = [0u8; 255];
         let na = hdr.naln;
@@ -1346,13 +1326,29 @@ impl ScLongReadRecordContext {
 }
 
 impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRecordT<B> {
+    type CollatableRecordHeader = ScLongReadRecordHeader<B>;
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
+        // NOTE: We likely will want to make the UMI generic as well
+        let umi = rad_io::read_into_u64(reader, &context.umit);
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
     fn set_collate_key(&mut self, k: B) {
         self.bc = k;
     }
 
 
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         let na = hdr.naln;
         let bc = hdr.bc;
         let umi = hdr.umi;

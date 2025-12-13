@@ -34,7 +34,7 @@ use crate as libradicl;
 use self::libradicl::rad_types::{RadIntId, MappedFragmentOrientation};
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
-use self::libradicl::record::{MappedRecord, KnownSize, CollatableRecord, CollatableMappedRecord, ConvertiblePrimitiveInteger, RecordHeader, CollatableRecordHeader};
+use self::libradicl::record::{MappedRecord, KnownSize, CollatableMappedRecord, ConvertiblePrimitiveInteger, RecordHeader, CollatableRecordHeader};
 use self::libradicl::schema::{TempCellInfo,CollateKey};
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -291,7 +291,7 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
 /// memory exactly as they will reside on disk.  If `compress` is true
 /// the collated chunk will be compressed, and then the result will be
 /// written to the output guarded by `owriter`.
-pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableRecord<B>>(
+pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
     nrec: u32,
@@ -311,7 +311,7 @@ pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: R
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = <R as CollatableRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
+        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map.entry(tup.collate_key().into()).or_insert(TempCellInfo {
@@ -372,7 +372,7 @@ pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: R
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = <R as CollatableRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
+        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
 
         // get the entry for this chunk, or create a new one
         if let Some(v) = cb_byte_map.get_mut(&tup.collate_key().into()) {
@@ -865,7 +865,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
 
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let tup = <R as CollatableRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("could read header");
+        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("could read header");
 
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.collate_key().into()) {
