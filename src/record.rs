@@ -59,7 +59,6 @@ pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader 
     fn write_fields<W: Write>(&self, writer: &mut W, _ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()>;
 }
 
-
 // === standard alevin-fry reads
 
 pub struct AlevinFryReadRecordHeader<B: ConvertiblePrimitiveInteger> {
@@ -148,25 +147,25 @@ impl CollatableRecordHeader<u64> for AtacSeqReadRecordHeader {
 
 pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
     // to help the trait solver
-    Self::RecordHeader: RecordHeader,
-    <Self::RecordHeader as RecordHeader>::RecordType: MappedRecord<ParsingContext = Self::ParsingContext> {
-    type RecordHeader: CollatableRecordHeader<B>;
+    <Self as CollatableRecord<B>>::CollatableRecordHeader: RecordHeader,
+    <<Self as CollatableRecord<B>>::CollatableRecordHeader as RecordHeader>::RecordType: MappedRecord<ParsingContext = Self::ParsingContext> {
+    type CollatableRecordHeader: CollatableRecordHeader<B>;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader>;
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
 }
 impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for AlevinFryReadRecordT<B> {
-    type RecordHeader = AlevinFryReadRecordHeader<B>;
+    type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into::<T, B>(reader, &context.bct);
         // NOTE: We likely will want to make the UMI generic as well
         let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::RecordHeader {
+        Ok(Self::CollatableRecordHeader {
             naln: na,
             bc,
             umi
@@ -175,17 +174,17 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for AlevinFryReadRecord
 }
 
 impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for ScLongReadRecordT<B> {
-    type RecordHeader = ScLongReadRecordHeader<B>;
+    type CollatableRecordHeader = ScLongReadRecordHeader<B>;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into::<T, B>(reader, &context.bct);
         // NOTE: We likely will want to make the UMI generic as well
         let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::RecordHeader {
+        Ok(Self::CollatableRecordHeader {
             naln: na,
             bc,
             umi
@@ -194,20 +193,40 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for ScLongReadRecordT<B
 }
 
 impl CollatableRecord<u64> for AtacSeqReadRecord {
-    type RecordHeader = AtacSeqReadRecordHeader;
+    type CollatableRecordHeader = AtacSeqReadRecordHeader;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::RecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into_u64(reader, &context.bct);
-        Ok(Self::RecordHeader {
+        Ok(Self::CollatableRecordHeader {
             naln: na,
             bc,
         })
     }
 }
+
+// ====== bulk
+
+struct PiscemBulkReadRecordHeader {
+    pub na: u32
+}
+impl RecordHeader for PiscemBulkReadRecordHeader {
+    type RecordType = PiscemBulkReadRecord;
+    fn naln(&self) -> u32 { self.na }
+}
+
+// ====== generic 
+struct GenericReadRecordHeader {
+    pub na: u32
+}
+impl RecordHeader for GenericReadRecordHeader {
+    type RecordType = GenericReadRecord;
+    fn naln(&self) -> u32 { self.na }
+}
+
 
 /// A concrete struct representing a [MappedRecord]
 /// that is as generic as possible. Here, the tags should
@@ -387,6 +406,14 @@ pub struct AtacSeqReadRecord {
     pub map_type: Vec<u8>,
 }
 
+pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord + CollatableRecord<B>{
+    /// Given a [RecordHeader] for this record (which has already been read and parsed), read 
+    /// a set of alignments for the record while retaining only those matching the prescribed 
+    /// oreientation
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
+}
+
+
 /// This trait represents a mapped read record that should be stored
 /// in the [crate::chunk::Chunk] of a RAD file.  The [crate::chunk::Chunk] type is parameterized on
 /// some concrete struct that must implement this [MappedRecord] trait.
@@ -414,6 +441,8 @@ pub trait MappedRecord {
     /// Write this [MappedRecord] to `writer` using the provided `ctx`; returns Ok(())
     /// on success and propagates any errors otherwise.
     fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()>;
+
+    fn is_empty(&self) -> bool;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -522,6 +551,10 @@ impl MappedRecord for PiscemBulkReadRecord {
     type ParsingContext = PiscemBulkRecordContext;
     type PeekResult = Option<u64>;
 
+    fn is_empty(&self) -> bool { 
+        self.refs.is_empty()
+    }
+    
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
         const MASK_LOWER_30_BITS: u32 = 0xC0000000;
@@ -602,10 +635,21 @@ impl MappedRecord for PiscemBulkReadRecord {
     }
 }
 
+impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
+    #[inline]
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+        AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into())
+    }
+}
+
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     type ParsingContext = AlevinFryRecordContext;
     type PeekResult = (B, u64);
-
+    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
+    /// `false` otherwise.
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -631,6 +675,7 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
         };
         (bc, umi)
     }
+
 
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
@@ -683,6 +728,10 @@ impl MappedRecord for GenericReadRecord {
     type ParsingContext = GenericReadRecordContext;
     type PeekResult = Option<u64>;
 
+    fn is_empty(&self) -> bool {
+        self.atags.is_empty()
+    }
+
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
         let mut rbuf = [0u8; 255];
@@ -716,6 +765,41 @@ impl MappedRecord for GenericReadRecord {
             atags,
         }
     }
+
+    /*
+    #[inline]
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::RecordHeader, ctx: &Self::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+        // NOTE: Don't know if there is an ori here so right now pass through everything
+        let na = hdr.na;
+        let mut rbuf = [0u8; 255];
+
+        // now any read level information
+        let rtags: Vec<TagValue> = ctx
+            .read_tags
+            .iter_desc()
+            .map(|td| td.value_from_bytes(reader))
+            .collect();
+
+        let naln_tags = &ctx.aln_tags.iter_desc().len();
+        let mut atags = Vec::<TagValue>::new();
+        for _ in 0..(na as usize) {
+            let aln_tags: Vec<TagValue> = ctx
+                .aln_tags
+                .iter_desc()
+                .map(|td| td.value_from_bytes(reader))
+                .collect();
+            atags.extend(aln_tags);
+        }
+
+        Self {
+            naln: na,
+            naln_tags: *naln_tags as u32,
+            rtags,
+            atags,
+        }
+    }
+    */
+
 
     #[inline]
     fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -840,13 +924,9 @@ impl<
 {
 }
 
-impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordT<B> {
-    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
-    /// `false` otherwise.
-    pub fn is_empty(&self) -> bool {
-        self.refs.is_empty()
-    }
 
+
+impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordT<B> {
     /// Obtains the next [AlevinFryReadRecord] in the stream from the reader `reader`.
     /// The barcode should be encoded with the [RadIntId] type `bct` and
     /// the umi should be encoded with the [RadIntId] type `umit`.
@@ -980,9 +1060,53 @@ impl AtacSeqRecordContext {
     }
 }
 
+impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
+    #[inline]
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<u64>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+        // NOTE: No orientation recorded for ATACSeq records, so everything is retained
+        let mut rbuf = [0u8; 255];
+        let na = hdr.naln;
+        let bc = hdr.bc;
+
+        let mut rec = Self {
+            bc,
+            refs: Vec::with_capacity(na as usize),
+            map_type: Vec::with_capacity(na as usize),
+            start_pos: Vec::with_capacity(na as usize),
+            frag_lengths: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let ref_id = rbuf.pread::<u32>(0).unwrap();
+            // println!("ref_id {}", ref_id);
+            rec.refs.push(ref_id);
+            reader.read_exact(&mut rbuf[0..1]).unwrap();
+            let map_type = rbuf.pread::<u8>(0).unwrap();
+            // println!("type {}", map_type);
+            rec.map_type.push(map_type);
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let start_pos = rbuf.pread::<u32>(0).unwrap();
+            rec.start_pos.push(start_pos);
+            // println!("start_pos {}", start_pos);
+            reader.read_exact(&mut rbuf[0..2]).unwrap();
+            let frag_length = rbuf.pread::<u16>(0).unwrap();
+            rec.frag_lengths.push(frag_length);
+            // println!("frag {}", frag_length);
+        }
+        rec
+    }
+}
+
 impl MappedRecord for AtacSeqReadRecord {
     type ParsingContext = AtacSeqRecordContext;
     type PeekResult = u64;
+
+    /// Returns `true` if this [AtacSeqReadRecord] contains no references and
+    /// `false` otherwise.
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
 
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -1073,12 +1197,9 @@ impl MappedRecord for AtacSeqReadRecord {
     }
 }
 
+
+
 impl AtacSeqReadRecord {
-    /// Returns `true` if this [AtacSeqReadRecord] contains no references and
-    /// `false` otherwise.
-    pub fn is_empty(&self) -> bool {
-        self.refs.is_empty()
-    }
 
     /// Obtains the next [AtacSeqReadRecord] in the stream from the reader `reader`.
     /// The barcode should be encoded with the [RadIntId] type `bct` and
@@ -1204,10 +1325,78 @@ impl ScLongReadRecordContext {
     }
 }
 
+impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRecordT<B> {
+    #[inline]
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+        let na = hdr.naln;
+        let bc = hdr.bc;
+        let umi = hdr.umi;
+        let mut rbuf = [0u8; 255];
+
+        let mut rec = Self {
+            bc,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+            as_scores: Vec::with_capacity(na as usize),
+            starts: Vec::with_capacity(na as usize),
+            ends: Vec::with_capacity(na as usize),
+            tlens: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            // 1) direction + ref_id, if you’re packing them like AF
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+            let ref_id = v & utils::MASK_TOP_BIT_U32;
+
+            // 2) AS score
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let as_score = rbuf.pread::<i32>(0).unwrap();
+
+            // 3) start
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let start = rbuf.pread::<u32>(0).unwrap();
+
+            // 4) end
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let end = rbuf.pread::<u32>(0).unwrap();
+
+            // 5) tlen
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let tlen = rbuf.pread::<u32>(0).unwrap();
+
+            // fw if the leftmost bit is 1, otherwise rc
+            let strand = if (v & utils::MASK_LOWER_31_U32) > 0 {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            }.into();
+
+            if expected_ori.same(&strand) || expected_ori.is_unknown() {
+                rec.dirs.push(dir);
+                rec.refs.push(ref_id);
+                rec.as_scores.push(as_score);
+                rec.starts.push(start);
+                rec.ends.push(end);
+                rec.tlens.push(tlen);
+            } 
+        }
+        rec
+    }
+}
+
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
     type ParsingContext = ScLongReadRecordContext;
     type PeekResult = (B, u64);
 
+    /// Returns `true` if this [ScLongReadRecord] contains no references and
+    /// `false` otherwise.
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+   
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -1325,13 +1514,10 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
     }
 }
 
-impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
-    /// Returns `true` if this [ScLongReadRecord] contains no references and
-    /// `false` otherwise.
-    pub fn is_empty(&self) -> bool {
-        self.refs.is_empty()
-    }
 
+
+
+impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
     /// Obtains the next [ScLongReadRecord] in the stream from the reader `reader`.
     /// The barcode should be encoded with the [RadIntId] type `bct` and
     /// the umi should be encoded with the [RadIntId] type `umit`.

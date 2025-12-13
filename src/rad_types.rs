@@ -17,6 +17,7 @@ use anyhow::{self, bail, Context};
 use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool, write_tag_value_array};
 use num::cast::AsPrimitive;
 use scroll::Pread;
+use bio_types::strand::Strand;
 
 use std::io::Read;
 use std::io::Write;
@@ -774,7 +775,58 @@ pub enum MappedFragmentOrientation {
     Unknown,
 }
 
+impl From<&Strand> for MappedFragmentOrientation {
+    fn from(v: &Strand) -> Self {
+        match v {
+            Strand::Forward => MappedFragmentOrientation::Forward,
+            Strand::Reverse => MappedFragmentOrientation::Reverse,
+            Strand::Unknown => MappedFragmentOrientation::Unknown
+        }
+    }
+}
+
+impl From<Strand> for MappedFragmentOrientation {
+    fn from(v: Strand) -> Self {
+        match v {
+            Strand::Forward => MappedFragmentOrientation::Forward,
+            Strand::Reverse => MappedFragmentOrientation::Reverse,
+            Strand::Unknown => MappedFragmentOrientation::Unknown
+        }
+    }
+}
+
+impl From<&MappedFragmentOrientation> for &Strand {
+    fn from(v: &MappedFragmentOrientation) -> Self {
+        match v {
+            MappedFragmentOrientation::Forward => &Strand::Forward,
+            MappedFragmentOrientation::Reverse => &Strand::Reverse,
+            MappedFragmentOrientation::Unknown => &&Strand::Unknown,
+            // TODO: Think how we should handle paired-end mapping orientations
+            _ => &Strand::Unknown
+        }
+    }
+}
+
 impl MappedFragmentOrientation {
+    #[inline] 
+    pub fn is_unknown(&self) -> bool {
+        matches!(*self, MappedFragmentOrientation::Unknown)
+    }
+
+    // generalization of same for Strand
+    #[inline]
+    pub fn same(&self, s1: &Self) -> bool {
+        match (*self, *s1) {
+            (MappedFragmentOrientation::Forward, MappedFragmentOrientation::Forward) => true,
+            (MappedFragmentOrientation::Reverse, MappedFragmentOrientation::Reverse) => true,
+            (MappedFragmentOrientation::ForwardForward, MappedFragmentOrientation::ForwardForward) => true,
+            (MappedFragmentOrientation::ReverseReverse, MappedFragmentOrientation::ReverseReverse) => true,
+            (MappedFragmentOrientation::ForwardReverse, MappedFragmentOrientation::ForwardReverse) => true,
+            (MappedFragmentOrientation::ReverseForward, MappedFragmentOrientation::ReverseForward) => true,
+            (MappedFragmentOrientation::Unknown, MappedFragmentOrientation::Unknown) => true,
+            _ => false,
+        }
+    }
     /// Given an encoding of the mapped fragment information (`n`) and
     /// the corresponding [MappingType], return the [MappedFragmentOrientation]
     #[inline]
