@@ -411,6 +411,9 @@ pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord 
     /// a set of alignments for the record while retaining only those matching the prescribed 
     /// oreientation
     fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
+
+    /// set the key by which this record should be collated
+    fn set_collate_key(&mut self, k: B);
 }
 
 
@@ -640,6 +643,8 @@ impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadR
     fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into())
     }
+
+    fn set_collate_key(&mut self, k: B) { self.bc = k; }
 }
 
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
@@ -1061,6 +1066,10 @@ impl AtacSeqRecordContext {
 }
 
 impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
+    fn set_collate_key(&mut self, k: u64) {
+        self.bc = k;
+    }
+
     #[inline]
     fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<u64>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         // NOTE: No orientation recorded for ATACSeq records, so everything is retained
@@ -1326,6 +1335,11 @@ impl ScLongReadRecordContext {
 }
 
 impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRecordT<B> {
+    fn set_collate_key(&mut self, k: B) {
+        self.bc = k;
+    }
+
+
     #[inline]
     fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &<Self as CollatableRecord<B>>::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         let na = hdr.naln;

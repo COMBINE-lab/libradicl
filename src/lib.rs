@@ -842,7 +842,7 @@ impl TempBucket {
 /// reaches `flush_limit`, flush the buffer by writing
 /// it to the `output_cache`.
 #[allow(clippy::too_many_arguments)]
-pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteger, T: Read, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
+pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteger + std::convert::From<u64>, T: Read, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
     correct_map: &HashMap<u64, u64>,
@@ -870,7 +870,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
 
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.collate_key().into()) {
-            let rr = R::from_bytes_with_header_retain_ori(
+            let mut rr = R::from_bytes_with_header_retain_ori(
                 reader,
                 &tup,
                 rec_context,
@@ -885,8 +885,10 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // write the corresponding entry to the
                 // thread-local buffer for this bucket
 
+                let na = tup.naln();
+
                 // the total number of bytes this record will take
-                let nb = R::nbytes(rr.naln(), rec_context) as u64;
+                let nb = R::nbytes(na, rec_context) as u64;
                 //let nb = (rr.refs.len() * target_id_bytes + na_bytes + bc_bytes + umi_bytes) as u64;
 
                 // the buffer index for this corrected barcode
@@ -906,12 +908,17 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                     bcursor.set_position(0);
                 }
 
+                rr.set_collate_key((*corrected_id).into());
+
                 // now, write the record to the buffer
-                let na = rr.refs.len() as u32;
-                bcursor.write_all(&na.to_le_bytes()).unwrap();
+                // TODO: do this in a generic way (e.g. set the collate record 
+                // on rr to the corrected_id, and then write the record )
+                rr.write(bcursor, rec_context).expect("can write record");
+                /*bcursor.write_all(&na.to_le_bytes()).unwrap();
                 bct.write_to(*corrected_id, bcursor).unwrap();
                 umit.write_to(rr.umi, bcursor).unwrap();
                 bcursor.write_all(as_u8_slice(&rr.refs[..])).unwrap();
+                */
 
                 // update number of written records
                 v.num_records_written.fetch_add(1, Ordering::SeqCst);
@@ -922,7 +929,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
             // in this branch, we don't have access to a correct barcode for
             // what we observed, so we need to discard the remaining part of
             // the record.
-            let req_len = target_id_bytes * (tup.2 as usize);
+            
+            // we already read the header, so just the alignments
+            let req_len = R::nbytes_aln(rec_context) * tup.naln() as usize;
             let do_resize = req_len > tbuf.len();
 
             if do_resize {
@@ -930,7 +939,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
             }
 
             reader
-                .read_exact(&mut tbuf[0..(target_id_bytes * (tup.2 as usize))])
+                .read_exact(&mut tbuf[0..req_len])
                 .unwrap();
 
             if do_resize {
