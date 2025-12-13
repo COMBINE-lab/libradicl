@@ -145,6 +145,7 @@ impl CollatableRecordHeader<u64> for AtacSeqReadRecordHeader {
     }
 }
 
+/*
 pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
     // to help the trait solver
     <Self as CollatableRecord<B>>::CollatableRecordHeader: RecordHeader,
@@ -154,7 +155,8 @@ pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
         reader: &mut T,
         context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
 }
-impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for AlevinFryReadRecordT<B> {
+*/
+impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
     type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
@@ -173,7 +175,7 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for AlevinFryReadRecord
     }
 }
 
-impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for ScLongReadRecordT<B> {
+impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRecordT<B> {
     type CollatableRecordHeader = ScLongReadRecordHeader<B>;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
@@ -192,7 +194,7 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecord<B> for ScLongReadRecordT<B
     }
 }
 
-impl CollatableRecord<u64> for AtacSeqReadRecord {
+impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
     type CollatableRecordHeader = AtacSeqReadRecordHeader;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
@@ -406,7 +408,12 @@ pub struct AtacSeqReadRecord {
     pub map_type: Vec<u8>,
 }
 
-pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord + CollatableRecord<B>{
+pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
+    // to help the trait solver
+    <Self as CollatableMappedRecord<B>>::CollatableRecordHeader: RecordHeader,
+    <<Self as CollatableMappedRecord<B>>::CollatableRecordHeader as RecordHeader>::RecordType: MappedRecord<ParsingContext = Self::ParsingContext> {
+{
+    type CollatableRecordHeader: CollatableRecordHeader<B>;
     /// Given a [RecordHeader] for this record (which has already been read and parsed), read 
     /// a set of alignments for the record while retaining only those matching the prescribed 
     /// oreientation
@@ -414,6 +421,10 @@ pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord 
 
     /// set the key by which this record should be collated
     fn set_collate_key(&mut self, k: B);
+
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
 }
 
 
