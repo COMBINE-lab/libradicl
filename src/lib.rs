@@ -301,8 +301,7 @@ pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: R
 ) -> usize where u64: From<B> {
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
-    let header_size = 2 * std::mem::size_of::<u32>() as u64;
-    let size_of_u32 = std::mem::size_of::<u32>();
+    let chunk_header_size = 2 * std::mem::size_of::<u32>() as u64;
     let size_of_aln = R::nbytes_aln(rec_context);
 
     let calc_record_bytes = |num_aln: usize| -> usize { R::nbytes(num_aln as u32, rec_context) };
@@ -316,8 +315,8 @@ pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: R
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map.entry(tup.collate_key().into()).or_insert(TempCellInfo {
-            offset: header_size,
-            nbytes: header_size as u32,
+            offset: chunk_header_size,
+            nbytes: chunk_header_size as u32,
             nrec: 0_u32,
         });
 
@@ -337,7 +336,7 @@ pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: R
     }
 
     // each cell will have a header (8 bytes each)
-    total_bytes += cb_byte_map.len() * header_size as usize;
+    total_bytes += cb_byte_map.len() * chunk_header_size as usize;
     let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
 
     // loop over all distinct cell barcodes, write their
@@ -438,7 +437,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
 ) -> usize {
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
-    let header_size = 2 * std::mem::size_of::<u32>() as u64;
+    let chunk_header_size = 2 * std::mem::size_of::<u32>() as u64;
     let size_of_u32 = std::mem::size_of::<u32>();
     let size_of_bc = bct.bytes_for_type();
     let size_of_umi = umit.bytes_for_type();
@@ -456,8 +455,8 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
-            offset: header_size,
-            nbytes: header_size as u32,
+            offset: chunk_header_size,
+            nbytes: chunk_header_size as u32,
             nrec: 0_u32,
         });
 
@@ -477,7 +476,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     }
 
     // each cell will have a header (8 bytes each)
-    total_bytes += cb_byte_map.len() * header_size as usize;
+    total_bytes += cb_byte_map.len() * chunk_header_size as usize;
     let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
 
     // loop over all distinct cell barcodes, write their
