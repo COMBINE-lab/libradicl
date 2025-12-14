@@ -849,12 +849,12 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
     output_cache: &HashMap<u64, Arc<TempBucket>>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
-) where u64: From<B> {
+) where u64: From<B>, <R as MappedRecord>::ParsingContext: std::fmt::Debug {
     let mut buf = [0u8; 8];
     let mut tbuf = vec![0u8; 4096];
     //let mut tcursor = Cursor::new(tbuf);
     //tcursor.set_position(0);
-
+    
     // get the number of bytes and records for
     // the next chunk
     reader.read_exact(&mut buf).unwrap();
@@ -884,10 +884,10 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // write the corresponding entry to the
                 // thread-local buffer for this bucket
 
-                let na = tup.naln();
-
+                let na = rr.num_aln(); 
                 // the total number of bytes this record will take
-                let nb = R::nbytes(na, rec_context) as u64;
+                let nb = R::nbytes(na as u32, rec_context) as u64;
+                assert_eq!(nb, (na * std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>()) as u64);
                 //let nb = (rr.refs.len() * target_id_bytes + na_bytes + bc_bytes + umi_bytes) as u64;
 
                 // the buffer index for this corrected barcode
@@ -907,12 +907,14 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                     bcursor.set_position(0);
                 }
 
+                // set to the corrected collate key
                 rr.set_collate_key((*corrected_id).into());
 
+                let olen = bcursor.position() as usize;
                 // now, write the record to the buffer
-                // TODO: do this in a generic way (e.g. set the collate record 
-                // on rr to the corrected_id, and then write the record )
                 rr.write(bcursor, rec_context).expect("can write record");
+                let nlen = bcursor.position() as usize;
+                assert_eq!(nlen - olen, R::nbytes(na as u32, rec_context), "number of alignments is {}", na);
                 /*bcursor.write_all(&na.to_le_bytes()).unwrap();
                 bct.write_to(*corrected_id, bcursor).unwrap();
                 umit.write_to(rr.umi, bcursor).unwrap();
@@ -931,6 +933,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
             
             // we already read the header, so just the alignments
             let req_len = R::nbytes_aln(rec_context) * tup.naln() as usize;
+            assert_eq!(tup.naln() as usize * std::mem::size_of::<u32>(), req_len);
             let do_resize = req_len > tbuf.len();
 
             if do_resize {

@@ -407,6 +407,8 @@ pub trait MappedRecord {
     fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()>;
 
     fn is_empty(&self) -> bool;
+
+    fn num_aln(&self) -> usize;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -517,6 +519,10 @@ impl MappedRecord for PiscemBulkReadRecord {
 
     fn is_empty(&self) -> bool { 
         self.refs.is_empty()
+    }
+
+    fn num_aln(&self) -> usize {
+        self.refs.len()
     }
     
     #[inline]
@@ -632,6 +638,12 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     fn is_empty(&self) -> bool {
         self.refs.is_empty()
     }
+    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
+    /// `false` otherwise.
+    fn num_aln(&self) -> usize {
+        self.refs.len()
+    }
+
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -695,7 +707,9 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
             .write_to(self.umi, writer)
             .context("couldn't write umi field for record")?;
 
-        for (dir, ref_idx) in itertools::izip!(&self.dirs, &self.refs) {
+        // if we don't have orientations (because of filtering) then just pretend they are false
+        let dir_iter = self.dirs.iter();
+        for (dir, ref_idx) in itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs) {
             let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
             let encoded_dir_ref: u32 = ref_idx | encoded_dir;
             writer
@@ -712,6 +726,10 @@ impl MappedRecord for GenericReadRecord {
 
     fn is_empty(&self) -> bool {
         self.atags.is_empty()
+    }
+
+    fn num_aln(&self) -> usize {
+        self.naln as usize
     }
 
     #[inline]
@@ -1108,6 +1126,8 @@ impl MappedRecord for AtacSeqReadRecord {
         self.refs.is_empty()
     }
 
+    fn num_aln(&self) -> usize { self.refs.len() }
+
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -1418,6 +1438,10 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
         self.refs.is_empty()
     }
    
+    fn num_aln(&self) -> usize {
+        self.refs.len()
+    }
+
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
