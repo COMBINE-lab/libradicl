@@ -28,6 +28,50 @@ use scroll::Pread;
 use std::io::{Read, Write};
 use std::mem;
 
+
+// Modified from https://stackoverflow.com/questions/69764050/how-to-get-the-indices-that-would-sort-a-vec
+// kmdreko
+fn argsort<T: Ord>(data: &[T]) -> Vec<usize> {
+    let mut indices = (0..data.len()).collect::<Vec<_>>();
+    indices.sort_unstable_by_key(|&i| &data[i]);
+    indices
+}
+
+/// initially suggested by Claude
+#[allow(unused)]
+fn argsort_by<T, F>(data: &[T], mut compare: F) -> Vec<usize>
+where
+    F: FnMut(&T, &T) -> std::cmp::Ordering,
+{
+    let mut indices: Vec<usize> = (0..data.len()).collect();
+    indices.sort_unstable_by(|&i, &j| compare(&data[i], &data[j]));
+    indices
+}
+
+/// Reorder a vector in-place using the given permutation indices.
+/// This is more memory-efficient but modifies the original vector.
+/// Time: O(n), Space: O(n) for tracking visited indices.
+fn reorder_in_place<T>(data: &mut [T], indices: &[usize]) {
+    let mut visited = vec![false; data.len()];
+    
+    for start in 0..data.len() {
+        if visited[start] {
+            continue;
+        }
+        
+        let mut current = start;
+        let mut next = indices[current];
+        
+        while next != start {
+            visited[current] = true;
+            data.swap(current, next);
+            current = next;
+            next = indices[next];
+        }
+        visited[current] = true;
+    }
+}
+
 /// The default [AlevinFryReadRecordT] holds the barcode in a [u64]
 pub type AlevinFryReadRecord = AlevinFryReadRecordT<u64>;
 
@@ -162,6 +206,7 @@ pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
 
 // ====== bulk
 
+#[allow(unused)]
 struct PiscemBulkReadRecordHeader {
     pub na: u32
 }
@@ -171,6 +216,7 @@ impl RecordHeader for PiscemBulkReadRecordHeader {
 }
 
 // ====== generic 
+#[allow(unused)]
 struct GenericReadRecordHeader {
     pub na: u32
 }
@@ -367,10 +413,13 @@ pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord 
     /// Given a [RecordHeader] for this record (which has already been read and parsed), read 
     /// a set of alignments for the record while retaining only those matching the prescribed 
     /// oreientation
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
 
     /// set the key by which this record should be collated
     fn set_collate_key(&mut self, k: B);
+    
+    /// get the key by which this record should be collated (e.g. call barcode)
+    fn collate_key(&self) -> B;
 
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
@@ -427,13 +476,7 @@ pub trait RecordContext {
         Self: Sized;
 }
 
-// Modified from https://stackoverflow.com/questions/69764050/how-to-get-the-indices-that-would-sort-a-vec
-// kmdreko
-pub fn argsort<T: Ord>(data: &[T]) -> Vec<usize> {
-    let mut indices = (0..data.len()).collect::<Vec<_>>();
-    indices.sort_unstable_by_key(|&i| &data[i]);
-    indices
-}
+
 
 impl RecordContext for GenericReadRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
@@ -608,11 +651,15 @@ impl MappedRecord for PiscemBulkReadRecord {
 impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
     type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
-        AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into())
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+        let rec = AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into());
+        hdr.naln = rec.refs.len() as u32;
+        rec
     }
 
     fn set_collate_key(&mut self, k: B) { self.bc = k; }
+    fn collate_key(&self) -> B { self.bc }
+
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
         context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
@@ -1078,9 +1125,10 @@ impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
     fn set_collate_key(&mut self, k: u64) {
         self.bc = k;
     }
+    fn collate_key(&self) -> u64 { self.bc }
 
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, _expected_ori: &MappedFragmentOrientation) -> Self {
         // NOTE: No orientation recorded for ATACSeq records, so everything is retained
         let mut rbuf = [0u8; 255];
         let na = hdr.naln;
@@ -1112,6 +1160,7 @@ impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
             rec.frag_lengths.push(frag_length);
             // println!("frag {}", frag_length);
         }
+        hdr.naln = rec.refs.len() as u32;
         rec
     }
 }
@@ -1296,16 +1345,10 @@ impl AtacSeqReadRecord {
         // make sure these are sorted in this step.
         // reimplement in a better way
         let indices = argsort(&rec.refs);
-        let refs = rec.refs.clone();
-        let map_type = rec.map_type.clone();
-        let start_pos = rec.start_pos.clone();
-        let f_len = rec.frag_lengths.clone();
-        for i in 0..indices.len() {
-            rec.refs[i] = refs[indices[i]];
-            rec.map_type[i] = map_type[indices[i]];
-            rec.start_pos[i] = start_pos[indices[i]];
-            rec.frag_lengths[i] = f_len[indices[i]];
-        }
+        reorder_in_place(&mut rec.refs, &indices);
+        reorder_in_place(&mut rec.map_type, &indices);
+        reorder_in_place(&mut rec.start_pos, &indices);
+        reorder_in_place(&mut rec.frag_lengths, &indices);
         rec
     }
 }
@@ -1365,10 +1408,11 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
     fn set_collate_key(&mut self, k: B) {
         self.bc = k;
     }
+    fn collate_key(&self) -> B { self.bc }
 
 
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
         let na = hdr.naln;
         let bc = hdr.bc;
         let umi = hdr.umi;
@@ -1424,6 +1468,15 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
                 rec.tlens.push(tlen);
             } 
         }
+        hdr.naln = rec.refs.len() as u32;
+        // sort all fields by ref 
+        let indices = argsort(&rec.refs);
+        reorder_in_place(&mut rec.dirs, &indices);
+        reorder_in_place(&mut rec.refs, &indices);
+        reorder_in_place(&mut rec.as_scores, &indices);
+        reorder_in_place(&mut rec.starts, &indices);
+        reorder_in_place(&mut rec.ends, &indices);
+        reorder_in_place(&mut rec.tlens, &indices);
         rec
     }
 }

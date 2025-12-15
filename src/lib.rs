@@ -291,7 +291,7 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
 /// memory exactly as they will reside on disk.  If `compress` is true
 /// the collated chunk will be compressed, and then the result will be
 /// written to the output guarded by `owriter`.
-pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
+pub fn collate_temporary_bucket_twopass_generic<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
     nrec: u32,
@@ -426,6 +426,12 @@ pub fn collate_temporary_bucket_twopass_new<B: ConvertiblePrimitiveInteger, T: R
 /// memory exactly as they will reside on disk.  If `compress` is true
 /// the collated chunk will be compressed, and then the result will be
 /// written to the output guarded by `owriter`.
+#[deprecated(
+    since = "0.10.0",
+    note = "This function is highly-specalized and works only with the AlevinFryReadRecordT<u64> type. \
+            This function has been deprecated in favor of the more generic `collate_temporary_bucket_twopass_generic`. \
+            Please use that function instead."
+)]
 pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     reader: &mut BufReader<T>,
     bct: &RadIntId,
@@ -865,13 +871,13 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
 
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("could read header");
+        let mut tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("could read header");
 
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.collate_key().into()) {
             let mut rr = R::from_bytes_with_header_retain_ori(
                 reader,
-                &tup,
+                &mut tup,
                 rec_context,
                 &expected_ori,
             );
@@ -884,11 +890,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // write the corresponding entry to the
                 // thread-local buffer for this bucket
 
-                let na = rr.num_aln(); 
+                let na = tup.naln() as usize; 
                 // the total number of bytes this record will take
                 let nb = R::nbytes(na as u32, rec_context) as u64;
-                assert_eq!(nb, (na * std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>()) as u64);
-                //let nb = (rr.refs.len() * target_id_bytes + na_bytes + bc_bytes + umi_bytes) as u64;
 
                 // the buffer index for this corrected barcode
                 let buffidx = v.bucket_id as usize;
@@ -910,16 +914,8 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // set to the corrected collate key
                 rr.set_collate_key((*corrected_id).into());
 
-                let olen = bcursor.position() as usize;
                 // now, write the record to the buffer
                 rr.write(bcursor, rec_context).expect("can write record");
-                let nlen = bcursor.position() as usize;
-                assert_eq!(nlen - olen, R::nbytes(na as u32, rec_context), "number of alignments is {}", na);
-                /*bcursor.write_all(&na.to_le_bytes()).unwrap();
-                bct.write_to(*corrected_id, bcursor).unwrap();
-                umit.write_to(rr.umi, bcursor).unwrap();
-                bcursor.write_all(as_u8_slice(&rr.refs[..])).unwrap();
-                */
 
                 // update number of written records
                 v.num_records_written.fetch_add(1, Ordering::SeqCst);
@@ -933,7 +929,6 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
             
             // we already read the header, so just the alignments
             let req_len = R::nbytes_aln(rec_context) * tup.naln() as usize;
-            assert_eq!(tup.naln() as usize * std::mem::size_of::<u32>(), req_len);
             let do_resize = req_len > tbuf.len();
 
             if do_resize {
@@ -958,6 +953,12 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
 /// buffers `local_buffers`.  As soon as any buffer
 /// reaches `flush_limit`, flush the buffer by writing
 /// it to the `output_cache`.
+#[deprecated(
+    since = "0.10.0",
+    note = "This function is highly-specalized and works only with the AlevinFryReadRecordT<u64> type. \
+            This function has been deprecated in favor of the more generic `dump_corrected_cb_chunk_to_temp_file_generic`. \
+            Please use that function instead."
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
     reader: &mut BufReader<T>,
