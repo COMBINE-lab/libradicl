@@ -1407,7 +1407,7 @@ fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::
 }
 
 #[inline(always)]
-fn get_tag_by_name<'a>(key: &str, dat: &'a [TagValue], keys: &[TagDesc]) -> Option<&'a TagValue> {
+pub fn get_tag_by_name<'a>(key: &str, dat: &'a [TagValue], keys: &[TagDesc]) -> Option<&'a TagValue> {
     for (k, val) in keys.iter().zip(dat.iter()) {
         if k.name == key {
             return Some(val);
