@@ -23,7 +23,7 @@ use crate::{
     utils,
 };
 use anyhow::{self, bail, Context};
-use bio_types::strand::*;
+use bio_types::strand::{Strand, Same};
 use scroll::Pread;
 use std::io::{Read, Write};
 use std::mem;
@@ -455,9 +455,19 @@ pub trait MappedRecord {
     /// on success and propagates any errors otherwise.
     fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()>;
 
+    /// true if there are no alignments for this mapped record, false otherwise
     fn is_empty(&self) -> bool;
 
+    /// The number of alignments for this mapped record
     fn num_aln(&self) -> usize;
+
+    /// Returns true if this record has any alignment records occuring on the provided
+    /// strand.
+    /// NOTE: 
+    ///   - all alignments are compatible with an unknown strand
+    ///   - for paired-end mappings, this function looks for cases where read 1 matches the 
+    ///     provided strand
+    fn has_alignment_on_strand(&self, s: Strand) -> bool;
 }
 
 /// This trait allows obtaining and passing along necessary information that
@@ -566,6 +576,22 @@ impl MappedRecord for PiscemBulkReadRecord {
 
     fn num_aln(&self) -> usize {
         self.refs.len()
+    }
+ 
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+       match s {
+            Strand::Unknown => !self.refs.is_empty(),
+            Strand::Forward => {
+                self.dirs.iter().any(|&x| 
+                    matches!(x, MappedFragmentOrientation::Forward | MappedFragmentOrientation::ForwardReverse | MappedFragmentOrientation::ForwardForward | MappedFragmentOrientation::Unknown )
+                )
+            },
+            Strand::Reverse => {
+                self.dirs.iter().any(|&x| 
+                    matches!(x, MappedFragmentOrientation::Reverse | MappedFragmentOrientation::ReverseForward | MappedFragmentOrientation::ReverseReverse | MappedFragmentOrientation::Unknown )
+                )
+            }
+        } 
     }
     
     #[inline]
@@ -691,6 +717,19 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
         self.refs.len()
     }
 
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+       match s {
+            Strand::Unknown => !self.refs.is_empty(),
+            Strand::Forward => {
+                self.dirs.iter().any(|&x| x)
+            },
+            Strand::Reverse => {
+                self.dirs.iter().any(|&x| !x)
+            }
+        } 
+    }
+
+
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -778,6 +817,11 @@ impl MappedRecord for GenericReadRecord {
     fn num_aln(&self) -> usize {
         self.naln as usize
     }
+
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+        unimplemented!("no implementation of has_alignment_on_strand for GenericReadRecord")
+    }
+ 
 
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
@@ -1177,6 +1221,13 @@ impl MappedRecord for AtacSeqReadRecord {
 
     fn num_aln(&self) -> usize { self.refs.len() }
 
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+        // we don't record the orientation, so right now 
+        // treat everything as compatible
+        !self.refs.is_empty()
+    }
+ 
+
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
         let na_size = mem::size_of::<u32>();
@@ -1493,6 +1544,18 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
    
     fn num_aln(&self) -> usize {
         self.refs.len()
+    }
+
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+       match s {
+            Strand::Unknown => !self.refs.is_empty(),
+            Strand::Forward => {
+                self.dirs.iter().any(|&x| x)
+            },
+            Strand::Reverse => {
+                self.dirs.iter().any(|&x| !x)
+            }
+        } 
     }
 
     #[inline]
