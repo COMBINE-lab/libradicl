@@ -323,7 +323,8 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
         // read_start : u32, 
         // read_end: u32, 
         // alignment_score: i32, 
-        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>()
+        // tlen: u32
+        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>() + std::mem::size_of::<u32>() 
     }
 
 }

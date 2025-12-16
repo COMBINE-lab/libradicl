@@ -914,8 +914,13 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // set to the corrected collate key
                 rr.set_collate_key((*corrected_id).into());
 
+                let blen = bcursor.position() as usize;
                 // now, write the record to the buffer
                 rr.write(bcursor, rec_context).expect("can write record");
+                let alen = bcursor.position() as usize;
+                let actual = alen - blen; 
+                let expected = R::nbytes(na as u32, rec_context) as usize;
+                assert_eq!(expected, actual, "Expected to write {} bytes, but wrote {}.", expected, actual);
 
                 // update number of written records
                 v.num_records_written.fetch_add(1, Ordering::SeqCst);
