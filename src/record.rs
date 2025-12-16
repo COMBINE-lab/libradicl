@@ -320,11 +320,15 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
         // (ori_refernce): u32, 
+        std::mem::size_of::<u32>() 
         // read_start : u32, 
+        + std::mem::size_of::<u32>() 
         // read_end: u32, 
+        + std::mem::size_of::<u32>() 
         // alignment_score: i32, 
-        // tlen: u32
-        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<i32>() + std::mem::size_of::<u32>() 
+        + std::mem::size_of::<i32>() 
+        // tlen: u32 (NOTE: this should be moved to a file-level tag)
+        + std::mem::size_of::<u32>() 
     }
 
 }
