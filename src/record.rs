@@ -352,7 +352,18 @@ impl KnownSize for AtacSeqReadRecord {
     }
 }
 
+//### For UMI tagged molecules
+pub trait UmiTaggedRecord {
+    fn umi(&self) -> u64;
+}
 
+impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordT<B> {
+    fn umi(&self) -> u64 { self.umi }
+}
+
+impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for ScLongReadRecordT<B> {
+    fn umi(&self) -> u64 { self.umi }
+}
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
@@ -429,6 +440,11 @@ pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord 
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
         context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
+
+    fn peek_collatable_header(
+        reader: &[u8],
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
+
 }
 
 
@@ -465,6 +481,10 @@ pub trait MappedRecord {
 
     /// The number of alignments for this mapped record
     fn num_aln(&self) -> usize;
+
+    /// return a reference to the targets to which this 
+    /// record aligns.
+    fn refs(&self) -> &[u32];
 
     /// Returns true if this record has any alignment records occuring on the provided
     /// strand.
@@ -581,6 +601,10 @@ impl MappedRecord for PiscemBulkReadRecord {
 
     fn num_aln(&self) -> usize {
         self.refs.len()
+    }
+    
+    fn refs(&self) -> &[u32] {
+        &self.refs
     }
  
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
@@ -706,6 +730,37 @@ impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadR
             umi
         })
     }
+
+    fn peek_collatable_header(
+        buf: &[u8],
+        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let na_size = mem::size_of::<u32>();
+        let bc_size = ctx.bct.bytes_for_type();
+
+        let na = buf.pread::<u32>(0).unwrap();
+
+        let bc: B = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
+        };
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported"),
+        };
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
 }
 
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
@@ -720,6 +775,10 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     /// `false` otherwise.
     fn num_aln(&self) -> usize {
         self.refs.len()
+    }
+
+    fn refs(&self) -> &[u32] {
+        &self.refs
     }
 
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
@@ -827,6 +886,9 @@ impl MappedRecord for GenericReadRecord {
         unimplemented!("no implementation of has_alignment_on_strand for GenericReadRecord")
     }
  
+    fn refs(&self) -> &[u32] {
+        unimplemented!("no implementation of refs() for GenericReadRecord yet")
+    }
 
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
@@ -1171,6 +1233,27 @@ impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
         })
     }
 
+    fn peek_collatable_header(
+        buf: &[u8],
+        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let na_size = mem::size_of::<u32>();
+
+        let na = buf.pread::<u32>(0).unwrap();
+
+        let bc: u64 = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
+        };
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+        })
+    }
+
     fn set_collate_key(&mut self, k: u64) {
         self.bc = k;
     }
@@ -1232,6 +1315,9 @@ impl MappedRecord for AtacSeqReadRecord {
         !self.refs.is_empty()
     }
  
+    fn refs(&self) -> &[u32] {
+        &self.refs
+    }
 
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -1461,6 +1547,38 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
             umi
         })
     }
+
+    fn peek_collatable_header(
+        buf: &[u8],
+        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let na_size = mem::size_of::<u32>();
+        let bc_size = ctx.bct.bytes_for_type();
+
+        let na = buf.pread::<u32>(0).unwrap();
+
+        let bc: B = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
+        };
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported"),
+        };
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
+
     fn set_collate_key(&mut self, k: B) {
         self.bc = k;
     }
@@ -1549,6 +1667,10 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
    
     fn num_aln(&self) -> usize {
         self.refs.len()
+    }
+
+    fn refs(&self) -> &[u32] {
+        &self.refs
     }
 
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
