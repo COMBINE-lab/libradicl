@@ -90,13 +90,16 @@ pub type ScLongReadRecordU64 = ScLongReadRecordT<u64>;
 /// An [ScLongReadRecordT] that holds the barcode in a [u128] and is explicit about this
 pub type ScLongReadRecordU128 = ScLongReadRecordT<u128>;
 
+pub type AlevinFryReadRecordWithPosition = AlevinFryReadRecordWithPositionT<u64>;
+pub type AlevinFryReadRecordWithPositionU64 = AlevinFryReadRecordWithPositionT<u64>;
+pub type AlevinFryReadRecordWithPositionU128 = AlevinFryReadRecordWithPositionT<u128>;
+
 /// Trait for a RecordHeader, contains at least the number of alignments
 /// but might contain other information
 pub trait RecordHeader {
     type RecordType: MappedRecord;
     fn naln(&self) -> u32;
 }
-
 
 pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader {
     fn collate_key(&self) -> B;
@@ -105,6 +108,8 @@ pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader 
 
 // === standard alevin-fry reads
 
+// note this header can be re-used for the record with position information
+// since the read-level tags (i.e. header) doesn't contain any extra information
 pub struct AlevinFryReadRecordHeader<B: ConvertiblePrimitiveInteger> {
     pub naln: u32,
     pub bc: B,
@@ -261,6 +266,9 @@ pub struct GenericReadRecordContext {
     pub aln_tags: TagSection,
 }
 
+
+/// ### Known size trait 
+
 pub trait KnownSize {
     // returns the number of bytes taken for a record of the given type 
     // with na alignments
@@ -285,6 +293,27 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
         // ori_ref 
         std::mem::size_of::<u32>()
+    }
+}
+
+
+impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordWithPositionT<B> {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // for na field
+        std::mem::size_of::<u32>() +
+        // for bc
+        ctx.bct.bytes_for_type() +
+        // for umi 
+        ctx.umit.bytes_for_type() +
+        // an ori_ref for each alignment
+        (na as usize * Self::nbytes_aln(ctx))
+    }
+
+    fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // ori_ref 
+        std::mem::size_of::<u32>()
+        // position
+        + std::mem::size_of::<u32>()
     }
 }
 
@@ -361,6 +390,10 @@ impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordT<B>
     fn umi(&self) -> u64 { self.umi }
 }
 
+impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordWithPositionT<B> {
+    fn umi(&self) -> u64 { self.umi }
+}
+
 impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for ScLongReadRecordT<B> {
     fn umi(&self) -> u64 { self.umi }
 }
@@ -375,6 +408,19 @@ pub struct AlevinFryReadRecordT<B: ConvertiblePrimitiveInteger> {
     pub umi: u64,
     pub dirs: Vec<bool>,
     pub refs: Vec<u32>,
+}
+
+/// A concrete struct representing a [MappedRecord]
+/// for reads processed upstream with `piscem` (or `salmon alevin`).
+/// This represents the set of alignments and relevant information
+/// for an alevin-fry record that also records read position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlevinFryReadRecordWithPositionT<B: ConvertiblePrimitiveInteger> {
+    pub bc: B,
+    pub umi: u64,
+    pub dirs: Vec<bool>,
+    pub refs: Vec<u32>,
+    pub pos: Vec<u32>,
 }
 
 /// A concrete struct representing a [MappedRecord] for
@@ -511,8 +557,6 @@ pub trait RecordContext {
         Self: Sized;
 }
 
-
-
 impl RecordContext for GenericReadRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
     /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
@@ -531,6 +575,8 @@ impl RecordContext for GenericReadRecordContext {
 
 /// context needed to read an alevin-fry record
 /// (the types of the barcode and umi)
+/// NOTE: This context is shared between the basic and positionally aware 
+/// AlevinFryReadRecord types
 #[derive(Debug, Clone)]
 pub struct AlevinFryRecordContext {
     pub bct: RadIntId,
@@ -763,6 +809,67 @@ impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadR
     }
 }
 
+impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordWithPositionT<B> {
+    type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
+    #[inline]
+    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+        let rec = AlevinFryReadRecordWithPositionT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into());
+        hdr.naln = rec.refs.len() as u32;
+        rec
+    }
+
+    fn set_collate_key(&mut self, k: B) { self.bc = k; }
+    fn collate_key(&self) -> B { self.bc }
+
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, &context.bct);
+        // NOTE: We likely will want to make the UMI generic as well
+        let umi = rad_io::read_into_u64(reader, &context.umit);
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
+
+    fn peek_collatable_header(
+        buf: &[u8],
+        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let na_size = mem::size_of::<u32>();
+        let bc_size = ctx.bct.bytes_for_type();
+
+        let na = buf.pread::<u32>(0).unwrap();
+
+        let bc: B = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
+        };
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported"),
+        };
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            bc,
+            umi
+        })
+    }
+}
+
+
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     type ParsingContext = AlevinFryRecordContext;
     type PeekResult = (B, u64);
@@ -865,6 +972,119 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
             writer
                 .write_all(&encoded_dir_ref.to_le_bytes())
                 .context("couldn't write compressed_ori_refid for record")?;
+        }
+        Ok(())
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordWithPositionT<B> {
+    type ParsingContext = AlevinFryRecordContext;
+    type PeekResult = (B, u64);
+    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
+    /// `false` otherwise.
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+    /// Returns `true` if this [AlevinFryReadRecord] contains no references and
+    /// `false` otherwise.
+    fn num_aln(&self) -> usize {
+        self.refs.len()
+    }
+
+    fn refs(&self) -> &[u32] {
+        &self.refs
+    }
+
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+       match s {
+            Strand::Unknown => !self.refs.is_empty(),
+            Strand::Forward => {
+                self.dirs.iter().any(|&x| x)
+            },
+            Strand::Reverse => {
+                self.dirs.iter().any(|&x| !x)
+            }
+        } 
+    }
+
+
+    #[inline]
+    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
+        let na_size = mem::size_of::<u32>();
+        let bc_size = ctx.bct.bytes_for_type();
+
+        let _na = buf.pread::<u32>(0).unwrap();
+
+        let bc: B = match ctx.bct {
+            RadIntId::U8 => NewU8(buf.pread::<u8>(na_size).unwrap()).into(),
+            RadIntId::U16 => NewU16(buf.pread::<u16>(na_size).unwrap()).into(),
+            RadIntId::U32 => NewU32(buf.pread::<u32>(na_size).unwrap()).into(),
+            RadIntId::U64 => NewU64(buf.pread::<u64>(na_size).unwrap()).into(),
+            RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
+            _ => panic!("signed barcode integer encodings are not supported"),
+        };
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(na_size + bc_size).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(na_size + bc_size).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported"),
+        };
+        (bc, umi)
+    }
+
+
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        let (bc, umi, na) = Self::from_bytes_record_header(reader, &ctx.bct, &ctx.umit);
+
+        let mut rec = Self {
+            bc,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+            pos: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..8]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+            rec.dirs.push(dir);
+            rec.refs.push(v & utils::MASK_TOP_BIT_U32);
+            let pos = rbuf.pread::<u32>(std::mem::size_of::<u32>()).unwrap();
+            rec.pos.push(pos);
+        }
+        rec
+    }
+
+    #[inline]
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len() as u32;
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for record")?;
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for record")?;
+
+        // if we don't have orientations (because of filtering) then just pretend they are false
+        let dir_iter = self.dirs.iter();
+        for (dir, ref_idx, pos) in itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs, &self.pos) {
+            let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
+            let encoded_dir_ref: u32 = ref_idx | encoded_dir;
+            writer
+                .write_all(&encoded_dir_ref.to_le_bytes())
+                .context("couldn't write compressed_ori_refid for record")?;
+            writer
+                .write_all(&pos.to_le_bytes())
+                .context("couldn't write position for record")?;
         }
         Ok(())
     }
@@ -1184,6 +1404,116 @@ impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordT<B> {
         Self::from_bytes_with_header_keep_ori(reader, bc, umi, na, expected_ori)
     }
 }
+
+impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordWithPositionT<B> {
+    /// Obtains the next [AlevinFryReadRecord] in the stream from the reader `reader`.
+    /// The barcode should be encoded with the [RadIntId] type `bct` and
+    /// the umi should be encoded with the [RadIntId] type `umit`.
+    pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId, umit: &RadIntId) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        let (bc, umi, na) = Self::from_bytes_record_header(reader, bct, umit);
+
+        let mut rec = Self {
+            bc,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+            pos: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..8]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+            rec.dirs.push(dir);
+            rec.refs.push(v & utils::MASK_TOP_BIT_U32);
+            let pos = rbuf.pread::<u32>(std::mem::size_of::<u32>()).unwrap();
+            rec.pos.push(pos);
+        }
+        rec
+    }
+
+    /// Reads the record header, consisting of the number of the barcode,
+    /// umi, and number of alignments for this record, from the provided `reader`,
+    /// using the provided [RadIntId] description for the barcode and umi types.
+    #[inline]
+    pub fn from_bytes_record_header<T: Read>(
+        reader: &mut T,
+        bct: &RadIntId,
+        umit: &RadIntId,
+    ) -> (B, u64, u32) {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+        let bc = rad_io::read_into::<T, B>(reader, bct);
+        // NOTE: We likely will want to make the UMI generic as well
+        let umi = rad_io::read_into_u64(reader, umit);
+        (bc, umi, na)
+    }
+
+    /// Read the next [AlevinFryReadRecord] from `reader`, but retain only those
+    /// alignment records that match the prescribed orientation provided in
+    /// `expected_ori` (which is a [Strand]). This function assumes the
+    /// read header has already been parsed, and just reads the raw
+    /// record contents consisting of the references and directions.
+    #[inline]
+    pub fn from_bytes_with_header_keep_ori<T: Read>(
+        reader: &mut T,
+        bc: B,
+        umi: u64,
+        na: u32,
+        expected_ori: &Strand,
+    ) -> Self {
+        let mut rbuf = [0u8; 255];
+        let mut rec = Self {
+            bc,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+            pos: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..8]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+
+            // fw if the leftmost bit is 1, otherwise rc
+            let strand = if (v & utils::MASK_LOWER_31_U32) > 0 {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            };
+
+            if expected_ori.same(&strand) || expected_ori.is_unknown() {
+                let pos = rbuf.pread::<u32>(std::mem::size_of::<u32>()).unwrap();
+                rec.refs.push(v & utils::MASK_TOP_BIT_U32);
+                rec.pos.push(pos);
+            }
+        }
+
+        // make sure these are sorted in this step.
+        let indices = argsort(&rec.refs);
+        reorder_in_place(&mut rec.refs, &indices);
+        reorder_in_place(&mut rec.pos, &indices);
+        rec
+    }
+
+    /// Read the next [AlevinFryReadRecord], including the header, from `reader`, but
+    /// retain only those alignment records that match the prescribed
+    /// orientation provided in `expected_ori` (which is a [Strand]).
+    #[inline]
+    pub fn from_bytes_keep_ori<T: Read>(
+        reader: &mut T,
+        bct: &RadIntId,
+        umit: &RadIntId,
+        expected_ori: &Strand,
+    ) -> Self {
+        let (bc, umi, na) = Self::from_bytes_record_header(reader, bct, umit);
+        Self::from_bytes_with_header_keep_ori(reader, bc, umi, na, expected_ori)
+    }
+}
+
 
 #[derive(Debug, Clone)]
 pub struct AtacSeqRecordContext {
