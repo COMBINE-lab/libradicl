@@ -31,9 +31,10 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::RadIntId;
+use self::libradicl::rad_types::{RadIntId, MappedFragmentOrientation};
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
+use self::libradicl::record::{MappedRecord, KnownSize, CollatableMappedRecord, ConvertiblePrimitiveInteger, RecordHeader, CollatableRecordHeader};
 use self::libradicl::schema::{TempCellInfo,CollateKey};
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
@@ -82,7 +83,7 @@ pub struct BarcodeLookupMap {
 
 impl BarcodeLookupMap {
     pub fn new(mut kv: Vec<u64>, bclen: u32) -> BarcodeLookupMap {
-        let prefix_len = ((bclen + 1) / 2) as u64;
+        let prefix_len = bclen.div_ceil(2) as u64;
         let suffix_len = bclen - prefix_len as u32;
 
         let _prefix_bits = 2 * prefix_len;
@@ -290,6 +291,147 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
 /// memory exactly as they will reside on disk.  If `compress` is true
 /// the collated chunk will be compressed, and then the result will be
 /// written to the output guarded by `owriter`.
+pub fn collate_temporary_bucket_twopass_generic<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
+    reader: &mut BufReader<T>,
+    rec_context: &<R as MappedRecord>::ParsingContext,
+    nrec: u32,
+    owriter: &Mutex<U>,
+    compress: bool,
+    cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
+) -> usize where u64: From<B> {
+    let mut tbuf = vec![0u8; 65536];
+    let mut total_bytes = 0usize;
+    let chunk_header_size = 2 * std::mem::size_of::<u32>() as u64;
+    let size_of_aln = R::nbytes_aln(rec_context);
+
+    let calc_record_bytes = |num_aln: usize| -> usize { R::nbytes(num_aln as u32, rec_context) };
+
+    // read each record
+    for _ in 0..(nrec as usize) {
+        // read the header of the record
+        // we don't bother reading the whole thing here
+        // because we will just copy later as need be
+        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
+
+        // get the entry for this chunk, or create a new one
+        let v = cb_byte_map.entry(tup.collate_key().into()).or_insert(TempCellInfo {
+            offset: chunk_header_size,
+            nbytes: chunk_header_size as u32,
+            nrec: 0_u32,
+        });
+
+        // read the alignment records from the input file
+        let na = tup.naln() as usize;
+        let req_size = size_of_aln * na;
+        if tbuf.len() < req_size {
+            tbuf.resize(req_size, 0);
+        }
+        reader.read_exact(&mut tbuf[0..(size_of_aln * na)]).unwrap();
+        // compute the total number of bytes this record requires
+        let nbytes = calc_record_bytes(na);
+        v.offset += nbytes as u64;
+        v.nbytes += nbytes as u32;
+        v.nrec += 1;
+        total_bytes += nbytes;
+    }
+
+    // each cell will have a header (8 bytes each)
+    total_bytes += cb_byte_map.len() * chunk_header_size as usize;
+    let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
+
+    // loop over all distinct cell barcodes, write their
+    // corresponding chunk header, and compute what the
+    // offset in `output_buffer` is where the corresponding
+    // records should start.
+    let mut next_offset = 0u64;
+    for (_, v) in cb_byte_map.iter_mut() {
+        // jump to the position where this chunk should start
+        // and write the header
+        output_buffer.set_position(next_offset);
+        let cell_bytes = v.nbytes;
+        let cell_rec = v.nrec;
+        output_buffer.write_all(&cell_bytes.to_le_bytes()).unwrap();
+        output_buffer.write_all(&cell_rec.to_le_bytes()).unwrap();
+        // where we will start writing records for this cell
+        v.offset = output_buffer.position();
+        // the number of bytes allocated to this chunk
+        let nbytes = v.nbytes as u64;
+        // the next record will start after this one
+        next_offset += nbytes;
+    }
+
+    // now each key points to where we should write the next record for the CB
+    // reset the input pointer
+    reader
+        .get_mut()
+        .seek(SeekFrom::Start(0))
+        .expect("could not get read pointer.");
+
+    // for each record, read it
+    for _ in 0..(nrec as usize) {
+        // read the header of the record
+        // we don't bother reading the whole thing here
+        // because we will just copy later as need be
+        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
+
+        // get the entry for this chunk, or create a new one
+        if let Some(v) = cb_byte_map.get_mut(&tup.collate_key().into()) {
+            output_buffer.set_position(v.offset);
+
+            let na = tup.naln() as usize;
+            // write the header
+            tup.write_fields(&mut output_buffer, rec_context).expect("could write header");
+
+            let bytes_for_aln_rec = R::nbytes_aln(rec_context);
+            // copy over the alignment records
+            reader.read_exact(&mut tbuf[0..(bytes_for_aln_rec * na)]).unwrap();
+            output_buffer
+                .write_all(&tbuf[..(bytes_for_aln_rec * na)])
+                .unwrap();
+
+            v.offset = output_buffer.position();
+        } else {
+            panic!("should not have any barcodes we can't find");
+        }
+    }
+
+    output_buffer.set_position(0);
+
+    if compress {
+        // compress the contents of output_buffer to compressed_output
+        let mut compressed_output =
+            snap::write::FrameEncoder::new(Cursor::new(Vec::<u8>::with_capacity(total_bytes)));
+        compressed_output
+            .write_all(output_buffer.get_ref())
+            .expect("could not compress the output chunk.");
+
+        output_buffer = compressed_output
+            .into_inner()
+            .expect("couldn't unwrap the FrameEncoder.");
+        output_buffer.set_position(0);
+    }
+
+    owriter
+        .lock()
+        .unwrap()
+        .write_all(output_buffer.get_ref())
+        .unwrap();
+
+    cb_byte_map.len()
+}
+
+/// Given a [BufReader]`<T>` from which to read a set of records that
+/// should reside in the same collated bucket, this function will
+/// collate the records by cell barcode, filling them into a chunk of
+/// memory exactly as they will reside on disk.  If `compress` is true
+/// the collated chunk will be compressed, and then the result will be
+/// written to the output guarded by `owriter`.
+#[deprecated(
+    since = "0.10.0",
+    note = "This function is highly-specalized and works only with the AlevinFryReadRecordT<u64> type. \
+            This function has been deprecated in favor of the more generic `collate_temporary_bucket_twopass_generic`. \
+            Please use that function instead."
+)]
 pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     reader: &mut BufReader<T>,
     bct: &RadIntId,
@@ -301,7 +443,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
 ) -> usize {
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
-    let header_size = 2 * std::mem::size_of::<u32>() as u64;
+    let chunk_header_size = 2 * std::mem::size_of::<u32>() as u64;
     let size_of_u32 = std::mem::size_of::<u32>();
     let size_of_bc = bct.bytes_for_type();
     let size_of_umi = umit.bytes_for_type();
@@ -319,8 +461,8 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map.entry(tup.0).or_insert(TempCellInfo {
-            offset: header_size,
-            nbytes: header_size as u32,
+            offset: chunk_header_size,
+            nbytes: chunk_header_size as u32,
             nrec: 0_u32,
         });
 
@@ -340,7 +482,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     }
 
     // each cell will have a header (8 bytes each)
-    total_bytes += cb_byte_map.len() * header_size as usize;
+    total_bytes += cb_byte_map.len() * chunk_header_size as usize;
     let mut output_buffer = Cursor::new(vec![0u8; total_bytes]);
 
     // loop over all distinct cell barcodes, write their
@@ -704,6 +846,124 @@ impl TempBucket {
 /// buffers `local_buffers`.  As soon as any buffer
 /// reaches `flush_limit`, flush the buffer by writing
 /// it to the `output_cache`.
+#[allow(clippy::too_many_arguments)]
+pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteger + std::convert::From<u64>, T: Read, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
+    reader: &mut BufReader<T>,
+    rec_context: &<R as MappedRecord>::ParsingContext,
+    correct_map: &HashMap<u64, u64>,
+    expected_ori: &Strand,
+    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    local_buffers: &mut [Cursor<&mut [u8]>],
+    flush_limit: usize,
+) where u64: From<B>, <R as MappedRecord>::ParsingContext: std::fmt::Debug {
+    let mut buf = [0u8; 8];
+    let mut tbuf = vec![0u8; 4096];
+    //let mut tcursor = Cursor::new(tbuf);
+    //tcursor.set_position(0);
+    
+    // get the number of bytes and records for
+    // the next chunk
+    reader.read_exact(&mut buf).unwrap();
+    let _nbytes = buf.pread::<u32>(0).unwrap();
+    let nrec = buf.pread::<u32>(4).unwrap();
+
+    let expected_ori: MappedFragmentOrientation = expected_ori.into();
+
+    // for each record, read it
+    for _ in 0..(nrec as usize) {
+        let mut tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("could read header");
+
+        // if this record had a correct or correctable barcode
+        if let Some(corrected_id) = correct_map.get(&tup.collate_key().into()) {
+            let mut rr = R::from_bytes_with_header_retain_ori(
+                reader,
+                &mut tup,
+                rec_context,
+                &expected_ori,
+            );
+
+            if rr.is_empty() {
+                continue;
+            }
+            if let Some(v) = output_cache.get(corrected_id) {
+                // if this is a valid barcode, then
+                // write the corresponding entry to the
+                // thread-local buffer for this bucket
+
+                let na = tup.naln() as usize; 
+                // the total number of bytes this record will take
+                let nb = R::nbytes(na as u32, rec_context) as u64;
+
+                // the buffer index for this corrected barcode
+                let buffidx = v.bucket_id as usize;
+                // the current cursor for this buffer
+                let bcursor = &mut local_buffers[buffidx];
+                // the current position of the cursor
+                let len = bcursor.position() as usize;
+
+                // if writing the next record (nb bytes) will put us over
+                // the flush size for the thread-local buffer for this bucket
+                // then first flush the buffer to file.
+                if len + nb as usize >= flush_limit {
+                    let mut filebuf = v.bucket_writer.lock().unwrap();
+                    filebuf.write_all(&bcursor.get_ref()[0..len]).unwrap();
+                    // and reset the local buffer cursor
+                    bcursor.set_position(0);
+                }
+
+                // set to the corrected collate key
+                rr.set_collate_key((*corrected_id).into());
+
+                let blen = bcursor.position() as usize;
+                // now, write the record to the buffer
+                rr.write(bcursor, rec_context).expect("can write record");
+                let alen = bcursor.position() as usize;
+                let actual = alen - blen; 
+                let expected = R::nbytes(na as u32, rec_context);
+                assert_eq!(expected, actual, "Expected to write {} bytes, but wrote {}.", expected, actual);
+
+                // update number of written records
+                v.num_records_written.fetch_add(1, Ordering::SeqCst);
+                // update number of written bytes
+                v.num_bytes_written.fetch_add(nb, Ordering::SeqCst);
+            }
+        } else {
+            // in this branch, we don't have access to a correct barcode for
+            // what we observed, so we need to discard the remaining part of
+            // the record.
+            
+            // we already read the header, so just the alignments
+            let req_len = R::nbytes_aln(rec_context) * tup.naln() as usize;
+            let do_resize = req_len > tbuf.len();
+
+            if do_resize {
+                tbuf.resize(req_len, 0);
+            }
+
+            reader
+                .read_exact(&mut tbuf[0..req_len])
+                .unwrap();
+
+            if do_resize {
+                tbuf.resize(4096, 0);
+                tbuf.shrink_to_fit();
+            }
+        }
+    }
+}
+
+
+/// Read an input chunk from `reader` and write the
+/// resulting records to the corresponding in-memory
+/// buffers `local_buffers`.  As soon as any buffer
+/// reaches `flush_limit`, flush the buffer by writing
+/// it to the `output_cache`.
+#[deprecated(
+    since = "0.10.0",
+    note = "This function is highly-specalized and works only with the AlevinFryReadRecordT<u64> type. \
+            This function has been deprecated in favor of the more generic `dump_corrected_cb_chunk_to_temp_file_generic`. \
+            Please use that function instead."
+)]
 #[allow(clippy::too_many_arguments)]
 pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
     reader: &mut BufReader<T>,

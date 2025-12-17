@@ -64,6 +64,9 @@ macro_rules! write_tag_value_array {
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u128")?;
             }
+            _ => {
+                anyhow::bail!("signed length values are unsupported in tag value arrays")
+            }
         }
         let $slice_name: &[u8] = bytemuck::try_cast_slice(&$v)
             .or_else(|_e| Err(anyhow::anyhow!("could't convert array contents to &[u8]")))
@@ -109,6 +112,35 @@ macro_rules! tag_value_try_into_int {
                             Ok(x as $b)
                         }
                     }
+                    TagValue::I8(x) => Ok(x as $b),
+                    TagValue::I16(x) => Ok(x as $b),
+                    TagValue::I32(x) => {
+                        if x as i64 > <$b>::MAX as i64 {
+                            bail!("Cannot convert value {x} to i16; too large")
+                        } else if (x as i64) < <$b>::MIN as i64 {
+                            bail!("Cannot convert value {x} to i16; too small")
+                        } else {
+                            Ok(x as $b)
+                        }
+                    }
+                    TagValue::I64(x) => {
+                        if x as i64 > <$b>::MAX as i64 {
+                            bail!("Cannot convert value {x} to {}; too large", stringify!($b))
+                        } else if (x as i64) < <$b>::MIN as i64 {
+                            bail!("Cannot convert value {x} to i32; too small")
+                        } else {
+                            Ok(x as $b)
+                        }
+                    }
+                    TagValue::I128(x) => {
+                        if x as i128 > <$b>::MAX as i128 {
+                            bail!("Cannot convert value {x} to {}; too large", stringify!($b))
+                        } else if (x as i128) < <$b>::MIN as i128 {
+                            bail!("Cannot convert value {x} to {}; too small", stringify!($b))
+                        } else {
+                            Ok(x as $b)
+                        }
+                    }
                     _ => {
                         bail!("cannot convert non-int TagValue to {}", stringify!($b))
                     }
@@ -142,6 +174,31 @@ macro_rules! as_u64 {
     };
 }
 
+/// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewI8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewI64], [crate::libradicl::io::NewU128]) into a native [u64]. Note that
+/// conversion from a [crate::libradicl::io::NewI128] will [panic!] as the underlying native type
+/// is too narrow to hold the contents of the integer.
+#[macro_export]
+macro_rules! as_i64 {
+    ("NewI128") => {
+        impl std::convert::From<$from_type> for i64 {
+            #[inline(always)]
+            fn from(x: $from_type) -> Self {
+                panic!("cannot convert i128 into i64");
+            }
+        }
+    };
+    ($from_type: ty) => {
+        impl std::convert::From<$from_type> for i64 {
+            #[inline(always)]
+            fn from(x: $from_type) -> Self {
+                x.0 as i64
+            }
+        }
+    };
+}
+
+
 /// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
 /// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128].
 #[macro_export]
@@ -151,6 +208,20 @@ macro_rules! as_u128 {
             #[inline(always)]
             fn from(x: $from_type) -> Self {
                 x.0 as u128
+            }
+        }
+    };
+}
+
+/// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewI8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewI64], [crate::libradicl::io::NewU128]) into a native [u128].
+#[macro_export]
+macro_rules! as_i128 {
+    ($from_type: ty) => {
+        impl std::convert::From<$from_type> for i128 {
+            #[inline(always)]
+            fn from(x: $from_type) -> Self {
+                x.0 as i128
             }
         }
     };
@@ -182,6 +253,32 @@ macro_rules! try_as_u64 {
     };
 }
 
+/// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewI8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewI64], [crate::libradicl::io::NewU128]) into a native [u64]. If the
+/// conversion is successful, we produce an [Ok]\([u64]\), otherwise we produce an
+/// [std::result::Result::Err].
+#[macro_export]
+macro_rules! try_as_i64 {
+    ("NewI128") => {
+        impl std::convert::TryFrom<TryWrapper<$from_type>> for i64 {
+            type Error = &'static str;
+            #[inline(always)]
+            fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
+                Err("Cannot convert i128 into i64")
+            }
+        }
+    };
+    ($from_type: ty) => {
+        impl std::convert::TryFrom<TryWrapper<$from_type>> for i64 {
+            type Error = &'static str;
+            #[inline(always)]
+            fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
+                Ok(x.0 .0 as i64)
+            }
+        }
+    };
+}
+
 /// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
 /// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128]. If the
 /// conversion is successful, we produce an [Ok]\([u128]\), otherwise we produce an [std::result::Result::Err].
@@ -193,6 +290,22 @@ macro_rules! try_as_u128 {
             #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
                 Ok(x.0 .0 as u128)
+            }
+        }
+    };
+}
+
+/// Try to convert from an underlying newtype (e.g. a [crate::libradicl::io::NewI8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
+/// [crate::libradicl::io::NewI64], [crate::libradicl::io::NewU128]) into a native [u128]. If the
+/// conversion is successful, we produce an [Ok]\([u128]\), otherwise we produce an [std::result::Result::Err].
+#[macro_export]
+macro_rules! try_as_i128 {
+    ($from_type: ty) => {
+        impl std::convert::TryFrom<TryWrapper<$from_type>> for i128 {
+            type Error = &'static str;
+            #[inline(always)]
+            fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
+                Ok(x.0 .0 as i128)
             }
         }
     };

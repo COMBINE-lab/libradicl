@@ -103,7 +103,7 @@ where
 
     /// Returns a [MetaChunkIterator] that can iterate over the
     /// [Chunk]s of this [MetaChunk].
-    pub fn iter(&self) -> MetaChunkIterator<R> {
+    pub fn iter(&self) -> MetaChunkIterator<'_, '_, R> {
         MetaChunkIterator {
             curr_sub_chunk: 0,
             num_sub_chunks: self.num_sub_chunks,
@@ -142,13 +142,13 @@ where
 ///
 /// * `br` - The underlying reader from which the [Chunk]s are drawn
 /// * `callback` - An optional callback to be invoked when each new [MetaChunk] is placed on the work
-/// queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
-/// [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
+///   queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
+///   [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
 /// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
 /// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
-/// placed
+///   placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
-/// underlying file have been read and added to the work queue.
+///   underlying file have been read and added to the work queue.
 fn fill_work_queue_filtered<
     R: MappedRecord,
     T: BufRead,
@@ -291,13 +291,13 @@ where
 ///
 /// * `br` - The underlying reader from which the [Chunk]s are drawn
 /// * `callback` - An optional callback to be invoked when each new [MetaChunk] is placed on the work
-/// queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
-/// [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
+///   queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
+///   [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
 /// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
 /// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
-/// placed
+///   placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
-/// underlying file have been read and added to the work queue.
+///   underlying file have been read and added to the work queue.
 fn fill_work_queue<
     R: MappedRecord,
     T: BufRead,
@@ -454,6 +454,42 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
             done_var: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// Create a new [ParallelRadReader] given the provided `prelude`. It is
+    /// assumed that the input `reader` has been consumed up to the point of the end of the prelude.
+    /// This function will read and parse the file_tag_map.
+    /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
+    /// threads once the [Self::start_chunk_parsing()] method has been called.
+    pub fn from_prelude(mut reader: T, prelude: RadPrelude, num_consumers: std::num::NonZeroUsize) -> Self {
+        let file_tag_map = prelude
+            .file_tags
+            .parse_tags_from_bytes(&mut reader)
+            .unwrap();
+        Self {
+            prelude,
+            file_tag_map,
+            reader,
+            meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
+            done_var: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+
+
+    /// Create a new [ParallelRadReader] given the provided `prelude` and `file_tag_map`.  It is
+    /// assumed that the input `reader` has been consumed up to the point of the first chunk.
+    /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
+    /// threads once the [Self::start_chunk_parsing()] method has been called.
+    pub fn from_prelude_and_file_tag_map(reader: T, prelude: RadPrelude, file_tag_map: TagMap, num_consumers: std::num::NonZeroUsize) -> Self {
+        Self {
+            prelude,
+            file_tag_map,
+            reader,
+            meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
+            done_var: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
 
     /// Get an `std::sync::Arc` holding the underlying `ArrayQueue` associated with this reader.
     /// This allows independent parser threads to obtain `MetaChunk`s, over which they can iterate
