@@ -816,17 +816,16 @@ impl MappedFragmentOrientation {
     // generalization of same for Strand
     #[inline]
     pub fn same(&self, s1: &Self) -> bool {
-        match (*self, *s1) {
-            (MappedFragmentOrientation::Forward, MappedFragmentOrientation::Forward) => true,
-            (MappedFragmentOrientation::Reverse, MappedFragmentOrientation::Reverse) => true,
-            (MappedFragmentOrientation::ForwardForward, MappedFragmentOrientation::ForwardForward) => true,
-            (MappedFragmentOrientation::ReverseReverse, MappedFragmentOrientation::ReverseReverse) => true,
-            (MappedFragmentOrientation::ForwardReverse, MappedFragmentOrientation::ForwardReverse) => true,
-            (MappedFragmentOrientation::ReverseForward, MappedFragmentOrientation::ReverseForward) => true,
-            (MappedFragmentOrientation::Unknown, MappedFragmentOrientation::Unknown) => true,
-            _ => false,
-        }
+        matches!((*self, *s1), 
+            (MappedFragmentOrientation::Forward, MappedFragmentOrientation::Forward) | 
+            (MappedFragmentOrientation::Reverse, MappedFragmentOrientation::Reverse) | 
+            (MappedFragmentOrientation::ForwardForward, MappedFragmentOrientation::ForwardForward) | 
+            (MappedFragmentOrientation::ReverseReverse, MappedFragmentOrientation::ReverseReverse) | 
+            (MappedFragmentOrientation::ForwardReverse, MappedFragmentOrientation::ForwardReverse) | 
+            (MappedFragmentOrientation::ReverseForward, MappedFragmentOrientation::ReverseForward) | 
+            (MappedFragmentOrientation::Unknown, MappedFragmentOrientation::Unknown))
     }
+
     /// Given an encoding of the mapped fragment information (`n`) and
     /// the corresponding [MappingType], return the [MappedFragmentOrientation]
     #[inline]
