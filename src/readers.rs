@@ -142,13 +142,13 @@ where
 ///
 /// * `br` - The underlying reader from which the [Chunk]s are drawn
 /// * `callback` - An optional callback to be invoked when each new [MetaChunk] is placed on the work
-/// queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
-/// [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
+///   queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
+///   [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
 /// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
 /// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
-/// placed
+///   placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
-/// underlying file have been read and added to the work queue.
+///   underlying file have been read and added to the work queue.
 fn fill_work_queue_filtered<
     R: MappedRecord,
     T: BufRead,
@@ -291,13 +291,13 @@ where
 ///
 /// * `br` - The underlying reader from which the [Chunk]s are drawn
 /// * `callback` - An optional callback to be invoked when each new [MetaChunk] is placed on the work
-/// queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
-/// [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
+///   queue. The callback is given 2 values; the first is the number of bytes of the just-pushed
+///   [MetaChunk] and the second is the number of records of the just-pushed [MetaChunk].
 /// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
 /// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
-/// placed
+///   placed
 /// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
-/// underlying file have been read and added to the work queue.
+///   underlying file have been read and added to the work queue.
 fn fill_work_queue<
     R: MappedRecord,
     T: BufRead,

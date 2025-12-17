@@ -800,7 +800,7 @@ impl From<&MappedFragmentOrientation> for &Strand {
         match v {
             MappedFragmentOrientation::Forward => &Strand::Forward,
             MappedFragmentOrientation::Reverse => &Strand::Reverse,
-            MappedFragmentOrientation::Unknown => &&Strand::Unknown,
+            MappedFragmentOrientation::Unknown => &Strand::Unknown,
             // TODO: Think how we should handle paired-end mapping orientations
             _ => &Strand::Unknown
         }
@@ -1390,8 +1390,8 @@ pub struct TagViewMap<'a> {
     dat: Vec<TagValue>,
 }
 
-/// Free functions that reduce redundancy in the implementations of
-/// TagMap and TagViewMap.
+// Free functions that reduce redundancy in the implementations of
+// TagMap and TagViewMap.
 
 #[inline(always)]
 fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::Result<()> {

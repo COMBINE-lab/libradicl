@@ -267,7 +267,7 @@ pub struct GenericReadRecordContext {
 }
 
 
-/// ### Known size trait 
+// ### Known size trait 
 
 pub trait KnownSize {
     // returns the number of bytes taken for a record of the given type 
