@@ -919,7 +919,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 rr.write(bcursor, rec_context).expect("can write record");
                 let alen = bcursor.position() as usize;
                 let actual = alen - blen; 
-                let expected = R::nbytes(na, rec_context) as usize;
+                let expected = R::nbytes(na as u32, rec_context);
                 assert_eq!(expected, actual, "Expected to write {} bytes, but wrote {}.", expected, actual);
 
                 // update number of written records
