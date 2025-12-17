@@ -480,7 +480,7 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     /// assumed that the input `reader` has been consumed up to the point of the first chunk.
     /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
     /// threads once the [Self::start_chunk_parsing()] method has been called.
-    pub fn from_prelude_and_file_tag_map(mut reader: T, prelude: RadPrelude, file_tag_map: TagMap, num_consumers: std::num::NonZeroUsize) -> Self {
+    pub fn from_prelude_and_file_tag_map(reader: T, prelude: RadPrelude, file_tag_map: TagMap, num_consumers: std::num::NonZeroUsize) -> Self {
         Self {
             prelude,
             file_tag_map,

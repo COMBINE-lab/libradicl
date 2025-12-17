@@ -83,7 +83,7 @@ pub struct BarcodeLookupMap {
 
 impl BarcodeLookupMap {
     pub fn new(mut kv: Vec<u64>, bclen: u32) -> BarcodeLookupMap {
-        let prefix_len = ((bclen + 1) / 2) as u64;
+        let prefix_len = bclen.div_ceil(2) as u64;
         let suffix_len = bclen - prefix_len as u32;
 
         let _prefix_bits = 2 * prefix_len;
@@ -919,7 +919,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 rr.write(bcursor, rec_context).expect("can write record");
                 let alen = bcursor.position() as usize;
                 let actual = alen - blen; 
-                let expected = R::nbytes(na as u32, rec_context) as usize;
+                let expected = R::nbytes(na, rec_context) as usize;
                 assert_eq!(expected, actual, "Expected to write {} bytes, but wrote {}.", expected, actual);
 
                 // update number of written records

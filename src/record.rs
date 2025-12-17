@@ -1102,7 +1102,7 @@ impl MappedRecord for GenericReadRecord {
         self.naln as usize
     }
 
-    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+    fn has_alignment_on_strand(&self, _s: Strand) -> bool {
         unimplemented!("no implementation of has_alignment_on_strand for GenericReadRecord")
     }
  
@@ -1639,7 +1639,7 @@ impl MappedRecord for AtacSeqReadRecord {
 
     fn num_aln(&self) -> usize { self.refs.len() }
 
-    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+    fn has_alignment_on_strand(&self, _s: Strand) -> bool {
         // we don't record the orientation, so right now 
         // treat everything as compatible
         !self.refs.is_empty()
