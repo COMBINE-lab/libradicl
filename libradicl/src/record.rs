@@ -20,8 +20,9 @@ use crate::{
         MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType, 
         TagSection, TagValue,
     },
-    utils,
+    utils
 };
+use libradicl_macros::UmiTagged;
 use anyhow::{self, bail, Context};
 use bio_types::strand::{Strand, Same};
 use scroll::Pread;
@@ -97,22 +98,37 @@ pub type AlevinFryReadRecordWithPositionU128 = AlevinFryReadRecordWithPositionT<
 /// Trait for a RecordHeader, contains at least the number of alignments
 /// but might contain other information
 pub trait RecordHeader {
+    /// The associated [MappedRecord] that has this header
     type RecordType: MappedRecord;
+
+    /// All records contain the number of alignments, and this allows
+    /// retreiving that value.
     fn naln(&self) -> u32;
 }
 
+/// This trait specifies that a [RecordHeader] is collatable by some [B] which can be converted
+/// to a primitive integer.  For example, the header might be collatable by the barcode, and this 
+/// trait allows retriving that barcode / key as something convertible to an integer and also 
+/// allows writing the header out to a stream.
 pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader {
+    /// Retreives the key by which this record header (and the coresponding record) can be collated
     fn collate_key(&self) -> B;
+    /// Writes the header to the provided `writer`.
     fn write_fields<W: Write>(&self, writer: &mut W, _ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()>;
 }
 
 // === standard alevin-fry reads
 
-// note this header can be re-used for the record with position information
-// since the read-level tags (i.e. header) doesn't contain any extra information
+
+/// Header information for an [AlevinFryReadRecord].
+/// note this header can be re-used for the record with position information
+/// since the read-level tags (i.e. header) doesn't contain any extra information
 pub struct AlevinFryReadRecordHeader<B: ConvertiblePrimitiveInteger> {
+    /// number of alignments
     pub naln: u32,
+    /// barcode
     pub bc: B,
+    /// umi
     pub umi: u64
 }
 
@@ -140,6 +156,9 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for AlevinFryRead
 
 // === long reads 
 
+/// Header information for an [ScLongReadRecord]; technically this could
+/// be suared with a regular [AlevinFryReadRecord], but it's kept separate 
+/// for now in case the record format changes.
 pub struct ScLongReadRecordHeader<B: ConvertiblePrimitiveInteger> {
     pub naln: u32,
     pub bc: B,
@@ -170,6 +189,7 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for ScLongReadRec
 
 // ==== ATAC seq read
 
+/// Header information for an [AtacSeqReadRecord]
 pub struct AtacSeqReadRecordHeader {
     pub naln: u32,
     pub bc: u64
@@ -207,10 +227,9 @@ pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
 */
 
 
-
-
 // ====== bulk
 
+/// Header for a bulk RNA-seq read record
 #[allow(unused)]
 struct PiscemBulkReadRecordHeader {
     pub na: u32
@@ -221,10 +240,14 @@ impl RecordHeader for PiscemBulkReadRecordHeader {
 }
 
 // ====== generic 
+
+/// Header for a generic record type, the only guaranteed field is
+/// the number of alignments
 #[allow(unused)]
 struct GenericReadRecordHeader {
     pub na: u32
 }
+
 impl RecordHeader for GenericReadRecordHeader {
     type RecordType = GenericReadRecord;
     fn naln(&self) -> u32 { self.na }
@@ -386,6 +409,7 @@ pub trait UmiTaggedRecord {
     fn umi(&self) -> u64;
 }
 
+/*
 impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordT<B> {
     fn umi(&self) -> u64 { self.umi }
 }
@@ -397,12 +421,13 @@ impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordWith
 impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for ScLongReadRecordT<B> {
     fn umi(&self) -> u64 { self.umi }
 }
+*/
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
 /// This represents the set of alignments and relevant information
 /// for a basic alevin-fry record.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, UmiTagged)]
 pub struct AlevinFryReadRecordT<B: ConvertiblePrimitiveInteger> {
     pub bc: B,
     pub umi: u64,
@@ -414,7 +439,7 @@ pub struct AlevinFryReadRecordT<B: ConvertiblePrimitiveInteger> {
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
 /// This represents the set of alignments and relevant information
 /// for an alevin-fry record that also records read position.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, UmiTagged)]
 pub struct AlevinFryReadRecordWithPositionT<B: ConvertiblePrimitiveInteger> {
     pub bc: B,
     pub umi: u64,
@@ -440,7 +465,7 @@ pub struct PiscemBulkReadRecord {
 /// reads processed upstream with `alevin-fry` for long read data.
 /// This represents a set of alignments and relevant information for
 /// long read single cell data.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, UmiTagged)]
 pub struct ScLongReadRecordT<B: ConvertiblePrimitiveInteger> {
     pub bc: B,
     pub umi: u64,

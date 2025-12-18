@@ -60,6 +60,8 @@ pub mod readers;
 pub mod record;
 pub mod schema;
 pub mod utils;
+pub use libradicl_macros::UmiTagged;
+
 #[macro_use]
 mod macros;
 

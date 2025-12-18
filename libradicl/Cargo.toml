@@ -1,0 +1,48 @@
+[package]
+name = "libradicl"
+version = "0.11.0"
+authors = [
+  "Avi Srivastava <avi.srivastava@nyu.edu>",
+  "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
+  "Dongze He <dhe17@umd.edu>",
+  "Mohsen Zakeri <mzakeri@cs.umd.edu>",
+  "Noor Pratab Singh <npsingh@umd.edu>",
+  "Rob Patro <rob@cs.umd.edu>",
+]
+edition = "2021"
+description = "support library for alevin-fry"
+license-file = "LICENSE"
+readme = "README.md"
+repository = "https://github.com/COMBINE-lab/libradicl"
+homepage = "https://github.com/COMBINE-lab/libradicl"
+documentation = "https://docs.rs/libradicl"
+include = ["src/*.rs", "examples/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
+keywords = [
+  "single-cell",
+  "preprocessing",
+  "RNA-seq",
+  "ATAC-seq",
+  "single-nucleus",
+]
+categories = ["command-line-utilities", "science"]
+
+[dependencies]
+libradicl-macros = { version = "0.11.0", path = "../libradicl-macros" }
+snap = "1"
+scroll = "0.12.0"
+num = "0.4.3"
+ahash = "0.8.12"
+serde = { version = "1.0.228", features = ["derive"] }
+dashmap = "^6.1.0"
+bio-types = "1.0.4"
+smallvec = "1.15.1"
+anyhow = "1.0.100"
+itertools = "0.13.0"
+bytemuck = { version = "1.24.0", features = ["aarch64_simd", "extern_crate_alloc"] }
+derivative = "2.2.0"
+crossbeam-queue = "0.3.12"
+noodles = { version = "0.85.0", features = ["bam", "sam"] }
+
+[dev-dependencies]
+needletail = "0.6.3"
+indicatif = "0.18.3"
