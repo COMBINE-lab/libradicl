@@ -404,24 +404,10 @@ impl KnownSize for AtacSeqReadRecord {
     }
 }
 
-//### For UMI tagged molecules
+/// Trait to represent records that are tagged with a UMI
 pub trait UmiTaggedRecord {
     fn umi(&self) -> u64;
 }
-
-/*
-impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordT<B> {
-    fn umi(&self) -> u64 { self.umi }
-}
-
-impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for AlevinFryReadRecordWithPositionT<B> {
-    fn umi(&self) -> u64 { self.umi }
-}
-
-impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for ScLongReadRecordT<B> {
-    fn umi(&self) -> u64 { self.umi }
-}
-*/
 
 /// A concrete struct representing a [MappedRecord]
 /// for reads processed upstream with `piscem` (or `salmon alevin`).
