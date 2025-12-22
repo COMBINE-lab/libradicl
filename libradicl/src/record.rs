@@ -1512,7 +1512,7 @@ impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordWithPositionT<B> {
         // make sure these are sorted in this step.
         let indices = argsort(&rec.refs);
         reorder_in_place(&mut rec.refs, &indices);
-        reorder_in_place(&mut rec.dir, &indices);
+        reorder_in_place(&mut rec.dirs, &indices);
         reorder_in_place(&mut rec.pos, &indices);
         rec
     }
