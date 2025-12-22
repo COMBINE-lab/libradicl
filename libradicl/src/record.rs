@@ -1392,12 +1392,16 @@ impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordT<B> {
             };
 
             if expected_ori.same(&strand) || expected_ori.is_unknown() {
+                let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+                rec.dirs.push(dir);
                 rec.refs.push(v & utils::MASK_TOP_BIT_U32);
             }
         }
 
         // make sure these are sorted in this step.
-        rec.refs.sort_unstable();
+        let indices = argsort(&rec.refs);
+        reorder_in_place(&mut rec.refs, &indices);
+        reorder_in_place(&mut rec.dirs, &indices);
         rec
     }
 
@@ -1498,6 +1502,8 @@ impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordWithPositionT<B> {
 
             if expected_ori.same(&strand) || expected_ori.is_unknown() {
                 let pos = rbuf.pread::<u32>(std::mem::size_of::<u32>()).unwrap();
+                let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+                rec.dirs.push(dir);
                 rec.refs.push(v & utils::MASK_TOP_BIT_U32);
                 rec.pos.push(pos);
             }
@@ -1506,6 +1512,7 @@ impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordWithPositionT<B> {
         // make sure these are sorted in this step.
         let indices = argsort(&rec.refs);
         reorder_in_place(&mut rec.refs, &indices);
+        reorder_in_place(&mut rec.dir, &indices);
         reorder_in_place(&mut rec.pos, &indices);
         rec
     }
