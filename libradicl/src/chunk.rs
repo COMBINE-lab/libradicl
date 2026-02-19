@@ -82,6 +82,82 @@ pub struct ChunkConfigAtac {
 
 pub trait ChunkContext {}
 
+/// An in-memory buffer for accumulating the records of a single RAD chunk,
+/// typically in a worker thread. Call [ChunkBuf::write_record] for each record,
+/// then [ChunkBuf::into_bytes] to obtain a self-contained byte sequence
+/// (chunk header + records) that can be appended to a RAD file via
+/// [crate::writers::RadFileWriter::write_chunk_bytes] without any seeking.
+pub struct ChunkBuf {
+    buf: Vec<u8>,
+    nrec: u32,
+}
+
+impl Default for ChunkBuf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChunkBuf {
+    /// Create a new empty [ChunkBuf].
+    pub fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            nrec: 0,
+        }
+    }
+
+    /// Create a new [ChunkBuf] with the given initial byte capacity.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap),
+            nrec: 0,
+        }
+    }
+
+    /// Serialize `rec` into the buffer using `ctx`. Increments the internal record count.
+    pub fn write_record<R: MappedRecord>(
+        &mut self,
+        rec: &R,
+        ctx: &R::ParsingContext,
+    ) -> anyhow::Result<()> {
+        rec.write(&mut self.buf, ctx)?;
+        self.nrec += 1;
+        Ok(())
+    }
+
+    /// Return the number of records accumulated so far.
+    pub fn nrec(&self) -> u32 {
+        self.nrec
+    }
+
+    /// Return the number of record bytes accumulated so far (excluding the chunk header).
+    pub fn byte_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Reset the buffer for reuse without reallocating.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.nrec = 0;
+    }
+
+    /// Finalise the chunk: prepend the 4-byte `nbytes` and 4-byte `nrec` header and
+    /// return the complete chunk byte sequence.  `nbytes` includes the header itself,
+    /// matching the value produced by [Chunk::write].
+    pub fn into_bytes(self) -> Vec<u8> {
+        let nrec = self.nrec;
+        let body = self.buf;
+        // nbytes covers the 4-byte nbytes field, the 4-byte nrec field, and all records.
+        let nbytes: u32 = (body.len() as u32) + 8;
+        let mut result = Vec::with_capacity(body.len() + 8);
+        result.extend_from_slice(&nbytes.to_le_bytes());
+        result.extend_from_slice(&nrec.to_le_bytes());
+        result.extend_from_slice(&body);
+        result
+    }
+}
+
 pub struct AlevinFryChunkContext {
     pub num_chunks: u64,
     pub bc_type: u8,

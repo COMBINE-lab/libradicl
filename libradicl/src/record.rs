@@ -1719,8 +1719,30 @@ impl MappedRecord for AtacSeqReadRecord {
     }
 
     #[inline]
-    fn write<W: Write>(&self, _writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
-        todo!();
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len() as u32;
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for AtacSeq record")?;
+        ctx.bct
+            .write_to(self.bc, writer)
+            .context("couldn't write bc field for AtacSeq record")?;
+
+        for i in 0..(na as usize) {
+            writer
+                .write_all(&self.refs[i].to_le_bytes())
+                .context("couldn't write ref for AtacSeq alignment")?;
+            writer
+                .write_all(&self.map_type[i].to_le_bytes())
+                .context("couldn't write map_type for AtacSeq alignment")?;
+            writer
+                .write_all(&self.start_pos[i].to_le_bytes())
+                .context("couldn't write start_pos for AtacSeq alignment")?;
+            writer
+                .write_all(&self.frag_lengths[i].to_le_bytes())
+                .context("couldn't write frag_length for AtacSeq alignment")?;
+        }
+        Ok(())
         /*
         let na: u32 = self.refs.len().try_into()?;
         // first write the number of alignments

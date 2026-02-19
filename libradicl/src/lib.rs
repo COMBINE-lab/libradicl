@@ -60,7 +60,10 @@ pub mod readers;
 pub mod record;
 pub mod schema;
 pub mod utils;
+pub mod writers;
 pub use libradicl_macros::UmiTagged;
+pub use chunk::ChunkBuf;
+pub use writers::{ConcurrentChunkWriter, RadFileWriter};
 
 #[macro_use]
 mod macros;

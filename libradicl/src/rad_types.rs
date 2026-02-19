@@ -136,6 +136,40 @@ impl TagSection {
     pub fn iter_desc(&self) -> impl std::iter::ExactSizeIterator<Item=&TagDesc> + use<'_> {
         self.tags.iter()
     }
+
+    /// Build a [TagSection] schema and a matching [TagMap] of values from a list of
+    /// `(name, value)` pairs. The [RadType] for each tag is inferred from the [TagValue]
+    /// via [TagValue::rad_type()]. Array types use [RadIntId::U32] as the length type.
+    pub fn from_tag_values(label: TagSectionLabel, entries: &[(&str, TagValue)]) -> (Self, TagMap) {
+        let mut section = Self::new_with_label(label);
+        for (name, value) in entries {
+            section.add_tag_desc(TagDesc {
+                name: name.to_string(),
+                typeid: value.rad_type(),
+            });
+        }
+        let mut tag_map = TagMap::with_keyset(&section.tags);
+        for (_, value) in entries {
+            tag_map.add(value.clone());
+        }
+        (section, tag_map)
+    }
+
+    /// Declare a homogeneous map as two adjacent array tags in this section:
+    ///   - `"{name}.keys"`   encoded as `Array(U32, Int(key_type))`
+    ///   - `"{name}.values"` encoded as `Array(U32, Int(val_type))`
+    ///
+    /// The corresponding [TagMap] values should be set via [TagMap::insert_map_tags].
+    pub fn add_map_tags(&mut self, name: &str, key_type: RadIntId, val_type: RadIntId) {
+        self.add_tag_desc(TagDesc {
+            name: format!("{name}.keys"),
+            typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(key_type)),
+        });
+        self.add_tag_desc(TagDesc {
+            name: format!("{name}.values"),
+            typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(val_type)),
+        });
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -953,9 +987,49 @@ pub enum TagValue {
 impl std::cmp::PartialEq for TagValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            // Floats: epsilon comparison
             (Self::F32(s), Self::F32(o)) => (s - o).abs() < f32::EPSILON,
             (Self::F64(s), Self::F64(o)) => (s - o).abs() < f64::EPSILON,
-            (x, y) => {x == y}
+            (Self::ArrayF32(a), Self::ArrayF32(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| (x - y).abs() < f32::EPSILON)
+            }
+            (Self::ArrayF64(a), Self::ArrayF64(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| (x - y).abs() < f64::EPSILON)
+            }
+            // All other variants: standard structural equality on the inner values.
+            // Each arm compares the inner T, which has a non-recursive PartialEq.
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::U8(a), Self::U8(b)) => a == b,
+            (Self::U16(a), Self::U16(b)) => a == b,
+            (Self::U32(a), Self::U32(b)) => a == b,
+            (Self::U64(a), Self::U64(b)) => a == b,
+            (Self::U128(a), Self::U128(b)) => a == b,
+            (Self::I8(a), Self::I8(b)) => a == b,
+            (Self::I16(a), Self::I16(b)) => a == b,
+            (Self::I32(a), Self::I32(b)) => a == b,
+            (Self::I64(a), Self::I64(b)) => a == b,
+            (Self::I128(a), Self::I128(b)) => a == b,
+            (Self::ArrayBool(a), Self::ArrayBool(b)) => a == b,
+            (Self::ArrayU8(a), Self::ArrayU8(b)) => a == b,
+            (Self::ArrayU16(a), Self::ArrayU16(b)) => a == b,
+            (Self::ArrayU32(a), Self::ArrayU32(b)) => a == b,
+            (Self::ArrayU64(a), Self::ArrayU64(b)) => a == b,
+            (Self::ArrayU128(a), Self::ArrayU128(b)) => a == b,
+            (Self::ArrayI8(a), Self::ArrayI8(b)) => a == b,
+            (Self::ArrayI16(a), Self::ArrayI16(b)) => a == b,
+            (Self::ArrayI32(a), Self::ArrayI32(b)) => a == b,
+            (Self::ArrayI64(a), Self::ArrayI64(b)) => a == b,
+            (Self::ArrayI128(a), Self::ArrayI128(b)) => a == b,
+            (Self::ArrayString(a), Self::ArrayString(b)) => a == b,
+            (Self::String(a), Self::String(b)) => a == b,
+            // Different variants are never equal
+            _ => false,
         }
     }
 }
@@ -972,6 +1046,41 @@ tag_value_try_into_int!(i32);
 tag_value_try_into_int!(i64);
 
 impl TagValue {
+    /// Return the [RadType] corresponding to this [TagValue].
+    /// For array types, the length is always encoded as [RadIntId::U32].
+    pub fn rad_type(&self) -> RadType {
+        match self {
+            Self::Bool(_) => RadType::Bool,
+            Self::U8(_) => RadType::Int(RadIntId::U8),
+            Self::U16(_) => RadType::Int(RadIntId::U16),
+            Self::U32(_) => RadType::Int(RadIntId::U32),
+            Self::U64(_) => RadType::Int(RadIntId::U64),
+            Self::U128(_) => RadType::Int(RadIntId::U128),
+            Self::I8(_) => RadType::Int(RadIntId::I8),
+            Self::I16(_) => RadType::Int(RadIntId::I16),
+            Self::I32(_) => RadType::Int(RadIntId::I32),
+            Self::I64(_) => RadType::Int(RadIntId::I64),
+            Self::I128(_) => RadType::Int(RadIntId::I128),
+            Self::F32(_) => RadType::Float(RadFloatId::F32),
+            Self::F64(_) => RadType::Float(RadFloatId::F64),
+            Self::ArrayBool(_) => RadType::Array(RadIntId::U32, RadAtomicId::Bool),
+            Self::ArrayU8(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U8)),
+            Self::ArrayU16(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U16)),
+            Self::ArrayU32(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
+            Self::ArrayU64(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U64)),
+            Self::ArrayU128(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U128)),
+            Self::ArrayI8(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::I8)),
+            Self::ArrayI16(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::I16)),
+            Self::ArrayI32(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::I32)),
+            Self::ArrayI64(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::I64)),
+            Self::ArrayI128(_) => RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::I128)),
+            Self::ArrayF32(_) => RadType::Array(RadIntId::U32, RadAtomicId::Float(RadFloatId::F32)),
+            Self::ArrayF64(_) => RadType::Array(RadIntId::U32, RadAtomicId::Float(RadFloatId::F64)),
+            Self::ArrayString(_) => RadType::Array(RadIntId::U32, RadAtomicId::String),
+            Self::String(_) => RadType::String,
+        }
+    }
+
     /// Write this tag value to the provided writer
     #[inline]
     pub fn write_with_type<W: Write>(
@@ -1541,6 +1650,52 @@ impl TagMap {
     pub fn iter_keys(&self) -> impl std::iter::ExactSizeIterator + use<'_> {
         self.keys.iter()
     }
+
+    /// Set the values for a homogeneous map tag pair previously declared with
+    /// [TagSection::add_map_tags]. The `keys` and `vals` [TagValue]s must be array
+    /// variants and must be the next two consecutive values to be added to this map
+    /// (i.e. the tags `"{name}.keys"` and `"{name}.values"` must occupy the next two
+    /// available slots in the keyset).
+    pub fn insert_map_tags(&mut self, name: &str, keys: TagValue, vals: TagValue) -> anyhow::Result<()> {
+        let keys_tag_name = format!("{name}.keys");
+        let vals_tag_name = format!("{name}.values");
+
+        let next_idx = self.dat.len();
+        anyhow::ensure!(
+            next_idx < self.keys.len() && self.keys[next_idx].name == keys_tag_name,
+            "insert_map_tags: expected next tag to be '{}' but found '{}'",
+            keys_tag_name,
+            self.keys.get(next_idx).map(|k| k.name.as_str()).unwrap_or("<none>")
+        );
+        self.try_add(keys)?;
+
+        let next_idx = self.dat.len();
+        anyhow::ensure!(
+            next_idx < self.keys.len() && self.keys[next_idx].name == vals_tag_name,
+            "insert_map_tags: expected next tag to be '{}' but found '{}'",
+            vals_tag_name,
+            self.keys.get(next_idx).map(|k| k.name.as_str()).unwrap_or("<none>")
+        );
+        self.try_add(vals)?;
+
+        Ok(())
+    }
+
+    /// Return references to the keys-array and values-array [TagValue]s for a map
+    /// tag pair previously declared with [TagSection::add_map_tags].
+    /// The caller can then destructure the array variants and zip them to reconstruct
+    /// the original map using any hasher or collection type they choose.
+    pub fn get_map_tag_arrays(&self, name: &str) -> anyhow::Result<(&TagValue, &TagValue)> {
+        let keys_tag_name = format!("{name}.keys");
+        let vals_tag_name = format!("{name}.values");
+        let keys = self
+            .get(&keys_tag_name)
+            .ok_or_else(|| anyhow::anyhow!("no map tag '{keys_tag_name}' found in TagMap"))?;
+        let vals = self
+            .get(&vals_tag_name)
+            .ok_or_else(|| anyhow::anyhow!("no map tag '{vals_tag_name}' found in TagMap"))?;
+        Ok((keys, vals))
+    }
 }
 
 impl std::ops::Index<usize> for TagMap {
@@ -1681,6 +1836,97 @@ mod tests {
     use std::io::Write;
 
     use super::TagDesc;
+
+    #[test]
+    fn tag_value_rad_type_roundtrip() {
+        // scalar types
+        assert_eq!(TagValue::U32(42).rad_type(), RadType::Int(RadIntId::U32));
+        assert_eq!(TagValue::U64(99).rad_type(), RadType::Int(RadIntId::U64));
+        assert_eq!(TagValue::I32(-1).rad_type(), RadType::Int(RadIntId::I32));
+        assert_eq!(TagValue::String("hi".into()).rad_type(), RadType::String);
+        // array types use U32 length encoding
+        assert_eq!(
+            TagValue::ArrayU32(vec![1, 2]).rad_type(),
+            RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32))
+        );
+    }
+
+    #[test]
+    fn from_tag_values_roundtrip() {
+        let (section, tag_map) = TagSection::from_tag_values(
+            TagSectionLabel::FileTags,
+            &[
+                ("bc_len", TagValue::U16(16)),
+                ("umi_len", TagValue::U16(12)),
+                ("rad_type", TagValue::String("sc_rna".into())),
+            ],
+        );
+        assert_eq!(section.tags.len(), 3);
+        assert_eq!(tag_map.get("bc_len"), Some(&TagValue::U16(16)));
+        assert_eq!(tag_map.get("umi_len"), Some(&TagValue::U16(12)));
+        assert_eq!(
+            tag_map.get("rad_type"),
+            Some(&TagValue::String("sc_rna".into()))
+        );
+
+        // round-trip through bytes
+        let mut buf = Vec::<u8>::new();
+        section.write(&mut buf).unwrap();
+        tag_map.write_values(&mut buf).unwrap();
+
+        let section_keys_bytes = {
+            let mut c = std::io::Cursor::new(&buf);
+            TagSection::from_bytes_with_label(&mut c, TagSectionLabel::FileTags).unwrap()
+        };
+        let read_map = section_keys_bytes
+            .parse_tags_from_bytes(&mut std::io::Cursor::new(&buf[{
+                // skip over the section schema bytes to reach tag values
+                let mut tmp = Vec::<u8>::new();
+                section.write(&mut tmp).unwrap();
+                tmp.len()
+            }..]))
+            .unwrap();
+        assert_eq!(read_map.get("bc_len"), Some(&TagValue::U16(16)));
+        assert_eq!(
+            read_map.get("rad_type"),
+            Some(&TagValue::String("sc_rna".into()))
+        );
+    }
+
+    #[test]
+    fn map_tags_roundtrip() {
+        use crate::rad_types::TagMap;
+
+        let mut section = TagSection::new_with_label(TagSectionLabel::FileTags);
+        section.add_map_tags("ref_lengths", RadIntId::U32, RadIntId::U32);
+
+        let keys_vec: Vec<u32> = vec![0, 1, 2];
+        let vals_vec: Vec<u32> = vec![1000, 2000, 3000];
+
+        let mut tag_map = TagMap::with_keyset(&section.tags);
+        tag_map
+            .insert_map_tags(
+                "ref_lengths",
+                TagValue::ArrayU32(keys_vec.clone()),
+                TagValue::ArrayU32(vals_vec.clone()),
+            )
+            .unwrap();
+
+        let (k, v) = tag_map.get_map_tag_arrays("ref_lengths").unwrap();
+        assert_eq!(k, &TagValue::ArrayU32(keys_vec.clone()));
+        assert_eq!(v, &TagValue::ArrayU32(vals_vec.clone()));
+
+        // reconstruct as a HashMap
+        if let (TagValue::ArrayU32(ks), TagValue::ArrayU32(vs)) = (k, v) {
+            let hmap: std::collections::HashMap<u32, u32> =
+                ks.iter().copied().zip(vs.iter().copied()).collect();
+            assert_eq!(hmap[&0], 1000);
+            assert_eq!(hmap[&1], 2000);
+            assert_eq!(hmap[&2], 3000);
+        } else {
+            panic!("unexpected TagValue variants");
+        }
+    }
     #[test]
     fn can_parse_simple_tag_desc() {
         let mut buf = Vec::<u8>::new();
