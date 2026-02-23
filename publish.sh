@@ -14,16 +14,31 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   echo "==> Dry-run mode enabled"
 fi
 
-# Extract the expected macros version from libradicl's dependency declaration
-MACROS_VERSION=$(cargo metadata --format-version=1 --no-deps \
-  | python3 -c "
+# Extract crate versions from workspace metadata
+read_version() {
+  cargo metadata --format-version=1 --no-deps \
+    | python3 -c "
 import sys, json
 meta = json.load(sys.stdin)
 for pkg in meta['packages']:
-    if pkg['name'] == 'libradicl-macros':
+    if pkg['name'] == '$1':
         print(pkg['version'])
         break
-")
+"
+}
+
+VERSION=$(read_version libradicl)
+MACROS_VERSION=$(read_version libradicl-macros)
+
+TAG="v${VERSION}"
+echo "==> libradicl version: ${VERSION}"
+echo "==> libradicl-macros version: ${MACROS_VERSION}"
+
+# Check that the tag doesn't already exist
+if git rev-parse "$TAG" >/dev/null 2>&1; then
+  echo "ERROR: tag ${TAG} already exists" >&2
+  exit 1
+fi
 
 echo "==> Publishing libradicl-macros v${MACROS_VERSION}"
 cargo publish -p libradicl-macros $DRY_RUN
@@ -32,6 +47,7 @@ if [[ -n "$DRY_RUN" ]]; then
   echo "==> Dry-run: skipping crates.io availability check"
   echo "==> Publishing libradicl (dry-run)"
   cargo publish -p libradicl $DRY_RUN
+  echo "==> Dry-run: would create and push tag ${TAG}"
   echo "==> Dry-run complete"
   exit 0
 fi
@@ -55,7 +71,11 @@ if (( ATTEMPT >= MAX_ATTEMPTS )); then
   exit 1
 fi
 
-echo "==> Publishing libradicl"
+echo "==> Publishing libradicl v${VERSION}"
 cargo publish -p libradicl
 
-echo "==> Done!"
+echo "==> Tagging ${TAG} and pushing to origin"
+git tag -a "$TAG" -m "Release ${VERSION}"
+git push origin "$TAG"
+
+echo "==> Done! Published libradicl v${VERSION} and pushed tag ${TAG}"
