@@ -1,3 +1,17 @@
 [workspace]
 resolver = "3"
 members = ["libradicl", "libradicl-macros"]
+
+[workspace.package]
+authors = [
+  "Avi Srivastava <avi.srivastava@nyu.edu>",
+  "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
+  "Dongze He <dhe17@umd.edu>",
+  "Mohsen Zakeri <mzakeri@cs.umd.edu>",
+  "Noor Pratab Singh <npsingh@umd.edu>",
+  "Rob Patro <rob@cs.umd.edu>",
+]
+edition = "2024"
+license = "BSD-3-Clause"
+repository = "https://github.com/COMBINE-lab/libradicl"
+homepage = "https://github.com/COMBINE-lab/libradicl"

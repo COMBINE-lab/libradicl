@@ -1,20 +1,13 @@
 [package]
 name = "libradicl"
 version = "0.11.0"
-authors = [
-  "Avi Srivastava <avi.srivastava@nyu.edu>",
-  "Hirak Sarkar <hirak_sarkar@hms.harvard.edu>",
-  "Dongze He <dhe17@umd.edu>",
-  "Mohsen Zakeri <mzakeri@cs.umd.edu>",
-  "Noor Pratab Singh <npsingh@umd.edu>",
-  "Rob Patro <rob@cs.umd.edu>",
-]
-edition = "2021"
+authors.workspace = true
+edition.workspace = true
 description = "support library for alevin-fry"
-license-file = "LICENSE"
-readme = "README.md"
-repository = "https://github.com/COMBINE-lab/libradicl"
-homepage = "https://github.com/COMBINE-lab/libradicl"
+license.workspace = true
+readme = "../README.md"
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/libradicl"
 include = ["src/*.rs", "examples/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
 keywords = [
@@ -38,10 +31,13 @@ bio-types = "1.0.4"
 smallvec = "1.15.1"
 anyhow = "1.0.100"
 itertools = "0.14.0"
-bytemuck = { version = "1.24.0", features = ["aarch64_simd", "extern_crate_alloc"] }
+bytemuck = { version = "1.24.0", features = [
+  "aarch64_simd",
+  "extern_crate_alloc",
+] }
 derivative = "2.2.0"
 crossbeam-queue = "0.3.12"
-noodles = { version = "0.104.0", features = ["bam", "sam"] }
+noodles = { version = "0.105.0", features = ["bam", "sam"] }
 
 [dev-dependencies]
 needletail = "0.6.3"
