@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 pub mod chunk;
+pub mod collation;
 pub mod constants;
 pub mod exit_codes;
 pub mod header;

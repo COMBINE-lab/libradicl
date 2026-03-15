@@ -17,14 +17,16 @@ use crate::io::{
 use crate::{
     io as rad_io,
     rad_types::{
-        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType, 
+        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType,
         TagSection, TagValue,
     },
     utils
 };
+use crate::collation::BarcodeRole;
 use libradicl_macros::UmiTagged;
 use anyhow::{self, bail, Context};
 use bio_types::strand::{Strand, Same};
+use smallvec::SmallVec;
 use scroll::Pread;
 use std::io::{Read, Write};
 use std::mem;
@@ -2205,6 +2207,526 @@ impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
     }
 }
 
+// ====== Multi-barcode records (for 10x Flex and similar protocols) ======
+
+/// The default [MultiBarcodeReadRecordT] holds barcodes in [u64]
+pub type MultiBarcodeReadRecord = MultiBarcodeReadRecordT<u64>;
+
+/// A [MultiBarcodeReadRecordT] that holds barcodes in [u64] and is explicit about this
+pub type MultiBarcodeReadRecordU64 = MultiBarcodeReadRecordT<u64>;
+
+/// A [MultiBarcodeReadRecordT] that holds barcodes in [u128] and is explicit about this
+pub type MultiBarcodeReadRecordU128 = MultiBarcodeReadRecordT<u128>;
+
+/// Maximum number of barcode levels supported inline (no heap allocation).
+/// This covers all known protocols (typically 2, at most ~4).
+pub const MAX_INLINE_BARCODES: usize = 4;
+
+/// A read record carrying multiple barcodes for multi-barcode protocols.
+/// Uses SmallVec with a small inline capacity since the number of barcodes
+/// per read is always very small (typically 2, at most ~4).
+/// SmallVec avoids heap allocation for these small counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiBarcodeReadRecordT<B: ConvertiblePrimitiveInteger> {
+    /// Barcodes at each level: b0, b1, ..., b{N-1} in order.
+    /// For 10x Flex: b0 = sample barcode, b1 = cell barcode.
+    pub barcodes: SmallVec<[B; MAX_INLINE_BARCODES]>,
+    pub umi: u64,
+    pub dirs: Vec<bool>,
+    pub refs: Vec<u32>,
+}
+
+impl<B: ConvertiblePrimitiveInteger> UmiTaggedRecord for MultiBarcodeReadRecordT<B> {
+    fn umi(&self) -> u64 {
+        self.umi
+    }
+}
+
+/// Context needed to read a multi-barcode record.
+/// Stores the integer type for each barcode level and the UMI type.
+#[derive(Debug, Clone)]
+pub struct MultiBarcodeRecordContext {
+    /// The integer type of each barcode level (b0, b1, ...)
+    pub bc_types: SmallVec<[RadIntId; MAX_INLINE_BARCODES]>,
+    /// The integer type of the UMI
+    pub umit: RadIntId,
+    /// The semantic roles of each barcode level
+    pub roles: SmallVec<[BarcodeRole; MAX_INLINE_BARCODES]>,
+}
+
+impl RecordContext for MultiBarcodeRecordContext {
+    fn get_context_from_tag_section(
+        ft: &TagSection,
+        rt: &TagSection,
+        _at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        // Determine the number of barcodes from the file-level tag
+        let num_barcodes_tag = ft.get_tag_type("num_barcodes");
+        let num_barcodes = if let Some(RadType::Int(_)) = num_barcodes_tag {
+            // We'll read the actual value from the tag map at a higher level;
+            // here we discover barcode tags from the read-level tag section.
+            // Count how many b0, b1, b2, ... tags exist.
+            let mut count = 0usize;
+            while rt.get_tag_type(&format!("b{}", count)).is_some() {
+                count += 1;
+            }
+            if count == 0 {
+                bail!("multi-barcode record context: num_barcodes file tag present but no bN read-level tags found");
+            }
+            count
+        } else {
+            bail!("multi-barcode record context requires a 'num_barcodes' file-level tag");
+        };
+
+        let mut bc_types = SmallVec::new();
+        for i in 0..num_barcodes {
+            let tag_name = format!("b{}", i);
+            let bct = rt.get_tag_type(&tag_name)
+                .ok_or_else(|| anyhow::anyhow!("multi-barcode record context requires a '{}' read-level tag", tag_name))?;
+            if let RadType::Int(x) = bct {
+                bc_types.push(x);
+            } else {
+                bail!("multi-barcode record context requires that '{}' tag is of type RadType::Int", tag_name);
+            }
+        }
+
+        let umit = rt
+            .get_tag_type("u")
+            .expect("multi-barcode record context requires a 'u' read-level tag");
+        let umit = if let RadType::Int(x) = umit {
+            x
+        } else {
+            bail!("multi-barcode record context requires that 'u' tag is of type RadType::Int");
+        };
+
+        // Parse barcode roles from file-level tag if present, otherwise use defaults
+        let roles = Self::parse_roles_or_default(ft, num_barcodes)?;
+
+        Ok(Self {
+            bc_types,
+            umit,
+            roles,
+        })
+    }
+}
+
+impl MultiBarcodeRecordContext {
+    /// Create a new context from explicit barcode types, UMI type, and roles.
+    pub fn new(
+        bc_types: SmallVec<[RadIntId; MAX_INLINE_BARCODES]>,
+        umit: RadIntId,
+        roles: SmallVec<[BarcodeRole; MAX_INLINE_BARCODES]>,
+    ) -> Self {
+        Self { bc_types, umit, roles }
+    }
+
+    /// Number of barcode levels in this context.
+    pub fn num_barcodes(&self) -> usize {
+        self.bc_types.len()
+    }
+
+    /// Total bytes for all barcode fields in a record.
+    pub fn total_bc_bytes(&self) -> usize {
+        self.bc_types.iter().map(|t| t.bytes_for_type()).sum()
+    }
+
+    /// Parse barcode roles from the file-level tag section, or use defaults.
+    fn parse_roles_or_default(
+        ft: &TagSection,
+        num_barcodes: usize,
+    ) -> anyhow::Result<SmallVec<[BarcodeRole; MAX_INLINE_BARCODES]>> {
+        // TODO: Parse barcode_roles from file-level tag when the ArrayString
+        // tag type is implemented. For now, use defaults.
+        let _ = ft;
+        let mut roles = SmallVec::new();
+        for i in 0..num_barcodes {
+            if i == 0 && num_barcodes > 1 {
+                roles.push(BarcodeRole::Sample);
+            } else {
+                roles.push(BarcodeRole::Cell);
+            }
+        }
+        Ok(roles)
+    }
+}
+
+/// Header information for a [MultiBarcodeReadRecord].
+pub struct MultiBarcodeReadRecordHeader<B: ConvertiblePrimitiveInteger> {
+    pub naln: u32,
+    pub barcodes: SmallVec<[B; MAX_INLINE_BARCODES]>,
+    pub umi: u64,
+}
+
+impl<B: ConvertiblePrimitiveInteger> RecordHeader for MultiBarcodeReadRecordHeader<B> {
+    type RecordType = MultiBarcodeReadRecordT<B>;
+    fn naln(&self) -> u32 {
+        self.naln
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for MultiBarcodeReadRecordHeader<B> {
+    /// Returns the innermost (last) barcode as the collation key,
+    /// which is typically the cell barcode.
+    fn collate_key(&self) -> B {
+        *self.barcodes.last().expect("multi-barcode header must have at least one barcode")
+    }
+
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<()> {
+        let na: u32 = self.naln();
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for multi-barcode record")?;
+        for (bc, bct) in self.barcodes.iter().zip(ctx.bc_types.iter()) {
+            bct.write_to(*bc, writer)
+                .context("couldn't write barcode field for multi-barcode record")?;
+        }
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for multi-barcode record")?;
+        Ok(())
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> KnownSize for MultiBarcodeReadRecordT<B> {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // for na field
+        std::mem::size_of::<u32>()
+        // for all barcodes
+        + ctx.total_bc_bytes()
+        // for umi
+        + ctx.umit.bytes_for_type()
+        // an ori_ref for each alignment
+        + (na as usize * Self::nbytes_aln(ctx))
+    }
+
+    fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        // ori_ref
+        std::mem::size_of::<u32>()
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> MappedRecord for MultiBarcodeReadRecordT<B> {
+    type ParsingContext = MultiBarcodeRecordContext;
+    /// Peek returns all barcodes and the UMI
+    type PeekResult = (SmallVec<[B; MAX_INLINE_BARCODES]>, u64);
+
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+
+    fn num_aln(&self) -> usize {
+        self.refs.len()
+    }
+
+    fn refs(&self) -> &[u32] {
+        &self.refs
+    }
+
+    fn has_alignment_on_strand(&self, s: Strand) -> bool {
+        match s {
+            Strand::Unknown => !self.refs.is_empty(),
+            Strand::Forward => self.dirs.iter().any(|&x| x),
+            Strand::Reverse => self.dirs.iter().any(|&x| !x),
+        }
+    }
+
+    #[inline]
+    fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
+        let na_size = mem::size_of::<u32>();
+        let _na = buf.pread::<u32>(0).unwrap();
+
+        let mut offset = na_size;
+        let mut barcodes = SmallVec::new();
+        for bct in &ctx.bc_types {
+            let bc: B = match bct {
+                RadIntId::U8 => NewU8(buf.pread::<u8>(offset).unwrap()).into(),
+                RadIntId::U16 => NewU16(buf.pread::<u16>(offset).unwrap()).into(),
+                RadIntId::U32 => NewU32(buf.pread::<u32>(offset).unwrap()).into(),
+                RadIntId::U64 => NewU64(buf.pread::<u64>(offset).unwrap()).into(),
+                RadIntId::U128 => NewU128(buf.pread::<u128>(offset).unwrap()).into(),
+                _ => panic!("signed barcode integer encodings are not supported"),
+            };
+            barcodes.push(bc);
+            offset += bct.bytes_for_type();
+        }
+
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(offset).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(offset).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(offset).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(offset).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported"),
+        };
+        (barcodes, umi)
+    }
+
+    #[inline]
+    fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
+        let mut rbuf = [0u8; 255];
+
+        // Read naln
+        reader.read_exact(&mut rbuf[0..4]).unwrap();
+        let na = u32::from_le_bytes([rbuf[0], rbuf[1], rbuf[2], rbuf[3]]);
+
+        // Read all barcodes
+        let mut barcodes = SmallVec::new();
+        for bct in &ctx.bc_types {
+            let bc: B = rad_io::read_into(reader, bct);
+            barcodes.push(bc);
+        }
+
+        // Read UMI
+        let umi = rad_io::read_into_u64(reader, &ctx.umit);
+
+        let mut rec = Self {
+            barcodes,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+        };
+
+        // Read alignment records (same format as AlevinFryReadRecordT)
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+            let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+            rec.dirs.push(dir);
+            rec.refs.push(v & utils::MASK_TOP_BIT_U32);
+        }
+        rec
+    }
+
+    #[inline]
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        let na: u32 = self.refs.len() as u32;
+        RadIntId::U32
+            .write_to(na, writer)
+            .context("couldn't write number of alignments for multi-barcode record")?;
+
+        // Write all barcodes
+        for (bc, bct) in self.barcodes.iter().zip(ctx.bc_types.iter()) {
+            bct.write_to(*bc, writer)
+                .context("couldn't write barcode field for multi-barcode record")?;
+        }
+
+        ctx.umit
+            .write_to(self.umi, writer)
+            .context("couldn't write umi field for multi-barcode record")?;
+
+        // Write alignment records
+        let dir_iter = self.dirs.iter();
+        for (dir, ref_idx) in itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs) {
+            let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
+            let encoded_dir_ref: u32 = ref_idx | encoded_dir;
+            writer
+                .write_all(&encoded_dir_ref.to_le_bytes())
+                .context("couldn't write compressed_ori_refid for multi-barcode record")?;
+        }
+        Ok(())
+    }
+}
+
+impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for MultiBarcodeReadRecordT<B> {
+    type CollatableRecordHeader = MultiBarcodeReadRecordHeader<B>;
+
+    #[inline]
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        _ctx: &<Self as MappedRecord>::ParsingContext,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
+        let rec = MultiBarcodeReadRecordT::<B>::from_bytes_with_header_keep_ori(
+            reader,
+            hdr.barcodes.clone(),
+            hdr.umi,
+            hdr.naln,
+            expected_ori.into(),
+        );
+        hdr.naln = rec.refs.len() as u32;
+        rec
+    }
+
+    /// The collation key is the innermost (last) barcode, typically the cell barcode.
+    fn set_collate_key(&mut self, k: B) {
+        if let Some(last) = self.barcodes.last_mut() {
+            *last = k;
+        }
+    }
+
+    fn collate_key(&self) -> B {
+        *self.barcodes.last().expect("multi-barcode record must have at least one barcode")
+    }
+
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+
+        let mut barcodes = SmallVec::new();
+        for bct in &context.bc_types {
+            let bc: B = rad_io::read_into(reader, bct);
+            barcodes.push(bc);
+        }
+
+        let umi = rad_io::read_into_u64(reader, &context.umit);
+
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            barcodes,
+            umi,
+        })
+    }
+
+    fn peek_collatable_header(
+        buf: &[u8],
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let na_size = mem::size_of::<u32>();
+        let na = buf.pread::<u32>(0).unwrap();
+
+        let mut offset = na_size;
+        let mut barcodes = SmallVec::new();
+        for bct in &ctx.bc_types {
+            let bc: B = match bct {
+                RadIntId::U8 => NewU8(buf.pread::<u8>(offset).unwrap()).into(),
+                RadIntId::U16 => NewU16(buf.pread::<u16>(offset).unwrap()).into(),
+                RadIntId::U32 => NewU32(buf.pread::<u32>(offset).unwrap()).into(),
+                RadIntId::U64 => NewU64(buf.pread::<u64>(offset).unwrap()).into(),
+                RadIntId::U128 => NewU128(buf.pread::<u128>(offset).unwrap()).into(),
+                _ => panic!("signed barcode integer encodings are not supported"),
+            };
+            barcodes.push(bc);
+            offset += bct.bytes_for_type();
+        }
+
+        let umi = match ctx.umit {
+            RadIntId::U8 => buf.pread::<u8>(offset).unwrap() as u64,
+            RadIntId::U16 => buf.pread::<u16>(offset).unwrap() as u64,
+            RadIntId::U32 => buf.pread::<u32>(offset).unwrap() as u64,
+            RadIntId::U64 => buf.pread::<u64>(offset).unwrap(),
+            RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
+            _ => panic!("signed umi integer encodings are not supported"),
+        };
+
+        Ok(Self::CollatableRecordHeader {
+            naln: na,
+            barcodes,
+            umi,
+        })
+    }
+}
+
+// ====== Hierarchical collation trait ======
+
+/// Trait for records that support hierarchical collation across multiple
+/// barcode levels. This extends [CollatableMappedRecord] to provide
+/// level-indexed access to barcodes.
+///
+/// Standard single-barcode record types do NOT implement this trait,
+/// preserving the zero-overhead guarantee for the common case.
+pub trait HierarchicallyCollatable<B: ConvertiblePrimitiveInteger>:
+    CollatableMappedRecord<B>
+{
+    /// Number of barcode levels in this record (e.g., 2 for sample + cell).
+    fn num_collation_levels(&self) -> usize;
+
+    /// Get the collation key at a specific level.
+    /// Level 0 is the outermost (e.g., sample), level N-1 is the innermost (e.g., cell).
+    fn collation_key_at_level(&self, level: usize) -> B;
+
+    /// Set the collation key at a specific level.
+    fn set_collation_key_at_level(&mut self, level: usize, k: B);
+}
+
+impl<B: ConvertiblePrimitiveInteger> HierarchicallyCollatable<B> for MultiBarcodeReadRecordT<B> {
+    fn num_collation_levels(&self) -> usize {
+        self.barcodes.len()
+    }
+
+    fn collation_key_at_level(&self, level: usize) -> B {
+        self.barcodes[level]
+    }
+
+    fn set_collation_key_at_level(&mut self, level: usize, k: B) {
+        self.barcodes[level] = k;
+    }
+}
+
+// Helper methods for MultiBarcodeReadRecordT
+impl<B: ConvertiblePrimitiveInteger> MultiBarcodeReadRecordT<B> {
+    /// Read the record header (naln, all barcodes, umi) from a reader.
+    pub fn from_bytes_record_header<T: Read>(
+        reader: &mut T,
+        bc_types: &[RadIntId],
+        umit: &RadIntId,
+    ) -> (SmallVec<[B; MAX_INLINE_BARCODES]>, u64, u32) {
+        let mut rbuf = [0u8; 4];
+        reader.read_exact(&mut rbuf).unwrap();
+        let na = u32::from_le_bytes(rbuf);
+
+        let mut barcodes = SmallVec::new();
+        for bct in bc_types {
+            let bc: B = rad_io::read_into(reader, bct);
+            barcodes.push(bc);
+        }
+
+        let umi = rad_io::read_into_u64(reader, umit);
+        (barcodes, umi, na)
+    }
+
+    /// Read a record from a reader, retaining only alignments matching the
+    /// prescribed orientation.
+    #[inline]
+    pub fn from_bytes_with_header_keep_ori<T: Read>(
+        reader: &mut T,
+        barcodes: SmallVec<[B; MAX_INLINE_BARCODES]>,
+        umi: u64,
+        na: u32,
+        expected_ori: &Strand,
+    ) -> Self {
+        let mut rbuf = [0u8; 255];
+        let mut rec = Self {
+            barcodes,
+            umi,
+            dirs: Vec::with_capacity(na as usize),
+            refs: Vec::with_capacity(na as usize),
+        };
+
+        for _ in 0..(na as usize) {
+            reader.read_exact(&mut rbuf[0..4]).unwrap();
+            let v = rbuf.pread::<u32>(0).unwrap();
+
+            // fw if the leftmost bit is 1, otherwise rc
+            let strand = if (v & utils::MASK_LOWER_31_U32) > 0 {
+                Strand::Forward
+            } else {
+                Strand::Reverse
+            };
+
+            if expected_ori.same(&strand) || expected_ori.is_unknown() {
+                let dir = (v & utils::MASK_LOWER_31_U32) != 0;
+                rec.dirs.push(dir);
+                rec.refs.push(v & utils::MASK_TOP_BIT_U32);
+            }
+        }
+
+        // make sure these are sorted in this step.
+        let indices = argsort(&rec.refs);
+        reorder_in_place(&mut rec.refs, &indices);
+        reorder_in_place(&mut rec.dirs, &indices);
+        rec
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::rad_types::{RadIntId, TagSection, TagSectionLabel};
@@ -2243,5 +2765,54 @@ mod tests {
 
         //println!("rec = {:?}, new_rec = {:?}", rec, new_rec);
         assert_eq!(rec, new_rec);
+    }
+
+    #[test]
+    fn can_write_multi_barcode_record() {
+        use crate::record::{MultiBarcodeReadRecord, MultiBarcodeRecordContext, MAX_INLINE_BARCODES};
+        use crate::collation::BarcodeRole;
+        use smallvec::{smallvec, SmallVec};
+
+        let rec = MultiBarcodeReadRecord {
+            barcodes: smallvec![42_u64, 12345_u64],
+            umi: 6789_u64,
+            dirs: vec![true, false, true],
+            refs: vec![100, 200, 300],
+        };
+
+        let ctx = MultiBarcodeRecordContext {
+            bc_types: smallvec![RadIntId::U32, RadIntId::U32],
+            umit: RadIntId::U32,
+            roles: smallvec![BarcodeRole::Sample, BarcodeRole::Cell],
+        };
+
+        let mut buf: Vec<u8> = Vec::new();
+        rec.write(&mut buf, &ctx).expect("couldn't write multi-barcode record");
+
+        let mut cursor = Cursor::new(buf);
+        let new_rec = MultiBarcodeReadRecord::from_bytes_with_context(&mut cursor, &ctx);
+
+        assert_eq!(rec, new_rec);
+    }
+
+    #[test]
+    fn multi_barcode_collation_key_is_last_barcode() {
+        use crate::record::{MultiBarcodeReadRecord, CollatableMappedRecord, HierarchicallyCollatable};
+        use smallvec::smallvec;
+
+        let rec = MultiBarcodeReadRecord {
+            barcodes: smallvec![42_u64, 12345_u64],
+            umi: 6789_u64,
+            dirs: vec![true],
+            refs: vec![100],
+        };
+
+        // collate_key() should return the last (cell) barcode
+        assert_eq!(rec.collate_key(), 12345_u64);
+
+        // level 0 = sample, level 1 = cell
+        assert_eq!(rec.collation_key_at_level(0), 42_u64);
+        assert_eq!(rec.collation_key_at_level(1), 12345_u64);
+        assert_eq!(rec.num_collation_levels(), 2);
     }
 }
