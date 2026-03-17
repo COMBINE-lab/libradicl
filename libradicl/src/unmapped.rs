@@ -221,6 +221,172 @@ impl UnmappedBcRecordReader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CollatedUnmappedCounts — in-memory representation with on-disk serialization
+// ---------------------------------------------------------------------------
+
+/// Collated (corrected) unmapped barcode frequency map.
+///
+/// Two variants for zero-overhead on the common single-barcode path:
+/// - `Single`: keyed by cell barcode (u64). Identical to pre-multi-barcode behavior.
+/// - `Multi`: keyed by (sample_bc, cell_bc) for per-sample accuracy.
+///
+/// On disk, both variants use the self-describing format (header + records).
+/// The variant is determined by the header's `num_fields`.
+pub enum CollatedUnmappedCounts {
+    /// Single barcode — lookup by cell BC.
+    Single {
+        counts: std::collections::HashMap<u64, u32>,
+        bc_type: RadIntId,
+    },
+    /// Multiple barcodes — lookup by (sample_bc, cell_bc) tuple.
+    Multi {
+        counts: std::collections::HashMap<(u64, u64), u32>,
+        field_types: Vec<RadIntId>,
+    },
+}
+
+impl CollatedUnmappedCounts {
+    /// Create an empty single-barcode map.
+    pub fn new_single(bc_type: RadIntId) -> Self {
+        CollatedUnmappedCounts::Single {
+            counts: std::collections::HashMap::new(),
+            bc_type,
+        }
+    }
+
+    /// Create an empty multi-barcode map.
+    pub fn new_multi(field_types: Vec<RadIntId>) -> Self {
+        CollatedUnmappedCounts::Multi {
+            counts: std::collections::HashMap::new(),
+            field_types,
+        }
+    }
+
+    /// Look up unmapped count by cell barcode (single-barcode path).
+    pub fn get_single(&self, cell_bc: u64) -> u32 {
+        match self {
+            CollatedUnmappedCounts::Single { counts, .. } => {
+                counts.get(&cell_bc).copied().unwrap_or(0)
+            }
+            // Fallback: if called on Multi, sum across all samples for this cell
+            CollatedUnmappedCounts::Multi { counts, .. } => {
+                counts
+                    .iter()
+                    .filter(|((_, cb), _)| *cb == cell_bc)
+                    .map(|(_, &c)| c)
+                    .sum()
+            }
+        }
+    }
+
+    /// Look up unmapped count by (sample_bc, cell_bc) pair (multi-barcode path).
+    pub fn get_multi(&self, sample_bc: u64, cell_bc: u64) -> u32 {
+        match self {
+            CollatedUnmappedCounts::Multi { counts, .. } => {
+                counts.get(&(sample_bc, cell_bc)).copied().unwrap_or(0)
+            }
+            // Fallback: if called on Single, just use cell_bc
+            CollatedUnmappedCounts::Single { counts, .. } => {
+                counts.get(&cell_bc).copied().unwrap_or(0)
+            }
+        }
+    }
+
+    /// Insert or add a count for a single-barcode key.
+    pub fn insert_single(&mut self, cell_bc: u64, count: u32) {
+        if let CollatedUnmappedCounts::Single { counts, .. } = self {
+            *counts.entry(cell_bc).or_insert(0) += count;
+        }
+    }
+
+    /// Insert or add a count for a multi-barcode key.
+    pub fn insert_multi(&mut self, sample_bc: u64, cell_bc: u64, count: u32) {
+        if let CollatedUnmappedCounts::Multi { counts, .. } = self {
+            *counts.entry((sample_bc, cell_bc)).or_insert(0) += count;
+        }
+    }
+
+    /// Whether this is a multi-barcode map.
+    pub fn is_multi(&self) -> bool {
+        matches!(self, CollatedUnmappedCounts::Multi { .. })
+    }
+
+    /// Write to the self-describing on-disk format.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        match self {
+            CollatedUnmappedCounts::Single { counts, bc_type } => {
+                let fmt = UnmappedBcFormat::single(*bc_type);
+                fmt.write_header(writer)?;
+                let mut rec_writer = UnmappedBcRecordWriter::new(fmt);
+                for (&bc, &count) in counts {
+                    rec_writer.write_record(&[bc], count);
+                }
+                rec_writer.flush_to(writer)?;
+            }
+            CollatedUnmappedCounts::Multi { counts, field_types } => {
+                let fmt = UnmappedBcFormat::multi(field_types.clone());
+                fmt.write_header(writer)?;
+                let mut rec_writer = UnmappedBcRecordWriter::new(fmt);
+                for (&(sample_bc, cell_bc), &count) in counts {
+                    rec_writer.write_record(&[sample_bc, cell_bc], count);
+                }
+                rec_writer.flush_to(writer)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read from the self-describing on-disk format.
+    pub fn read_from<R: Read>(reader: &mut R) -> anyhow::Result<Self> {
+        let format = match UnmappedBcFormat::read_header(reader)? {
+            Some(fmt) => fmt,
+            None => {
+                // Empty file — return empty single-barcode map
+                return Ok(CollatedUnmappedCounts::new_single(RadIntId::U32));
+            }
+        };
+
+        let mut rec_reader = UnmappedBcRecordReader::new(format.clone());
+
+        if format.num_fields() == 1 {
+            let mut counts = std::collections::HashMap::new();
+            while let Some((bcs, count)) = rec_reader.read_record(reader)? {
+                *counts.entry(bcs[0]).or_insert(0) += count;
+            }
+            Ok(CollatedUnmappedCounts::Single {
+                counts,
+                bc_type: format.field_types[0],
+            })
+        } else {
+            let mut counts = std::collections::HashMap::new();
+            while let Some((bcs, count)) = rec_reader.read_record(reader)? {
+                let sample_bc = bcs[0];
+                let cell_bc = *bcs.last().unwrap_or(&0);
+                *counts.entry((sample_bc, cell_bc)).or_insert(0) += count;
+            }
+            Ok(CollatedUnmappedCounts::Multi {
+                counts,
+                field_types: format.field_types,
+            })
+        }
+    }
+
+    /// Write to a file path.
+    pub fn write_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let file = std::fs::File::create(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        self.write_to(&mut writer)
+    }
+
+    /// Read from a file path.
+    pub fn read_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let mut reader = std::io::BufReader::new(file);
+        Self::read_from(&mut reader)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +451,49 @@ mod tests {
         let cursor = Cursor::new(Vec::<u8>::new());
         let result = UnmappedBcFormat::read_header(&mut cursor.clone()).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn collated_single_roundtrip() {
+        let mut counts = CollatedUnmappedCounts::new_single(RadIntId::U32);
+        counts.insert_single(100, 5);
+        counts.insert_single(200, 10);
+        counts.insert_single(100, 3); // should add to existing
+
+        assert_eq!(counts.get_single(100), 8);
+        assert_eq!(counts.get_single(200), 10);
+        assert_eq!(counts.get_single(999), 0);
+
+        // Roundtrip
+        let mut buf = Vec::new();
+        counts.write_to(&mut buf).unwrap();
+
+        let restored = CollatedUnmappedCounts::read_from(&mut Cursor::new(&buf)).unwrap();
+        assert!(!restored.is_multi());
+        assert_eq!(restored.get_single(100), 8);
+        assert_eq!(restored.get_single(200), 10);
+    }
+
+    #[test]
+    fn collated_multi_roundtrip() {
+        let mut counts = CollatedUnmappedCounts::new_multi(vec![RadIntId::U16, RadIntId::U32]);
+        counts.insert_multi(1, 100, 5);   // sample 1, cell 100
+        counts.insert_multi(2, 100, 10);  // sample 2, cell 100 (different sample!)
+        counts.insert_multi(1, 200, 3);
+
+        assert_eq!(counts.get_multi(1, 100), 5);
+        assert_eq!(counts.get_multi(2, 100), 10);
+        assert_eq!(counts.get_multi(1, 200), 3);
+        assert_eq!(counts.get_multi(1, 999), 0);
+
+        // Roundtrip
+        let mut buf = Vec::new();
+        counts.write_to(&mut buf).unwrap();
+
+        let restored = CollatedUnmappedCounts::read_from(&mut Cursor::new(&buf)).unwrap();
+        assert!(restored.is_multi());
+        assert_eq!(restored.get_multi(1, 100), 5);
+        assert_eq!(restored.get_multi(2, 100), 10);
+        assert_eq!(restored.get_multi(1, 200), 3);
     }
 }
