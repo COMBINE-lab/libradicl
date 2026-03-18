@@ -146,10 +146,7 @@ mod tests {
 
     #[test]
     fn collation_manifest_roundtrip() {
-        let mut manifest = CollationManifest::new(vec![
-            "sample".to_string(),
-            "cell".to_string(),
-        ]);
+        let mut manifest = CollationManifest::new(vec!["sample".to_string(), "cell".to_string()]);
         manifest.add_sample_group(SampleGroup {
             key: 0x1234,
             name: Some("sample_A".to_string()),
@@ -188,9 +185,15 @@ mod tests {
         assert_eq!(BarcodeRole::Cell.to_string(), "cell");
         assert_eq!(BarcodeRole::Feature.to_string(), "feature");
 
-        assert_eq!("sample".parse::<BarcodeRole>().unwrap(), BarcodeRole::Sample);
+        assert_eq!(
+            "sample".parse::<BarcodeRole>().unwrap(),
+            BarcodeRole::Sample
+        );
         assert_eq!("cell".parse::<BarcodeRole>().unwrap(), BarcodeRole::Cell);
-        assert_eq!("feature".parse::<BarcodeRole>().unwrap(), BarcodeRole::Feature);
+        assert_eq!(
+            "feature".parse::<BarcodeRole>().unwrap(),
+            BarcodeRole::Feature
+        );
         assert!("unknown".parse::<BarcodeRole>().is_err());
     }
 }

@@ -179,7 +179,10 @@ impl UnmappedBcRecordReader {
 
     /// Read the next record. Returns None at EOF.
     /// On success, returns (barcodes_as_u64, count).
-    pub fn read_record<R: Read>(&mut self, reader: &mut R) -> anyhow::Result<Option<(Vec<u64>, u32)>> {
+    pub fn read_record<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> anyhow::Result<Option<(Vec<u64>, u32)>> {
         match reader.read_exact(&mut self.record_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
@@ -208,9 +211,7 @@ impl UnmappedBcRecordReader {
             offset += ft.size_of();
         }
 
-        let count = u32::from_le_bytes(
-            self.record_buf[offset..offset + 4].try_into().unwrap(),
-        );
+        let count = u32::from_le_bytes(self.record_buf[offset..offset + 4].try_into().unwrap());
 
         Ok(Some((barcodes, count)))
     }
@@ -321,7 +322,10 @@ impl CollatedUnmappedCounts {
                 }
                 rec_writer.flush_to(writer)?;
             }
-            CollatedUnmappedCounts::Multi { counts, field_types } => {
+            CollatedUnmappedCounts::Multi {
+                counts,
+                field_types,
+            } => {
                 let fmt = UnmappedBcFormat::multi(field_types.clone());
                 fmt.write_header(writer)?;
                 let mut rec_writer = UnmappedBcRecordWriter::new(fmt);
@@ -474,8 +478,8 @@ mod tests {
     #[test]
     fn collated_multi_roundtrip() {
         let mut counts = CollatedUnmappedCounts::new_multi(vec![RadIntId::U16, RadIntId::U32]);
-        counts.insert_multi(1, 100, 5);   // sample 1, cell 100
-        counts.insert_multi(2, 100, 10);  // sample 2, cell 100 (different sample!)
+        counts.insert_multi(1, 100, 5); // sample 1, cell 100
+        counts.insert_multi(2, 100, 10); // sample 2, cell 100 (different sample!)
         counts.insert_multi(1, 200, 3);
 
         assert_eq!(counts.get_multi(1, 100), 5);

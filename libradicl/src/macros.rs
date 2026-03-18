@@ -198,7 +198,6 @@ macro_rules! as_i64 {
     };
 }
 
-
 /// Convert from an underlying newtype (e.g. a [crate::libradicl::io::NewU8], [crate::libradicl::io::NewU16], [crate::libradicl::io::NewU32],
 /// [crate::libradicl::io::NewU64], [crate::libradicl::io::NewU128]) into a native [u128].
 #[macro_export]
@@ -247,7 +246,7 @@ macro_rules! try_as_u64 {
             type Error = &'static str;
             #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
-                Ok(x.0 .0 as u64)
+                Ok(x.0.0 as u64)
             }
         }
     };
@@ -273,7 +272,7 @@ macro_rules! try_as_i64 {
             type Error = &'static str;
             #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
-                Ok(x.0 .0 as i64)
+                Ok(x.0.0 as i64)
             }
         }
     };
@@ -289,7 +288,7 @@ macro_rules! try_as_u128 {
             type Error = &'static str;
             #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
-                Ok(x.0 .0 as u128)
+                Ok(x.0.0 as u128)
             }
         }
     };
@@ -305,7 +304,7 @@ macro_rules! try_as_i128 {
             type Error = &'static str;
             #[inline(always)]
             fn try_from(x: TryWrapper<$from_type>) -> Result<Self, Self::Error> {
-                Ok(x.0 .0 as i128)
+                Ok(x.0.0 as i128)
             }
         }
     };

@@ -13,25 +13,25 @@
 //! types and traits related to parsing and writing values of specific types.
 
 use crate::{self as libradicl, constants};
-use anyhow::{self, bail, Context};
+use anyhow::{self, Context, bail};
+use bio_types::strand::Strand;
 use libradicl::{tag_value_try_into_int, u8_to_vec_of, u8_to_vec_of_bool, write_tag_value_array};
 use num::cast::AsPrimitive;
 use scroll::Pread;
-use bio_types::strand::Strand;
 
 use std::io::Read;
 use std::io::Write;
 use std::mem;
 
-const U8ID  : u8 = 1_u8;
-const U16ID : u8 = 2_u8;
-const U32ID : u8 = 3_u8;
-const U64ID : u8 = 4_u8;
+const U8ID: u8 = 1_u8;
+const U16ID: u8 = 2_u8;
+const U32ID: u8 = 3_u8;
+const U64ID: u8 = 4_u8;
 const U128ID: u8 = 9_u8;
-const I8ID  : u8 = 10_u8;
-const I16ID : u8 = 11_u8;
-const I32ID : u8 = 12_u8;
-const I64ID : u8 = 13_u8;
+const I8ID: u8 = 10_u8;
+const I16ID: u8 = 11_u8;
+const I32ID: u8 = 12_u8;
+const I64ID: u8 = 13_u8;
 const I128ID: u8 = 14_u8;
 
 /// A **description** for a type tag. This  specifies the name
@@ -133,7 +133,7 @@ impl TagSection {
     }
 
     /// return an iterator over the tag descriptions
-    pub fn iter_desc(&self) -> impl std::iter::ExactSizeIterator<Item=&TagDesc> + use<'_> {
+    pub fn iter_desc(&self) -> impl std::iter::ExactSizeIterator<Item = &TagDesc> + use<'_> {
         self.tags.iter()
     }
 
@@ -183,7 +183,7 @@ pub enum RadIntId {
     I16,
     I32,
     I64,
-    I128
+    I128,
 }
 
 impl RadIntId {
@@ -267,7 +267,6 @@ impl RadIntId {
             _ => {
                 panic!("cannot read an unsigned RadIntId into a i64")
             }
-
         };
         v
     }
@@ -339,9 +338,7 @@ impl RadIntId {
         };
         v
     }
-
 }
-
 
 /// Convert from a [RadIntId], to the corresponding type id (`u8`)
 /// encoding.
@@ -428,41 +425,33 @@ pub trait PrimitiveInteger:
     + AsPrimitive<i64>
     + AsPrimitive<i128>
     + AsPrimitive<isize>
-{}
-
-impl<T: 
-    AsPrimitive<u8>
-    + AsPrimitive<u16>
-    + AsPrimitive<u32>
-    + AsPrimitive<u64>
-    + AsPrimitive<u128>
-    + AsPrimitive<usize>
-    + AsPrimitive<i8>
-    + AsPrimitive<i16>
-    + AsPrimitive<i32>
-    + AsPrimitive<i64>
-    + AsPrimitive<i128>
-    + AsPrimitive<isize>> PrimitiveInteger for T
 {
 }
 
-pub trait PrimitiveUnsignedInteger:
-    PrimitiveInteger + num::Unsigned 
+impl<
+    T: AsPrimitive<u8>
+        + AsPrimitive<u16>
+        + AsPrimitive<u32>
+        + AsPrimitive<u64>
+        + AsPrimitive<u128>
+        + AsPrimitive<usize>
+        + AsPrimitive<i8>
+        + AsPrimitive<i16>
+        + AsPrimitive<i32>
+        + AsPrimitive<i64>
+        + AsPrimitive<i128>
+        + AsPrimitive<isize>,
+> PrimitiveInteger for T
 {
 }
 
-impl<T: PrimitiveInteger + num::Unsigned> PrimitiveUnsignedInteger for T
-{
-}
+pub trait PrimitiveUnsignedInteger: PrimitiveInteger + num::Unsigned {}
 
-pub trait PrimitiveSignedInteger: PrimitiveInteger + num::Signed
-{
-}
+impl<T: PrimitiveInteger + num::Unsigned> PrimitiveUnsignedInteger for T {}
 
-impl<T: PrimitiveInteger + num::Signed> PrimitiveSignedInteger for T
-{
-}
+pub trait PrimitiveSignedInteger: PrimitiveInteger + num::Signed {}
 
+impl<T: PrimitiveInteger + num::Signed> PrimitiveSignedInteger for T {}
 
 impl RadIntId {
     /// Return the number of bytes required
@@ -609,15 +598,15 @@ impl From<u8> for RadAtomicId {
     fn from(x: u8) -> Self {
         match x {
             0 => Self::Bool,
-            U8ID   => Self::Int(RadIntId::U8),
-            U16ID  => Self::Int(RadIntId::U16),
-            U32ID  => Self::Int(RadIntId::U32),
-            U64ID  => Self::Int(RadIntId::U64),
+            U8ID => Self::Int(RadIntId::U8),
+            U16ID => Self::Int(RadIntId::U16),
+            U32ID => Self::Int(RadIntId::U32),
+            U64ID => Self::Int(RadIntId::U64),
             U128ID => Self::Int(RadIntId::U128),
-            I8ID   => Self::Int(RadIntId::I8),
-            I16ID  => Self::Int(RadIntId::I16),
-            I32ID  => Self::Int(RadIntId::I32),
-            I64ID  => Self::Int(RadIntId::I64),
+            I8ID => Self::Int(RadIntId::I8),
+            I16ID => Self::Int(RadIntId::I16),
+            I32ID => Self::Int(RadIntId::I32),
+            I64ID => Self::Int(RadIntId::I64),
             I128ID => Self::Int(RadIntId::I128),
             5 => Self::Float(RadFloatId::F32),
             6 => Self::Float(RadFloatId::F64),
@@ -725,16 +714,16 @@ pub fn encode_type_tag(type_tag: RadType) -> Option<u8> {
 /// then return `Some(`[RadIntId]`)`, otherwise return [None].
 pub fn decode_int_type_tag(type_id: u8) -> Option<RadIntId> {
     match type_id {
-        U8ID    => Some(RadIntId::U8),
-        U16ID   => Some(RadIntId::U16),
-        U32ID   => Some(RadIntId::U32),
-        U64ID   => Some(RadIntId::U64),
-        U128ID  => Some(RadIntId::U128),
-        I8ID    => Some(RadIntId::I8),
-        I16ID   => Some(RadIntId::I16),
-        I32ID   => Some(RadIntId::I32),
-        I64ID   => Some(RadIntId::I64),
-        I128ID  => Some(RadIntId::I128),
+        U8ID => Some(RadIntId::U8),
+        U16ID => Some(RadIntId::U16),
+        U32ID => Some(RadIntId::U32),
+        U64ID => Some(RadIntId::U64),
+        U128ID => Some(RadIntId::U128),
+        I8ID => Some(RadIntId::I8),
+        I16ID => Some(RadIntId::I16),
+        I32ID => Some(RadIntId::I32),
+        I64ID => Some(RadIntId::I64),
+        I128ID => Some(RadIntId::I128),
         _ => None,
     }
 }
@@ -814,7 +803,7 @@ impl From<&Strand> for MappedFragmentOrientation {
         match v {
             Strand::Forward => MappedFragmentOrientation::Forward,
             Strand::Reverse => MappedFragmentOrientation::Reverse,
-            Strand::Unknown => MappedFragmentOrientation::Unknown
+            Strand::Unknown => MappedFragmentOrientation::Unknown,
         }
     }
 }
@@ -824,7 +813,7 @@ impl From<Strand> for MappedFragmentOrientation {
         match v {
             Strand::Forward => MappedFragmentOrientation::Forward,
             Strand::Reverse => MappedFragmentOrientation::Reverse,
-            Strand::Unknown => MappedFragmentOrientation::Unknown
+            Strand::Unknown => MappedFragmentOrientation::Unknown,
         }
     }
 }
@@ -836,13 +825,13 @@ impl From<&MappedFragmentOrientation> for &Strand {
             MappedFragmentOrientation::Reverse => &Strand::Reverse,
             MappedFragmentOrientation::Unknown => &Strand::Unknown,
             // TODO: Think how we should handle paired-end mapping orientations
-            _ => &Strand::Unknown
+            _ => &Strand::Unknown,
         }
     }
 }
 
 impl MappedFragmentOrientation {
-    #[inline] 
+    #[inline]
     pub fn is_unknown(&self) -> bool {
         matches!(*self, MappedFragmentOrientation::Unknown)
     }
@@ -850,14 +839,31 @@ impl MappedFragmentOrientation {
     // generalization of same for Strand
     #[inline]
     pub fn same(&self, s1: &Self) -> bool {
-        matches!((*self, *s1), 
-            (MappedFragmentOrientation::Forward, MappedFragmentOrientation::Forward) | 
-            (MappedFragmentOrientation::Reverse, MappedFragmentOrientation::Reverse) | 
-            (MappedFragmentOrientation::ForwardForward, MappedFragmentOrientation::ForwardForward) | 
-            (MappedFragmentOrientation::ReverseReverse, MappedFragmentOrientation::ReverseReverse) | 
-            (MappedFragmentOrientation::ForwardReverse, MappedFragmentOrientation::ForwardReverse) | 
-            (MappedFragmentOrientation::ReverseForward, MappedFragmentOrientation::ReverseForward) | 
-            (MappedFragmentOrientation::Unknown, MappedFragmentOrientation::Unknown))
+        matches!(
+            (*self, *s1),
+            (
+                MappedFragmentOrientation::Forward,
+                MappedFragmentOrientation::Forward
+            ) | (
+                MappedFragmentOrientation::Reverse,
+                MappedFragmentOrientation::Reverse
+            ) | (
+                MappedFragmentOrientation::ForwardForward,
+                MappedFragmentOrientation::ForwardForward
+            ) | (
+                MappedFragmentOrientation::ReverseReverse,
+                MappedFragmentOrientation::ReverseReverse
+            ) | (
+                MappedFragmentOrientation::ForwardReverse,
+                MappedFragmentOrientation::ForwardReverse
+            ) | (
+                MappedFragmentOrientation::ReverseForward,
+                MappedFragmentOrientation::ReverseForward
+            ) | (
+                MappedFragmentOrientation::Unknown,
+                MappedFragmentOrientation::Unknown
+            )
+        )
     }
 
     /// Given an encoding of the mapped fragment information (`n`) and
@@ -929,15 +935,15 @@ impl From<u8> for RadType {
     fn from(x: u8) -> Self {
         match x {
             0 => RadType::Bool,
-            U8ID   => RadType::Int(RadIntId::U8),
-            U16ID  => RadType::Int(RadIntId::U16),
-            U32ID  => RadType::Int(RadIntId::U32),
-            U64ID  => RadType::Int(RadIntId::U64),
+            U8ID => RadType::Int(RadIntId::U8),
+            U16ID => RadType::Int(RadIntId::U16),
+            U32ID => RadType::Int(RadIntId::U32),
+            U64ID => RadType::Int(RadIntId::U64),
             U128ID => RadType::Int(RadIntId::U128),
-            I8ID   => RadType::Int(RadIntId::I8),
-            I16ID  => RadType::Int(RadIntId::I16),
-            I32ID  => RadType::Int(RadIntId::I32),
-            I64ID  => RadType::Int(RadIntId::I64),
+            I8ID => RadType::Int(RadIntId::I8),
+            I16ID => RadType::Int(RadIntId::I16),
+            I32ID => RadType::Int(RadIntId::I32),
+            I64ID => RadType::Int(RadIntId::I64),
             I128ID => RadType::Int(RadIntId::I128),
             5 => RadType::Float(RadFloatId::F32),
             6 => RadType::Float(RadFloatId::F64),
@@ -1410,7 +1416,10 @@ impl TagDesc {
                         RadAtomicId::Int(RadIntId::U128) => {
                             TagValue::ArrayU128(u8_to_vec_of!(data, u128))
                         }
-                        RadAtomicId::Int(RadIntId::I8) => TagValue::ArrayI8(bytemuck::try_cast_vec::<u8, i8>(data).expect("should be valid to cast from Vec<u8> to Vec<i8>")),
+                        RadAtomicId::Int(RadIntId::I8) => TagValue::ArrayI8(
+                            bytemuck::try_cast_vec::<u8, i8>(data)
+                                .expect("should be valid to cast from Vec<u8> to Vec<i8>"),
+                        ),
                         RadAtomicId::Int(RadIntId::I16) => {
                             TagValue::ArrayI16(u8_to_vec_of!(data, i16))
                         }
@@ -1504,7 +1513,11 @@ pub struct TagViewMap<'a> {
 #[inline(always)]
 fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::Result<()> {
     let next_idx = dat.len();
-    anyhow::ensure!(next_idx < keys.len(), "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset", keys.len());
+    anyhow::ensure!(
+        next_idx < keys.len(),
+        "Attempted to add a TagVal {val:?} at index {next_idx}, but there are only {} keys in the keyset",
+        keys.len()
+    );
     anyhow::ensure!(
         keys[next_idx].matches_value_type(&val),
         "The TagValue that was attempted to be added {val:?} didn't match the next TagDesc {:?}",
@@ -1515,7 +1528,11 @@ fn try_add(dat: &mut Vec<TagValue>, keys: &[TagDesc], val: TagValue) -> anyhow::
 }
 
 #[inline(always)]
-pub fn get_tag_by_name<'a>(key: &str, dat: &'a [TagValue], keys: &[TagDesc]) -> Option<&'a TagValue> {
+pub fn get_tag_by_name<'a>(
+    key: &str,
+    dat: &'a [TagValue],
+    keys: &[TagDesc],
+) -> Option<&'a TagValue> {
     for (k, val) in keys.iter().zip(dat.iter()) {
         if k.name == key {
             return Some(val);
@@ -1656,7 +1673,12 @@ impl TagMap {
     /// variants and must be the next two consecutive values to be added to this map
     /// (i.e. the tags `"{name}.keys"` and `"{name}.values"` must occupy the next two
     /// available slots in the keyset).
-    pub fn insert_map_tags(&mut self, name: &str, keys: TagValue, vals: TagValue) -> anyhow::Result<()> {
+    pub fn insert_map_tags(
+        &mut self,
+        name: &str,
+        keys: TagValue,
+        vals: TagValue,
+    ) -> anyhow::Result<()> {
         let keys_tag_name = format!("{name}.keys");
         let vals_tag_name = format!("{name}.values");
 
@@ -1665,7 +1687,10 @@ impl TagMap {
             next_idx < self.keys.len() && self.keys[next_idx].name == keys_tag_name,
             "insert_map_tags: expected next tag to be '{}' but found '{}'",
             keys_tag_name,
-            self.keys.get(next_idx).map(|k| k.name.as_str()).unwrap_or("<none>")
+            self.keys
+                .get(next_idx)
+                .map(|k| k.name.as_str())
+                .unwrap_or("<none>")
         );
         self.try_add(keys)?;
 
@@ -1674,7 +1699,10 @@ impl TagMap {
             next_idx < self.keys.len() && self.keys[next_idx].name == vals_tag_name,
             "insert_map_tags: expected next tag to be '{}' but found '{}'",
             vals_tag_name,
-            self.keys.get(next_idx).map(|k| k.name.as_str()).unwrap_or("<none>")
+            self.keys
+                .get(next_idx)
+                .map(|k| k.name.as_str())
+                .unwrap_or("<none>")
         );
         self.try_add(vals)?;
 
@@ -1879,12 +1907,14 @@ mod tests {
             TagSection::from_bytes_with_label(&mut c, TagSectionLabel::FileTags).unwrap()
         };
         let read_map = section_keys_bytes
-            .parse_tags_from_bytes(&mut std::io::Cursor::new(&buf[{
-                // skip over the section schema bytes to reach tag values
-                let mut tmp = Vec::<u8>::new();
-                section.write(&mut tmp).unwrap();
-                tmp.len()
-            }..]))
+            .parse_tags_from_bytes(&mut std::io::Cursor::new(
+                &buf[{
+                    // skip over the section schema bytes to reach tag values
+                    let mut tmp = Vec::<u8>::new();
+                    section.write(&mut tmp).unwrap();
+                    tmp.len()
+                }..],
+            ))
             .unwrap();
         assert_eq!(read_map.get("bc_len"), Some(&TagValue::U16(16)));
         assert_eq!(
