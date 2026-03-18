@@ -373,7 +373,7 @@ mod tests {
         let mut cursor = Cursor::new(buf);
 
         // write the prelude
-        let _ = prelude
+        prelude
             .write(&mut cursor)
             .expect("cannot write prelude to buffer");
 
@@ -382,7 +382,7 @@ mod tests {
         let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
         file_tag_map.add(TagValue::U16(16));
         file_tag_map.add(TagValue::U16(12));
-        let _ = file_tag_map
+        file_tag_map
             .write_values(&mut cursor)
             .expect("cannot write file tag map");
 

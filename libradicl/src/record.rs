@@ -11,26 +11,25 @@
 //! traits for [MappedRecord]s and [RecordContext]s. It also defines concrete types
 //! implementing these traits for `alevin-fry` and `piscem-infer`.
 
+use crate::collation::BarcodeRole;
 use crate::io::{
-    NewI128, NewI16, NewI32, NewI64, NewI8, NewU128, NewU16, NewU32, NewU64, NewU8, TryWrapper,
+    NewI8, NewI16, NewI32, NewI64, NewI128, NewU8, NewU16, NewU32, NewU64, NewU128, TryWrapper,
 };
 use crate::{
     io as rad_io,
     rad_types::{
-        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType,
-        TagSection, TagValue,
+        MappedFragmentOrientation, MappingType, PrimitiveInteger, RadIntId, RadType, TagSection,
+        TagValue,
     },
-    utils
+    utils,
 };
-use crate::collation::BarcodeRole;
+use anyhow::{self, Context, bail};
+use bio_types::strand::{Same, Strand};
 use libradicl_macros::UmiTagged;
-use anyhow::{self, bail, Context};
-use bio_types::strand::{Strand, Same};
-use smallvec::SmallVec;
 use scroll::Pread;
+use smallvec::SmallVec;
 use std::io::{Read, Write};
 use std::mem;
-
 
 // Modified from https://stackoverflow.com/questions/69764050/how-to-get-the-indices-that-would-sort-a-vec
 // kmdreko
@@ -56,15 +55,15 @@ where
 /// Time: O(n), Space: O(n) for tracking visited indices.
 fn reorder_in_place<T>(data: &mut [T], indices: &[usize]) {
     let mut visited = vec![false; data.len()];
-    
+
     for start in 0..data.len() {
         if visited[start] {
             continue;
         }
-        
+
         let mut current = start;
         let mut next = indices[current];
-        
+
         while next != start {
             visited[current] = true;
             data.swap(current, next);
@@ -109,18 +108,21 @@ pub trait RecordHeader {
 }
 
 /// This trait specifies that a [RecordHeader] is collatable by some [B] which can be converted
-/// to a primitive integer.  For example, the header might be collatable by the barcode, and this 
-/// trait allows retriving that barcode / key as something convertible to an integer and also 
+/// to a primitive integer.  For example, the header might be collatable by the barcode, and this
+/// trait allows retriving that barcode / key as something convertible to an integer and also
 /// allows writing the header out to a stream.
-pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger> : RecordHeader {
+pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger>: RecordHeader {
     /// Retreives the key by which this record header (and the coresponding record) can be collated
     fn collate_key(&self) -> B;
     /// Writes the header to the provided `writer`.
-    fn write_fields<W: Write>(&self, writer: &mut W, _ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()>;
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        _ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<()>;
 }
 
 // === standard alevin-fry reads
-
 
 /// Header information for an [AlevinFryReadRecord].
 /// note this header can be re-used for the record with position information
@@ -131,17 +133,25 @@ pub struct AlevinFryReadRecordHeader<B: ConvertiblePrimitiveInteger> {
     /// barcode
     pub bc: B,
     /// umi
-    pub umi: u64
+    pub umi: u64,
 }
 
 impl<B: ConvertiblePrimitiveInteger> RecordHeader for AlevinFryReadRecordHeader<B> {
     type RecordType = AlevinFryReadRecordT<B>;
-    fn naln(&self) -> u32 { self.naln }
+    fn naln(&self) -> u32 {
+        self.naln
+    }
 }
 
 impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for AlevinFryReadRecordHeader<B> {
-    fn collate_key(&self) -> B { self.bc }
-    fn write_fields<W: Write>(&self, writer: &mut W, ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()> {
+    fn collate_key(&self) -> B {
+        self.bc
+    }
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<()> {
         let na: u32 = self.naln();
         RadIntId::U32
             .write_to(na, writer)
@@ -156,25 +166,33 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for AlevinFryRead
     }
 }
 
-// === long reads 
+// === long reads
 
 /// Header information for an [ScLongReadRecord]; technically this could
-/// be suared with a regular [AlevinFryReadRecord], but it's kept separate 
+/// be suared with a regular [AlevinFryReadRecord], but it's kept separate
 /// for now in case the record format changes.
 pub struct ScLongReadRecordHeader<B: ConvertiblePrimitiveInteger> {
     pub naln: u32,
     pub bc: B,
-    pub umi: u64
+    pub umi: u64,
 }
 
 impl<B: ConvertiblePrimitiveInteger> RecordHeader for ScLongReadRecordHeader<B> {
     type RecordType = ScLongReadRecordT<B>;
-    fn naln(&self) -> u32 { self.naln }
+    fn naln(&self) -> u32 {
+        self.naln
+    }
 }
 
 impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for ScLongReadRecordHeader<B> {
-    fn collate_key(&self) -> B { self.bc }
-    fn write_fields<W: Write>(&self, writer: &mut W, ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()> {
+    fn collate_key(&self) -> B {
+        self.bc
+    }
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<()> {
         let na: u32 = self.naln();
         RadIntId::U32
             .write_to(na, writer)
@@ -194,17 +212,25 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for ScLongReadRec
 /// Header information for an [AtacSeqReadRecord]
 pub struct AtacSeqReadRecordHeader {
     pub naln: u32,
-    pub bc: u64
+    pub bc: u64,
 }
 
 impl RecordHeader for AtacSeqReadRecordHeader {
     type RecordType = AtacSeqReadRecord;
-    fn naln(&self) -> u32 { self.naln }
+    fn naln(&self) -> u32 {
+        self.naln
+    }
 }
 
 impl CollatableRecordHeader<u64> for AtacSeqReadRecordHeader {
-    fn collate_key(&self) -> u64 { self.bc }
-    fn write_fields<W: Write>(&self, writer: &mut W, ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext) -> anyhow::Result<()> {
+    fn collate_key(&self) -> u64 {
+        self.bc
+    }
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<()> {
         let na: u32 = self.naln();
         RadIntId::U32
             .write_to(na, writer)
@@ -228,33 +254,35 @@ pub trait CollatableRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
 }
 */
 
-
 // ====== bulk
 
 /// Header for a bulk RNA-seq read record
 #[allow(unused)]
 struct PiscemBulkReadRecordHeader {
-    pub na: u32
+    pub na: u32,
 }
 impl RecordHeader for PiscemBulkReadRecordHeader {
     type RecordType = PiscemBulkReadRecord;
-    fn naln(&self) -> u32 { self.na }
+    fn naln(&self) -> u32 {
+        self.na
+    }
 }
 
-// ====== generic 
+// ====== generic
 
 /// Header for a generic record type, the only guaranteed field is
 /// the number of alignments
 #[allow(unused)]
 struct GenericReadRecordHeader {
-    pub na: u32
+    pub na: u32,
 }
 
 impl RecordHeader for GenericReadRecordHeader {
     type RecordType = GenericReadRecord;
-    fn naln(&self) -> u32 { self.na }
+    fn naln(&self) -> u32 {
+        self.na
+    }
 }
-
 
 /// A concrete struct representing a [MappedRecord]
 /// that is as generic as possible. Here, the tags should
@@ -272,15 +300,37 @@ pub struct GenericReadRecord {
 }
 
 impl GenericReadRecord {
-    pub fn fmt_with_context(&self, ctx: &GenericReadRecordContext, f: &mut impl Write) -> std::io::Result<()> {
-        f.write_all(format!("GenericReadRecord{{ naln: {}, naln_tags: {},\nrtags: {},\natags:  {} }}\n", 
-                self.naln, 
+    pub fn fmt_with_context(
+        &self,
+        ctx: &GenericReadRecordContext,
+        f: &mut impl Write,
+    ) -> std::io::Result<()> {
+        f.write_all(
+            format!(
+                "GenericReadRecord{{ naln: {}, naln_tags: {},\nrtags: {},\natags:  {} }}\n",
+                self.naln,
                 self.naln_tags,
-                ctx.read_tags.iter_desc().zip(self.rtags.iter()).map( |(td, tv)| format!("{} : [{:?}]", td.name, tv)).collect::<Vec<_>>().join(", "),
-                self.atags.chunks_exact(self.naln_tags as usize).map( |vchunk| {
-                    ctx.aln_tags.iter_desc().zip(vchunk.iter()).map( |(td, tv)| format!("{} : [{:?}]", td.name, tv)).collect::<Vec<_>>().join(", ")
-                }).collect::<Vec<_>>().join("\n\t")
-        ).as_bytes())
+                ctx.read_tags
+                    .iter_desc()
+                    .zip(self.rtags.iter())
+                    .map(|(td, tv)| format!("{} : [{:?}]", td.name, tv))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.atags
+                    .chunks_exact(self.naln_tags as usize)
+                    .map(|vchunk| {
+                        ctx.aln_tags
+                            .iter_desc()
+                            .zip(vchunk.iter())
+                            .map(|(td, tv)| format!("{} : [{:?}]", td.name, tv))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\t")
+            )
+            .as_bytes(),
+        )
     }
 }
 
@@ -291,16 +341,19 @@ pub struct GenericReadRecordContext {
     pub aln_tags: TagSection,
 }
 
-
-// ### Known size trait 
+// ### Known size trait
 
 pub trait KnownSize {
-    // returns the number of bytes taken for a record of the given type 
+    // returns the number of bytes taken for a record of the given type
     // with na alignments
-    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize where Self : MappedRecord;
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize
+    where
+        Self: MappedRecord;
 
     /// number of bytes for an individual alignment record
-    fn nbytes_aln(ctx: &<Self as MappedRecord>::ParsingContext) -> usize where Self : MappedRecord;
+    fn nbytes_aln(ctx: &<Self as MappedRecord>::ParsingContext) -> usize
+    where
+        Self: MappedRecord;
 }
 
 impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
@@ -316,11 +369,10 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordT<B> {
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
-        // ori_ref 
+        // ori_ref
         std::mem::size_of::<u32>()
     }
 }
-
 
 impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordWithPositionT<B> {
     fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
@@ -335,7 +387,7 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for AlevinFryReadRecordWithPositi
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
-        // ori_ref 
+        // ori_ref
         std::mem::size_of::<u32>()
         // position
         + std::mem::size_of::<u32>()
@@ -353,7 +405,7 @@ impl KnownSize for PiscemBulkReadRecord {
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
-        // (mapped_fragment_orientation + reference): u32, 
+        // (mapped_fragment_orientation + reference): u32,
         // position: u32
         // frag length: u16
         std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>()
@@ -373,18 +425,17 @@ impl<B: ConvertiblePrimitiveInteger> KnownSize for ScLongReadRecordT<B> {
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
-        // (ori_refernce): u32, 
-        std::mem::size_of::<u32>() 
-        // read_start : u32, 
-        + std::mem::size_of::<u32>() 
-        // read_end: u32, 
-        + std::mem::size_of::<u32>() 
-        // alignment_score: i32, 
-        + std::mem::size_of::<i32>() 
+        // (ori_refernce): u32,
+        std::mem::size_of::<u32>()
+        // read_start : u32,
+        + std::mem::size_of::<u32>()
+        // read_end: u32,
+        + std::mem::size_of::<u32>()
+        // alignment_score: i32,
+        + std::mem::size_of::<i32>()
         // tlen: u32 (NOTE: this should be moved to a file-level tag)
-        + std::mem::size_of::<u32>() 
+        + std::mem::size_of::<u32>()
     }
-
 }
 
 impl KnownSize for AtacSeqReadRecord {
@@ -398,11 +449,14 @@ impl KnownSize for AtacSeqReadRecord {
     }
 
     fn nbytes_aln(_ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
-        // start_pos: u32, 
-        // ref: u32, 
-        // frag_len: u16, 
-        // map_type: u8, 
-        std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + std::mem::size_of::<u16>() + std::mem::size_of::<u8>()
+        // start_pos: u32,
+        // ref: u32,
+        // frag_len: u16,
+        // map_type: u8,
+        std::mem::size_of::<u32>()
+            + std::mem::size_of::<u32>()
+            + std::mem::size_of::<u16>()
+            + std::mem::size_of::<u8>()
     }
 }
 
@@ -479,33 +533,40 @@ pub struct AtacSeqReadRecord {
     pub map_type: Vec<u8>,
 }
 
-pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger> : MappedRecord where
+pub trait CollatableMappedRecord<B: ConvertiblePrimitiveInteger>: MappedRecord
+where
     // to help the trait solver
     <Self as CollatableMappedRecord<B>>::CollatableRecordHeader: RecordHeader,
-    <<Self as CollatableMappedRecord<B>>::CollatableRecordHeader as RecordHeader>::RecordType: MappedRecord<ParsingContext = Self::ParsingContext> {
-
+    <<Self as CollatableMappedRecord<B>>::CollatableRecordHeader as RecordHeader>::RecordType:
+        MappedRecord<ParsingContext = Self::ParsingContext>,
+{
     type CollatableRecordHeader: CollatableRecordHeader<B>;
-    /// Given a [RecordHeader] for this record (which has already been read and parsed), read 
-    /// a set of alignments for the record while retaining only those matching the prescribed 
+    /// Given a [RecordHeader] for this record (which has already been read and parsed), read
+    /// a set of alignments for the record while retaining only those matching the prescribed
     /// oreientation
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self;
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        ctx: &<Self as MappedRecord>::ParsingContext,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> Self;
 
     /// set the key by which this record should be collated
     fn set_collate_key(&mut self, k: B);
-    
+
     /// get the key by which this record should be collated (e.g. call barcode)
     fn collate_key(&self) -> B;
 
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader>;
 
     fn peek_collatable_header(
         reader: &[u8],
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader>;
-
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader>;
 }
-
 
 /// This trait represents a mapped read record that should be stored
 /// in the [crate::chunk::Chunk] of a RAD file.  The [crate::chunk::Chunk] type is parameterized on
@@ -541,15 +602,15 @@ pub trait MappedRecord {
     /// The number of alignments for this mapped record
     fn num_aln(&self) -> usize;
 
-    /// return a reference to the targets to which this 
+    /// return a reference to the targets to which this
     /// record aligns.
     fn refs(&self) -> &[u32];
 
     /// Returns true if this record has any alignment records occuring on the provided
     /// strand.
-    /// NOTE: 
+    /// NOTE:
     ///   - all alignments are compatible with an unknown strand
-    ///   - for paired-end mappings, this function looks for cases where read 1 matches the 
+    ///   - for paired-end mappings, this function looks for cases where read 1 matches the
     ///     provided strand
     fn has_alignment_on_strand(&self, s: Strand) -> bool;
 }
@@ -588,7 +649,7 @@ impl RecordContext for GenericReadRecordContext {
 
 /// context needed to read an alevin-fry record
 /// (the types of the barcode and umi)
-/// NOTE: This context is shared between the basic and positionally aware 
+/// NOTE: This context is shared between the basic and positionally aware
 /// AlevinFryReadRecord types
 #[derive(Debug, Clone)]
 pub struct AlevinFryRecordContext {
@@ -645,7 +706,9 @@ impl RecordContext for PiscemBulkRecordContext {
         if let RadType::Int(x) = frag_map_t {
             Ok(Self { frag_map_t: x })
         } else {
-            bail!("piscem bulk record context requries that \"frag_map_type\" tag is of type RadType::Int");
+            bail!(
+                "piscem bulk record context requries that \"frag_map_type\" tag is of type RadType::Int"
+            );
         }
     }
 }
@@ -654,34 +717,42 @@ impl MappedRecord for PiscemBulkReadRecord {
     type ParsingContext = PiscemBulkRecordContext;
     type PeekResult = Option<u64>;
 
-    fn is_empty(&self) -> bool { 
+    fn is_empty(&self) -> bool {
         self.refs.is_empty()
     }
 
     fn num_aln(&self) -> usize {
         self.refs.len()
     }
-    
+
     fn refs(&self) -> &[u32] {
         &self.refs
     }
- 
+
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
-       match s {
+        match s {
             Strand::Unknown => !self.refs.is_empty(),
-            Strand::Forward => {
-                self.dirs.iter().any(|&x| 
-                    matches!(x, MappedFragmentOrientation::Forward | MappedFragmentOrientation::ForwardReverse | MappedFragmentOrientation::ForwardForward | MappedFragmentOrientation::Unknown )
+            Strand::Forward => self.dirs.iter().any(|&x| {
+                matches!(
+                    x,
+                    MappedFragmentOrientation::Forward
+                        | MappedFragmentOrientation::ForwardReverse
+                        | MappedFragmentOrientation::ForwardForward
+                        | MappedFragmentOrientation::Unknown
                 )
-            },
-            Strand::Reverse => {
-                self.dirs.iter().any(|&x| 
-                    matches!(x, MappedFragmentOrientation::Reverse | MappedFragmentOrientation::ReverseForward | MappedFragmentOrientation::ReverseReverse | MappedFragmentOrientation::Unknown )
+            }),
+            Strand::Reverse => self.dirs.iter().any(|&x| {
+                matches!(
+                    x,
+                    MappedFragmentOrientation::Reverse
+                        | MappedFragmentOrientation::ReverseForward
+                        | MappedFragmentOrientation::ReverseReverse
+                        | MappedFragmentOrientation::Unknown
                 )
-            }
-        } 
+            }),
+        }
     }
-    
+
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
         const MASK_LOWER_30_BITS: u32 = 0xC0000000;
@@ -724,7 +795,9 @@ impl MappedRecord for PiscemBulkReadRecord {
 
     #[inline]
     fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
-        unimplemented!("Currently there is no implementation for peek_record for PiscemBulkReadRecord. This should not be needed");
+        unimplemented!(
+            "Currently there is no implementation for peek_record for PiscemBulkReadRecord. This should not be needed"
+        );
     }
 
     #[inline]
@@ -762,37 +835,50 @@ impl MappedRecord for PiscemBulkReadRecord {
     }
 }
 
-impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
+impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordT<B> {
     type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
-        let rec = AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into());
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        _ctx: &<Self as MappedRecord>::ParsingContext,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
+        let rec = AlevinFryReadRecordT::<B>::from_bytes_with_header_keep_ori(
+            reader,
+            hdr.bc,
+            hdr.umi,
+            hdr.naln,
+            expected_ori.into(),
+        );
         hdr.naln = rec.refs.len() as u32;
         rec
     }
 
-    fn set_collate_key(&mut self, k: B) { self.bc = k; }
-    fn collate_key(&self) -> B { self.bc }
+    fn set_collate_key(&mut self, k: B) {
+        self.bc = k;
+    }
+    fn collate_key(&self) -> B {
+        self.bc
+    }
 
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into::<T, B>(reader, &context.bct);
         // NOTE: We likely will want to make the UMI generic as well
         let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc, umi })
     }
 
     fn peek_collatable_header(
         buf: &[u8],
-        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let na_size = mem::size_of::<u32>();
         let bc_size = ctx.bct.bytes_for_type();
 
@@ -814,45 +900,56 @@ impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadR
             RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
             _ => panic!("signed umi integer encodings are not supported"),
         };
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc, umi })
     }
 }
 
-impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadRecordWithPositionT<B> {
+impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B>
+    for AlevinFryReadRecordWithPositionT<B>
+{
     type CollatableRecordHeader = AlevinFryReadRecordHeader<B>;
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
-        let rec = AlevinFryReadRecordWithPositionT::<B>::from_bytes_with_header_keep_ori(reader, hdr.bc, hdr.umi, hdr.naln, expected_ori.into());
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        _ctx: &<Self as MappedRecord>::ParsingContext,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
+        let rec = AlevinFryReadRecordWithPositionT::<B>::from_bytes_with_header_keep_ori(
+            reader,
+            hdr.bc,
+            hdr.umi,
+            hdr.naln,
+            expected_ori.into(),
+        );
         hdr.naln = rec.refs.len() as u32;
         rec
     }
 
-    fn set_collate_key(&mut self, k: B) { self.bc = k; }
-    fn collate_key(&self) -> B { self.bc }
+    fn set_collate_key(&mut self, k: B) {
+        self.bc = k;
+    }
+    fn collate_key(&self) -> B {
+        self.bc
+    }
 
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into::<T, B>(reader, &context.bct);
         // NOTE: We likely will want to make the UMI generic as well
         let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc, umi })
     }
 
     fn peek_collatable_header(
         buf: &[u8],
-        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let na_size = mem::size_of::<u32>();
         let bc_size = ctx.bct.bytes_for_type();
 
@@ -874,14 +971,9 @@ impl<B:ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for AlevinFryReadR
             RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
             _ => panic!("signed umi integer encodings are not supported"),
         };
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc, umi })
     }
 }
-
 
 impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     type ParsingContext = AlevinFryRecordContext;
@@ -902,17 +994,12 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
     }
 
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
-       match s {
+        match s {
             Strand::Unknown => !self.refs.is_empty(),
-            Strand::Forward => {
-                self.dirs.iter().any(|&x| x)
-            },
-            Strand::Reverse => {
-                self.dirs.iter().any(|&x| !x)
-            }
-        } 
+            Strand::Forward => self.dirs.iter().any(|&x| x),
+            Strand::Reverse => self.dirs.iter().any(|&x| !x),
+        }
     }
-
 
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -939,7 +1026,6 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
         };
         (bc, umi)
     }
-
 
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
@@ -979,7 +1065,9 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordT<B> {
 
         // if we don't have orientations (because of filtering) then just pretend they are false
         let dir_iter = self.dirs.iter();
-        for (dir, ref_idx) in itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs) {
+        for (dir, ref_idx) in
+            itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs)
+        {
             let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
             let encoded_dir_ref: u32 = ref_idx | encoded_dir;
             writer
@@ -1009,17 +1097,12 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordWithPos
     }
 
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
-       match s {
+        match s {
             Strand::Unknown => !self.refs.is_empty(),
-            Strand::Forward => {
-                self.dirs.iter().any(|&x| x)
-            },
-            Strand::Reverse => {
-                self.dirs.iter().any(|&x| !x)
-            }
-        } 
+            Strand::Forward => self.dirs.iter().any(|&x| x),
+            Strand::Reverse => self.dirs.iter().any(|&x| !x),
+        }
     }
-
 
     #[inline]
     fn peek_record(buf: &[u8], ctx: &Self::ParsingContext) -> Self::PeekResult {
@@ -1046,7 +1129,6 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordWithPos
         };
         (bc, umi)
     }
-
 
     #[inline]
     fn from_bytes_with_context<T: Read>(reader: &mut T, ctx: &Self::ParsingContext) -> Self {
@@ -1089,7 +1171,11 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordWithPos
 
         // if we don't have orientations (because of filtering) then just pretend they are false
         let dir_iter = self.dirs.iter();
-        for (dir, ref_idx, pos) in itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs, &self.pos) {
+        for (dir, ref_idx, pos) in itertools::izip!(
+            dir_iter.chain(std::iter::repeat(&false)),
+            &self.refs,
+            &self.pos
+        ) {
             let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
             let encoded_dir_ref: u32 = ref_idx | encoded_dir;
             writer
@@ -1118,7 +1204,7 @@ impl MappedRecord for GenericReadRecord {
     fn has_alignment_on_strand(&self, _s: Strand) -> bool {
         unimplemented!("no implementation of has_alignment_on_strand for GenericReadRecord")
     }
- 
+
     fn refs(&self) -> &[u32] {
         unimplemented!("no implementation of refs() for GenericReadRecord yet")
     }
@@ -1191,10 +1277,11 @@ impl MappedRecord for GenericReadRecord {
     }
     */
 
-
     #[inline]
     fn peek_record(_buf: &[u8], _ctx: &Self::ParsingContext) -> Self::PeekResult {
-        unimplemented!("Currently there is no implementation for peek_record for GenericRecord. This should not be needed");
+        unimplemented!(
+            "Currently there is no implementation for peek_record for GenericRecord. This should not be needed"
+        );
     }
 
     #[inline]
@@ -1289,33 +1376,31 @@ pub trait ConvertiblePrimitiveInteger:
 }
 
 impl<
-        T: PrimitiveInteger
-            + std::convert::From<NewU8>
-            + std::convert::From<NewU16>
-            + std::convert::From<NewU32>
-            + std::convert::From<NewU64>
-            + std::convert::From<NewU128>
-            + std::convert::TryFrom<TryWrapper<NewU8>>
-            + std::convert::TryFrom<TryWrapper<NewU16>>
-            + std::convert::TryFrom<TryWrapper<NewU32>>
-            + std::convert::TryFrom<TryWrapper<NewU64>>
-            + std::convert::TryFrom<TryWrapper<NewU128>>
-            + std::convert::From<NewI8>
-            + std::convert::From<NewI16>
-            + std::convert::From<NewI32>
-            + std::convert::From<NewI64>
-            + std::convert::From<NewI128>
-            + std::convert::TryFrom<TryWrapper<NewI8>>
-            + std::convert::TryFrom<TryWrapper<NewI16>>
-            + std::convert::TryFrom<TryWrapper<NewI32>>
-            + std::convert::TryFrom<TryWrapper<NewI64>>
-            + std::convert::TryFrom<TryWrapper<NewI128>>
-            + std::convert::TryFrom<TryWrapper<NewI128>>,
-    > ConvertiblePrimitiveInteger for T
+    T: PrimitiveInteger
+        + std::convert::From<NewU8>
+        + std::convert::From<NewU16>
+        + std::convert::From<NewU32>
+        + std::convert::From<NewU64>
+        + std::convert::From<NewU128>
+        + std::convert::TryFrom<TryWrapper<NewU8>>
+        + std::convert::TryFrom<TryWrapper<NewU16>>
+        + std::convert::TryFrom<TryWrapper<NewU32>>
+        + std::convert::TryFrom<TryWrapper<NewU64>>
+        + std::convert::TryFrom<TryWrapper<NewU128>>
+        + std::convert::From<NewI8>
+        + std::convert::From<NewI16>
+        + std::convert::From<NewI32>
+        + std::convert::From<NewI64>
+        + std::convert::From<NewI128>
+        + std::convert::TryFrom<TryWrapper<NewI8>>
+        + std::convert::TryFrom<TryWrapper<NewI16>>
+        + std::convert::TryFrom<TryWrapper<NewI32>>
+        + std::convert::TryFrom<TryWrapper<NewI64>>
+        + std::convert::TryFrom<TryWrapper<NewI128>>
+        + std::convert::TryFrom<TryWrapper<NewI128>>,
+> ConvertiblePrimitiveInteger for T
 {
 }
-
-
 
 impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordT<B> {
     /// Obtains the next [AlevinFryReadRecord] in the stream from the reader `reader`.
@@ -1534,7 +1619,6 @@ impl<B: ConvertiblePrimitiveInteger> AlevinFryReadRecordWithPositionT<B> {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct AtacSeqRecordContext {
     pub bct: RadIntId,
@@ -1572,20 +1656,19 @@ impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
     type CollatableRecordHeader = AtacSeqReadRecordHeader;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into_u64(reader, &context.bct);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc })
     }
 
     fn peek_collatable_header(
         buf: &[u8],
-        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let na_size = mem::size_of::<u32>();
 
         let na = buf.pread::<u32>(0).unwrap();
@@ -1598,19 +1681,23 @@ impl CollatableMappedRecord<u64> for AtacSeqReadRecord {
             RadIntId::U128 => NewU128(buf.pread::<u128>(na_size).unwrap()).into(),
             _ => panic!("signed barcode integer encodings are not supported"),
         };
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc })
     }
 
     fn set_collate_key(&mut self, k: u64) {
         self.bc = k;
     }
-    fn collate_key(&self) -> u64 { self.bc }
+    fn collate_key(&self) -> u64 {
+        self.bc
+    }
 
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, _expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        _ctx: &<Self as MappedRecord>::ParsingContext,
+        _expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
         // NOTE: No orientation recorded for ATACSeq records, so everything is retained
         let mut rbuf = [0u8; 255];
         let na = hdr.naln;
@@ -1657,14 +1744,16 @@ impl MappedRecord for AtacSeqReadRecord {
         self.refs.is_empty()
     }
 
-    fn num_aln(&self) -> usize { self.refs.len() }
+    fn num_aln(&self) -> usize {
+        self.refs.len()
+    }
 
     fn has_alignment_on_strand(&self, _s: Strand) -> bool {
-        // we don't record the orientation, so right now 
+        // we don't record the orientation, so right now
         // treat everything as compatible
         !self.refs.is_empty()
     }
- 
+
     fn refs(&self) -> &[u32] {
         &self.refs
     }
@@ -1780,10 +1869,7 @@ impl MappedRecord for AtacSeqReadRecord {
     }
 }
 
-
-
 impl AtacSeqReadRecord {
-
     /// Obtains the next [AtacSeqReadRecord] in the stream from the reader `reader`.
     /// The barcode should be encoded with the [RadIntId] type `bct` and
     pub fn from_bytes<T: Read>(reader: &mut T, bct: &RadIntId) -> Self {
@@ -1906,23 +1992,21 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
     type CollatableRecordHeader = ScLongReadRecordHeader<B>;
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
-        context: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let mut rbuf = [0u8; 4];
         reader.read_exact(&mut rbuf).unwrap();
         let na = u32::from_le_bytes(rbuf);
         let bc = rad_io::read_into::<T, B>(reader, &context.bct);
         // NOTE: We likely will want to make the UMI generic as well
         let umi = rad_io::read_into_u64(reader, &context.umit);
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc, umi })
     }
 
     fn peek_collatable_header(
         buf: &[u8],
-        ctx: &<Self as MappedRecord>::ParsingContext) -> anyhow::Result<Self::CollatableRecordHeader> {
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
         let na_size = mem::size_of::<u32>();
         let bc_size = ctx.bct.bytes_for_type();
 
@@ -1944,21 +2028,23 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
             RadIntId::U128 => panic!("u128 is currently not supported as a umi type"),
             _ => panic!("signed umi integer encodings are not supported"),
         };
-        Ok(Self::CollatableRecordHeader {
-            naln: na,
-            bc,
-            umi
-        })
+        Ok(Self::CollatableRecordHeader { naln: na, bc, umi })
     }
 
     fn set_collate_key(&mut self, k: B) {
         self.bc = k;
     }
-    fn collate_key(&self) -> B { self.bc }
-
+    fn collate_key(&self) -> B {
+        self.bc
+    }
 
     #[inline]
-    fn from_bytes_with_header_retain_ori<T: Read>(reader: &mut T, hdr: &mut Self::CollatableRecordHeader, _ctx: &<Self as MappedRecord>::ParsingContext, expected_ori: &MappedFragmentOrientation) -> Self {
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        _ctx: &<Self as MappedRecord>::ParsingContext,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
         let na = hdr.naln;
         let bc = hdr.bc;
         let umi = hdr.umi;
@@ -2003,7 +2089,8 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
                 Strand::Forward
             } else {
                 Strand::Reverse
-            }.into();
+            }
+            .into();
 
             if expected_ori.same(&strand) || expected_ori.is_unknown() {
                 rec.dirs.push(dir);
@@ -2012,10 +2099,10 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for ScLongReadRec
                 rec.starts.push(start);
                 rec.ends.push(end);
                 rec.tlens.push(tlen);
-            } 
+            }
         }
         hdr.naln = rec.refs.len() as u32;
-        // sort all fields by ref 
+        // sort all fields by ref
         let indices = argsort(&rec.refs);
         reorder_in_place(&mut rec.dirs, &indices);
         reorder_in_place(&mut rec.refs, &indices);
@@ -2036,7 +2123,7 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
     fn is_empty(&self) -> bool {
         self.refs.is_empty()
     }
-   
+
     fn num_aln(&self) -> usize {
         self.refs.len()
     }
@@ -2046,15 +2133,11 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
     }
 
     fn has_alignment_on_strand(&self, s: Strand) -> bool {
-       match s {
+        match s {
             Strand::Unknown => !self.refs.is_empty(),
-            Strand::Forward => {
-                self.dirs.iter().any(|&x| x)
-            },
-            Strand::Reverse => {
-                self.dirs.iter().any(|&x| !x)
-            }
-        } 
+            Strand::Forward => self.dirs.iter().any(|&x| x),
+            Strand::Reverse => self.dirs.iter().any(|&x| !x),
+        }
     }
 
     #[inline]
@@ -2174,9 +2257,6 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for ScLongReadRecordT<B> {
     }
 }
 
-
-
-
 impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
     /// Obtains the next [ScLongReadRecord] in the stream from the reader `reader`.
     /// The barcode should be encoded with the [RadIntId] type `bct` and
@@ -2201,9 +2281,7 @@ impl<B: ConvertiblePrimitiveInteger> ScLongReadRecordT<B> {
     }
 
     pub fn from_bytes_with_header<T: Read>(_reader: &mut T, _bc: u64, _umi: u64, _na: u32) -> Self {
-        unimplemented!(
-            "from_bytes_with_header is not implemented for ScLongReadRecordT"
-        );
+        unimplemented!("from_bytes_with_header is not implemented for ScLongReadRecordT");
     }
 }
 
@@ -2271,7 +2349,9 @@ impl RecordContext for MultiBarcodeRecordContext {
                 count += 1;
             }
             if count == 0 {
-                bail!("multi-barcode record context: num_barcodes file tag present but no bN read-level tags found");
+                bail!(
+                    "multi-barcode record context: num_barcodes file tag present but no bN read-level tags found"
+                );
             }
             count
         } else {
@@ -2281,12 +2361,19 @@ impl RecordContext for MultiBarcodeRecordContext {
         let mut bc_types = SmallVec::new();
         for i in 0..num_barcodes {
             let tag_name = format!("b{}", i);
-            let bct = rt.get_tag_type(&tag_name)
-                .ok_or_else(|| anyhow::anyhow!("multi-barcode record context requires a '{}' read-level tag", tag_name))?;
+            let bct = rt.get_tag_type(&tag_name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "multi-barcode record context requires a '{}' read-level tag",
+                    tag_name
+                )
+            })?;
             if let RadType::Int(x) = bct {
                 bc_types.push(x);
             } else {
-                bail!("multi-barcode record context requires that '{}' tag is of type RadType::Int", tag_name);
+                bail!(
+                    "multi-barcode record context requires that '{}' tag is of type RadType::Int",
+                    tag_name
+                );
             }
         }
 
@@ -2317,7 +2404,11 @@ impl MultiBarcodeRecordContext {
         umit: RadIntId,
         roles: SmallVec<[BarcodeRole; MAX_INLINE_BARCODES]>,
     ) -> Self {
-        Self { bc_types, umit, roles }
+        Self {
+            bc_types,
+            umit,
+            roles,
+        }
     }
 
     /// Number of barcode levels in this context.
@@ -2368,7 +2459,10 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for MultiBarcodeR
     /// Returns the innermost (last) barcode as the collation key,
     /// which is typically the cell barcode.
     fn collate_key(&self) -> B {
-        *self.barcodes.last().expect("multi-barcode header must have at least one barcode")
+        *self
+            .barcodes
+            .last()
+            .expect("multi-barcode header must have at least one barcode")
     }
 
     fn write_fields<W: Write>(
@@ -2520,7 +2614,9 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for MultiBarcodeReadRecordT<B>
 
         // Write alignment records
         let dir_iter = self.dirs.iter();
-        for (dir, ref_idx) in itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs) {
+        for (dir, ref_idx) in
+            itertools::izip!(dir_iter.chain(std::iter::repeat(&false)), &self.refs)
+        {
             let encoded_dir: u32 = if *dir { 1_u32 << 31 } else { 0_u32 };
             let encoded_dir_ref: u32 = ref_idx | encoded_dir;
             writer
@@ -2560,7 +2656,10 @@ impl<B: ConvertiblePrimitiveInteger> CollatableMappedRecord<B> for MultiBarcodeR
     }
 
     fn collate_key(&self) -> B {
-        *self.barcodes.last().expect("multi-barcode record must have at least one barcode")
+        *self
+            .barcodes
+            .last()
+            .expect("multi-barcode record must have at least one barcode")
     }
 
     fn from_bytes_collatable_header<T: Read>(
@@ -2769,9 +2868,9 @@ mod tests {
 
     #[test]
     fn can_write_multi_barcode_record() {
-        use crate::record::{MultiBarcodeReadRecord, MultiBarcodeRecordContext, MAX_INLINE_BARCODES};
         use crate::collation::BarcodeRole;
-        use smallvec::{smallvec, SmallVec};
+        use crate::record::{MultiBarcodeReadRecord, MultiBarcodeRecordContext};
+        use smallvec::smallvec;
 
         let rec = MultiBarcodeReadRecord {
             barcodes: smallvec![42_u64, 12345_u64],
@@ -2787,7 +2886,8 @@ mod tests {
         };
 
         let mut buf: Vec<u8> = Vec::new();
-        rec.write(&mut buf, &ctx).expect("couldn't write multi-barcode record");
+        rec.write(&mut buf, &ctx)
+            .expect("couldn't write multi-barcode record");
 
         let mut cursor = Cursor::new(buf);
         let new_rec = MultiBarcodeReadRecord::from_bytes_with_context(&mut cursor, &ctx);
@@ -2797,7 +2897,9 @@ mod tests {
 
     #[test]
     fn multi_barcode_collation_key_is_last_barcode() {
-        use crate::record::{MultiBarcodeReadRecord, CollatableMappedRecord, HierarchicallyCollatable};
+        use crate::record::{
+            CollatableMappedRecord, HierarchicallyCollatable, MultiBarcodeReadRecord,
+        };
         use smallvec::smallvec;
 
         let rec = MultiBarcodeReadRecord {

@@ -1,5 +1,4 @@
 use anyhow::{self, Context};
-use libradicl;
 use libradicl::chunk::Chunk;
 use libradicl::record::{PiscemBulkReadRecord, PiscemBulkRecordContext};
 use std::io::BufReader;

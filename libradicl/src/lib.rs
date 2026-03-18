@@ -31,11 +31,14 @@
 
 use crate as libradicl;
 
-use self::libradicl::rad_types::{RadIntId, MappedFragmentOrientation};
+use self::libradicl::rad_types::{MappedFragmentOrientation, RadIntId};
 use self::libradicl::record::AlevinFryReadRecord;
 use self::libradicl::record::AtacSeqReadRecord;
-use self::libradicl::record::{MappedRecord, KnownSize, CollatableMappedRecord, ConvertiblePrimitiveInteger, RecordHeader, CollatableRecordHeader};
-use self::libradicl::schema::{TempCellInfo,CollateKey};
+use self::libradicl::record::{
+    CollatableMappedRecord, CollatableRecordHeader, ConvertiblePrimitiveInteger, KnownSize,
+    MappedRecord, RecordHeader,
+};
+use self::libradicl::schema::{CollateKey, TempCellInfo};
 #[allow(unused_imports)]
 use ahash::{AHasher, RandomState};
 use bio_types::strand::*;
@@ -53,7 +56,6 @@ use std::vec::Vec;
 pub mod chunk;
 pub mod collation;
 pub mod constants;
-pub mod unmapped;
 pub mod exit_codes;
 pub mod header;
 pub mod io;
@@ -61,10 +63,11 @@ pub mod rad_types;
 pub mod readers;
 pub mod record;
 pub mod schema;
+pub mod unmapped;
 pub mod utils;
 pub mod writers;
-pub use libradicl_macros::UmiTagged;
 pub use chunk::ChunkBuf;
+pub use libradicl_macros::UmiTagged;
 pub use writers::{ConcurrentChunkWriter, RadFileWriter};
 
 #[macro_use]
@@ -298,14 +301,22 @@ pub fn dump_chunk(v: &mut CorrectedCbChunk, owriter: &Mutex<BufWriter<File>>) {
 /// memory exactly as they will reside on disk.  If `compress` is true
 /// the collated chunk will be compressed, and then the result will be
 /// written to the output guarded by `owriter`.
-pub fn collate_temporary_bucket_twopass_generic<B: ConvertiblePrimitiveInteger, T: Read + Seek, U: Write, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
+pub fn collate_temporary_bucket_twopass_generic<
+    B: ConvertiblePrimitiveInteger,
+    T: Read + Seek,
+    U: Write,
+    R: MappedRecord + KnownSize + CollatableMappedRecord<B>,
+>(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
     nrec: u32,
     owriter: &Mutex<U>,
     compress: bool,
     cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
-) -> usize where u64: From<B> {
+) -> usize
+where
+    u64: From<B>,
+{
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
     let chunk_header_size = 2 * std::mem::size_of::<u32>() as u64;
@@ -318,14 +329,18 @@ pub fn collate_temporary_bucket_twopass_generic<B: ConvertiblePrimitiveInteger, 
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
+        let tup =
+            <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context)
+                .expect("can read header");
 
         // get the entry for this chunk, or create a new one
-        let v = cb_byte_map.entry(tup.collate_key().into()).or_insert(TempCellInfo {
-            offset: chunk_header_size,
-            nbytes: chunk_header_size as u32,
-            nrec: 0_u32,
-        });
+        let v = cb_byte_map
+            .entry(tup.collate_key().into())
+            .or_insert(TempCellInfo {
+                offset: chunk_header_size,
+                nbytes: chunk_header_size as u32,
+                nrec: 0_u32,
+            });
 
         // read the alignment records from the input file
         let na = tup.naln() as usize;
@@ -379,7 +394,9 @@ pub fn collate_temporary_bucket_twopass_generic<B: ConvertiblePrimitiveInteger, 
         // read the header of the record
         // we don't bother reading the whole thing here
         // because we will just copy later as need be
-        let tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("can read header");
+        let tup =
+            <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context)
+                .expect("can read header");
 
         // get the entry for this chunk, or create a new one
         if let Some(v) = cb_byte_map.get_mut(&tup.collate_key().into()) {
@@ -387,11 +404,14 @@ pub fn collate_temporary_bucket_twopass_generic<B: ConvertiblePrimitiveInteger, 
 
             let na = tup.naln() as usize;
             // write the header
-            tup.write_fields(&mut output_buffer, rec_context).expect("could write header");
+            tup.write_fields(&mut output_buffer, rec_context)
+                .expect("could write header");
 
             let bytes_for_aln_rec = R::nbytes_aln(rec_context);
             // copy over the alignment records
-            reader.read_exact(&mut tbuf[0..(bytes_for_aln_rec * na)]).unwrap();
+            reader
+                .read_exact(&mut tbuf[0..(bytes_for_aln_rec * na)])
+                .unwrap();
             output_buffer
                 .write_all(&tbuf[..(bytes_for_aln_rec * na)])
                 .unwrap();
@@ -854,7 +874,11 @@ impl TempBucket {
 /// reaches `flush_limit`, flush the buffer by writing
 /// it to the `output_cache`.
 #[allow(clippy::too_many_arguments)]
-pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteger + std::convert::From<u64>, T: Read, R: MappedRecord + KnownSize + CollatableMappedRecord<B>>(
+pub fn dump_corrected_cb_chunk_to_temp_file_generic<
+    B: ConvertiblePrimitiveInteger + std::convert::From<u64>,
+    T: Read,
+    R: MappedRecord + KnownSize + CollatableMappedRecord<B>,
+>(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
     correct_map: &HashMap<u64, u64>,
@@ -862,12 +886,15 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
     output_cache: &HashMap<u64, Arc<TempBucket>>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
-) where u64: From<B>, <R as MappedRecord>::ParsingContext: std::fmt::Debug {
+) where
+    u64: From<B>,
+    <R as MappedRecord>::ParsingContext: std::fmt::Debug,
+{
     let mut buf = [0u8; 8];
     let mut tbuf = vec![0u8; 4096];
     //let mut tcursor = Cursor::new(tbuf);
     //tcursor.set_position(0);
-    
+
     // get the number of bytes and records for
     // the next chunk
     reader.read_exact(&mut buf).unwrap();
@@ -878,16 +905,14 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
 
     // for each record, read it
     for _ in 0..(nrec as usize) {
-        let mut tup = <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context).expect("could read header");
+        let mut tup =
+            <R as CollatableMappedRecord<B>>::from_bytes_collatable_header(reader, rec_context)
+                .expect("could read header");
 
         // if this record had a correct or correctable barcode
         if let Some(corrected_id) = correct_map.get(&tup.collate_key().into()) {
-            let mut rr = R::from_bytes_with_header_retain_ori(
-                reader,
-                &mut tup,
-                rec_context,
-                &expected_ori,
-            );
+            let mut rr =
+                R::from_bytes_with_header_retain_ori(reader, &mut tup, rec_context, &expected_ori);
 
             if rr.is_empty() {
                 continue;
@@ -897,7 +922,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // write the corresponding entry to the
                 // thread-local buffer for this bucket
 
-                let na = tup.naln() as usize; 
+                let na = tup.naln() as usize;
                 // the total number of bytes this record will take
                 let nb = R::nbytes(na as u32, rec_context) as u64;
 
@@ -925,9 +950,13 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 // now, write the record to the buffer
                 rr.write(bcursor, rec_context).expect("can write record");
                 let alen = bcursor.position() as usize;
-                let actual = alen - blen; 
+                let actual = alen - blen;
                 let expected = R::nbytes(na as u32, rec_context);
-                assert_eq!(expected, actual, "Expected to write {} bytes, but wrote {}.", expected, actual);
+                assert_eq!(
+                    expected, actual,
+                    "Expected to write {} bytes, but wrote {}.",
+                    expected, actual
+                );
 
                 // update number of written records
                 v.num_records_written.fetch_add(1, Ordering::SeqCst);
@@ -938,7 +967,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
             // in this branch, we don't have access to a correct barcode for
             // what we observed, so we need to discard the remaining part of
             // the record.
-            
+
             // we already read the header, so just the alignments
             let req_len = R::nbytes_aln(rec_context) * tup.naln() as usize;
             let do_resize = req_len > tbuf.len();
@@ -947,9 +976,7 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
                 tbuf.resize(req_len, 0);
             }
 
-            reader
-                .read_exact(&mut tbuf[0..req_len])
-                .unwrap();
+            reader.read_exact(&mut tbuf[0..req_len]).unwrap();
 
             if do_resize {
                 tbuf.resize(4096, 0);
@@ -958,7 +985,6 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<B: ConvertiblePrimitiveInteg
         }
     }
 }
-
 
 /// Read an input chunk from `reader` and write the
 /// resulting records to the corresponding in-memory
@@ -1088,11 +1114,10 @@ pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
     output_cache: &HashMap<u64, Arc<TempBucket>>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
-    ck: CollateKey
-    // f: F
+    ck: CollateKey, // f: F
 )
 where
-    // F: Fn(u32)
+// F: Fn(u32)
 {
     let mut buf = [0u8; 8];
     let mut tbuf = vec![0u8; 4096];
@@ -1209,7 +1234,6 @@ pub fn as_u8_slice_u8(v: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use crate::BarcodeLookupMap;
-    use needletail;
 
     #[test]
     fn test_barcode_lookup_map() {
