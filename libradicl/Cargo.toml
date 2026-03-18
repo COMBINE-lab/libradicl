@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.12.1"
+version = "0.12.2"
 authors.workspace = true
 edition.workspace = true
 description = "support library for alevin-fry"
@@ -20,7 +20,7 @@ keywords = [
 categories = ["command-line-utilities", "science"]
 
 [dependencies]
-libradicl-macros = { version = "0.12.1", path = "../libradicl-macros" }
+libradicl-macros = { version = "0.12.2", path = "../libradicl-macros" }
 snap = "1"
 scroll = "0.13.0"
 num = "0.4.3"
