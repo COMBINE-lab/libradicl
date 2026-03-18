@@ -20,7 +20,7 @@ keywords = [
 categories = ["command-line-utilities", "science"]
 
 [dependencies]
-libradicl-macros = { version = "0.11.0", path = "../libradicl-macros" }
+libradicl-macros = { version = "0.12.0", path = "../libradicl-macros" }
 snap = "1"
 scroll = "0.13.0"
 num = "0.4.3"
