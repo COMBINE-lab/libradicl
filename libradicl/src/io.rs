@@ -11,9 +11,9 @@
 //! into and out of primitive types.
 
 use crate::{
-    as_u128, as_u64, as_i128, as_i64, libradicl::rad_types::RadIntId,
-    libradicl::record::ConvertiblePrimitiveInteger, try_as_u128, try_as_u64,
-    try_as_i128, try_as_i64,
+    as_i64, as_i128, as_u64, as_u128, libradicl::rad_types::RadIntId,
+    libradicl::record::ConvertiblePrimitiveInteger, try_as_i64, try_as_i128, try_as_u64,
+    try_as_u128,
 };
 use anyhow::Context;
 use scroll::Pread;
@@ -66,7 +66,6 @@ pub struct NewI64(pub i64);
 /// Wrapper type for [i128] so that we can implement [From]
 /// to read into the relevant builtin type in a generic manner.
 pub struct NewI128(pub i128);
-
 
 /// Allows a distinct [TryFrom] implementation for
 /// converting types read from file into [u64] or [u128]
@@ -182,7 +181,6 @@ pub fn read_into_i64<T: Read>(reader: &mut T, rt: &RadIntId) -> i64 {
     v
 }
 
-
 /// A free function to read into an integer type that is generic over
 /// the size of the integer being returned.  Specifically, the type `B`
 /// can be either a [u64] or a [u128], and the approriate number of
@@ -248,13 +246,12 @@ where
     v
 }
 
-
 /// A fallible free function to read into an integer type that is generic over
 /// the size of the integer being returned.  Specifically, the type `B`
 /// can be either a [u64]/[i64] or a [u128]/[i128], and the approriate number of
 /// bytes of the underlying reader will be consumed and converted into
 /// an integer of the appropriate width. Attempting to read a [RadIntId::U128] into
-/// a `u64` or a [RadIntId::I128] into a `i64` will produce an [anyhow::Error], while all 
+/// a `u64` or a [RadIntId::I128] into a `i64` will produce an [anyhow::Error], while all
 /// other conversions should be successful.
 pub fn try_read_into<T: Read, B>(reader: &mut T, rt: &RadIntId) -> anyhow::Result<B>
 where
@@ -407,10 +404,8 @@ where
                 Err(_) => anyhow::bail!("could not convert i128 to the requested type"),
             }
         }
-
     }
 }
-
 
 /// A free function to read an integer, described by the provided [RadIntId]
 /// into a `u128` container (which is guaranteed to be large enough to
@@ -503,7 +498,6 @@ pub fn try_read_into_u128<T: Read>(reader: &mut T, rt: &RadIntId) -> anyhow::Res
     }
 }
 
-
 /// A free function to read an integer, described by the provided [RadIntId]
 /// into a `i64` container.  Returns an [anyhow::Result] containing
 /// the i64 value read on success, or an error otherwise.
@@ -544,7 +538,6 @@ pub fn try_read_into_i64<T: Read>(reader: &mut T, rt: &RadIntId) -> anyhow::Resu
         _ => {
             anyhow::bail!("cannot read unsigned RadIntId type into i64");
         }
-
     };
     Ok(v)
 }

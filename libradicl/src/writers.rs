@@ -69,11 +69,7 @@ impl<W: Write + Seek> RadFileWriter<W> {
     /// Writes the prelude schema (header + three tag-section descriptions) and
     /// the file-level tag values to `writer`, then records the byte offset of
     /// the `num_chunks` field so it can be backpatched in [`Self::finalize`].
-    pub fn new(
-        writer: W,
-        prelude: &RadPrelude,
-        file_tag_values: &TagMap,
-    ) -> anyhow::Result<Self> {
+    pub fn new(writer: W, prelude: &RadPrelude, file_tag_values: &TagMap) -> anyhow::Result<Self> {
         let mut inner = BufWriter::new(writer);
 
         // Compute the byte offset of the num_chunks field *before* writing.
@@ -216,7 +212,9 @@ mod tests {
     use super::*;
     use crate::chunk::{Chunk, ChunkBuf};
     use crate::header::{RadHeader, RadPrelude};
-    use crate::rad_types::{RadIntId, RadType, TagDesc, TagMap, TagSection, TagSectionLabel, TagValue};
+    use crate::rad_types::{
+        RadIntId, RadType, TagDesc, TagMap, TagSection, TagSectionLabel, TagValue,
+    };
     use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext, RecordContext};
     use std::io::Cursor;
 
@@ -396,8 +394,8 @@ mod tests {
         )
         .unwrap();
 
-        let fw = RadFileWriter::new(Cursor::new(Vec::<u8>::new()), &prelude, &file_tag_map)
-            .unwrap();
+        let fw =
+            RadFileWriter::new(Cursor::new(Vec::<u8>::new()), &prelude, &file_tag_map).unwrap();
         let ccw = ConcurrentChunkWriter::new(fw);
 
         // Spawn 4 threads, each writing 1 chunk of 2 records
@@ -411,7 +409,11 @@ mod tests {
                 cbuf.write_record(&rec_clone, &ctx_clone).unwrap();
                 cbuf.write_record(&rec_clone, &ctx_clone).unwrap();
                 let bytes = cbuf.into_bytes();
-                writer_ref.lock().unwrap().write_chunk_bytes(&bytes).unwrap();
+                writer_ref
+                    .lock()
+                    .unwrap()
+                    .write_chunk_bytes(&bytes)
+                    .unwrap();
             }));
         }
         for h in handles {

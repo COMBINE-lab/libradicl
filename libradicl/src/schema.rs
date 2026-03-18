@@ -31,5 +31,5 @@ pub struct ProtocolInfo {
 
 pub enum CollateKey<'a> {
     Barcode,
-    Pos(Box<dyn Fn(u32, usize) -> usize + 'a>)
+    Pos(Box<dyn Fn(u32, usize) -> usize + 'a>),
 }

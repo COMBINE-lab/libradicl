@@ -21,8 +21,8 @@ use crossbeam_queue::ArrayQueue;
 use scroll::Pwrite;
 use std::io::{BufRead, Cursor, Seek};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// This represents an empty callback of the appropriate type for the [ParallelChunkReader] and
@@ -460,7 +460,11 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     /// This function will read and parse the file_tag_map.
     /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
     /// threads once the [Self::start_chunk_parsing()] method has been called.
-    pub fn from_prelude(mut reader: T, prelude: RadPrelude, num_consumers: std::num::NonZeroUsize) -> Self {
+    pub fn from_prelude(
+        mut reader: T,
+        prelude: RadPrelude,
+        num_consumers: std::num::NonZeroUsize,
+    ) -> Self {
         let file_tag_map = prelude
             .file_tags
             .parse_tags_from_bytes(&mut reader)
@@ -474,13 +478,16 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
         }
     }
 
-
-
     /// Create a new [ParallelRadReader] given the provided `prelude` and `file_tag_map`.  It is
     /// assumed that the input `reader` has been consumed up to the point of the first chunk.
     /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
     /// threads once the [Self::start_chunk_parsing()] method has been called.
-    pub fn from_prelude_and_file_tag_map(reader: T, prelude: RadPrelude, file_tag_map: TagMap, num_consumers: std::num::NonZeroUsize) -> Self {
+    pub fn from_prelude_and_file_tag_map(
+        reader: T,
+        prelude: RadPrelude,
+        file_tag_map: TagMap,
+        num_consumers: std::num::NonZeroUsize,
+    ) -> Self {
         Self {
             prelude,
             file_tag_map,
@@ -489,7 +496,6 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
             done_var: Arc::new(AtomicBool::new(false)),
         }
     }
-
 
     /// Get an `std::sync::Arc` holding the underlying `ArrayQueue` associated with this reader.
     /// This allows independent parser threads to obtain `MetaChunk`s, over which they can iterate
@@ -607,11 +613,7 @@ impl<T: BufRead> Iterator for ChunkCountIterator<T> {
     fn next(&mut self) -> Option<Self::Item> {
         let c = self.current_chunk;
         self.current_chunk += 1;
-        if c <= self.num_chunks {
-            Some(c)
-        } else {
-            None
-        }
+        if c <= self.num_chunks { Some(c) } else { None }
     }
 
     #[inline(always)]

@@ -334,13 +334,13 @@ mod tests {
 
         let mut buf: Vec<u8> = Vec::new();
 
-        let _ = prelude
+        prelude
             .write(&mut buf)
             .expect("cannot write prelude to buffer");
 
         let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
         file_tag_map.add(TagValue::ArrayU32(vec![1, 2, 3]));
-        let _ = file_tag_map
+        file_tag_map
             .write_values(&mut buf)
             .expect("cannot write file tag map");
 
@@ -408,13 +408,13 @@ mod tests {
 
         let mut buf: Vec<u8> = Vec::new();
 
-        let _ = prelude
+        prelude
             .write(&mut buf)
             .expect("cannot write prelude to buffer");
 
         let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
         file_tag_map.add(TagValue::ArrayU32(vec![1, 2, 3]));
-        let _ = file_tag_map
+        file_tag_map
             .write_values(&mut buf)
             .expect("cannot write file tag map");
 
