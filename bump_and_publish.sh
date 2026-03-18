@@ -152,7 +152,8 @@ else
 fi
 
 run cargo check -p "$MACROS_CRATE" -p "$LIBRADICL_CRATE" -q
-run git add "$MACROS_CARGO" "$LIBRADICL_CARGO" "$LOCKFILE"
+run git add "$MACROS_CARGO" "$LIBRADICL_CARGO"
+run git add -f "$LOCKFILE"
 run git commit -m "chore(release): bump Rust crates to v${VERSION}"
 
 if [[ "$PUBLISH" == true ]]; then
