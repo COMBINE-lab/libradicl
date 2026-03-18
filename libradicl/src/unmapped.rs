@@ -269,14 +269,11 @@ impl CollatedUnmappedCounts {
             CollatedUnmappedCounts::Single { counts, .. } => {
                 counts.get(&cell_bc).copied().unwrap_or(0)
             }
-            // Fallback: if called on Multi, sum across all samples for this cell
-            CollatedUnmappedCounts::Multi { counts, .. } => {
-                counts
-                    .iter()
-                    .filter(|((_, cb), _)| *cb == cell_bc)
-                    .map(|(_, &c)| c)
-                    .sum()
-            }
+            // For multi-barcode data, we don't have the sample BC here
+            // so we can't do an O(1) lookup. Return 0 rather than doing
+            // an O(n) scan of the entire map — the caller should use
+            // get_multi() with both barcodes for accurate unmapped counts.
+            CollatedUnmappedCounts::Multi { .. } => 0,
         }
     }
 
