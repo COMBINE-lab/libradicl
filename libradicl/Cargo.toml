@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.11.0"
+version = "0.12.0"
 authors.workspace = true
 edition.workspace = true
 description = "support library for alevin-fry"
@@ -38,7 +38,7 @@ bytemuck = { version = "1.25.0", features = [
 ] }
 derivative = "2.2.0"
 crossbeam-queue = "0.3.12"
-noodles = { version = "0.105.0", features = ["bam", "sam"] }
+noodles = { version = "0.108.0", features = ["bam", "sam"] }
 
 [dev-dependencies]
 needletail = "0.6.3"
