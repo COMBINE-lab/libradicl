@@ -114,6 +114,17 @@ pub trait RecordHeader {
 pub trait CollatableRecordHeader<B: ConvertiblePrimitiveInteger>: RecordHeader {
     /// Retreives the key by which this record header (and the coresponding record) can be collated
     fn collate_key(&self) -> B;
+    /// Retrieves the key by which this record header should be grouped into an
+    /// output chunk during collation.
+    fn collation_group_key(
+        &self,
+        _ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> u64
+    where
+        u64: From<B>,
+    {
+        self.collate_key().into()
+    }
     /// Writes the header to the provided `writer`.
     fn write_fields<W: Write>(
         &self,
@@ -2465,6 +2476,38 @@ impl<B: ConvertiblePrimitiveInteger> CollatableRecordHeader<B> for MultiBarcodeR
             .expect("multi-barcode header must have at least one barcode")
     }
 
+    fn collation_group_key(
+        &self,
+        ctx: &<<Self as RecordHeader>::RecordType as MappedRecord>::ParsingContext,
+    ) -> u64
+    where
+        u64: From<B>,
+    {
+        if self.barcodes.len() < 2 {
+            return self.collate_key().into();
+        }
+
+        let cell_bits = (ctx
+            .bc_types
+            .last()
+            .expect("multi-barcode context must have at least one barcode type")
+            .bytes_for_type()
+            * 8) as u32;
+        let sample = u64::from(self.barcodes[0]);
+        let cell = u64::from(
+            *self
+                .barcodes
+                .last()
+                .expect("multi-barcode header must have at least one barcode"),
+        );
+
+        if cell_bits >= 64 {
+            cell
+        } else {
+            (sample << cell_bits) | (cell & ((1_u64 << cell_bits) - 1))
+        }
+    }
+
     fn write_fields<W: Write>(
         &self,
         writer: &mut W,
@@ -2916,5 +2959,38 @@ mod tests {
         assert_eq!(rec.collation_key_at_level(0), 42_u64);
         assert_eq!(rec.collation_key_at_level(1), 12345_u64);
         assert_eq!(rec.num_collation_levels(), 2);
+    }
+
+    #[test]
+    fn multi_barcode_header_grouping_key_includes_sample() {
+        use crate::collation::BarcodeRole;
+        use crate::record::{
+            CollatableRecordHeader, MultiBarcodeReadRecordHeader, MultiBarcodeRecordContext,
+        };
+        use smallvec::smallvec;
+
+        let ctx = MultiBarcodeRecordContext {
+            bc_types: smallvec![RadIntId::U32, RadIntId::U32],
+            umit: RadIntId::U32,
+            roles: smallvec![BarcodeRole::Sample, BarcodeRole::Cell],
+        };
+
+        let hdr_a = MultiBarcodeReadRecordHeader {
+            naln: 1,
+            barcodes: smallvec![1_u64, 12345_u64],
+            umi: 7,
+        };
+        let hdr_b = MultiBarcodeReadRecordHeader {
+            naln: 1,
+            barcodes: smallvec![2_u64, 12345_u64],
+            umi: 8,
+        };
+
+        assert_eq!(hdr_a.collate_key(), 12345_u64);
+        assert_eq!(hdr_b.collate_key(), 12345_u64);
+        assert_ne!(
+            hdr_a.collation_group_key(&ctx),
+            hdr_b.collation_group_key(&ctx)
+        );
     }
 }

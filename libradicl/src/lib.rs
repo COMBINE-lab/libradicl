@@ -335,7 +335,7 @@ where
 
         // get the entry for this chunk, or create a new one
         let v = cb_byte_map
-            .entry(tup.collate_key().into())
+            .entry(tup.collation_group_key(rec_context))
             .or_insert(TempCellInfo {
                 offset: chunk_header_size,
                 nbytes: chunk_header_size as u32,
@@ -399,7 +399,7 @@ where
                 .expect("can read header");
 
         // get the entry for this chunk, or create a new one
-        if let Some(v) = cb_byte_map.get_mut(&tup.collate_key().into()) {
+        if let Some(v) = cb_byte_map.get_mut(&tup.collation_group_key(rec_context)) {
             output_buffer.set_position(v.offset);
 
             let na = tup.naln() as usize;
