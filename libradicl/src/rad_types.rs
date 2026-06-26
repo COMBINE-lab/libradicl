@@ -1298,7 +1298,9 @@ impl TagDesc {
         // the length and element type, otherwise just turn the
         // id into a proper RatType and we're done.
         let rad_t = match typeid {
-            0..=6 | 8 | 10..=14 => typeid.into(),
+            // non-array scalar ids: 0..=6 (Bool/U8/U16/U32/U64/F32/F64), 8 (String),
+            // 9 (U128), 10..=14 (I8/I16/I32/I64/I128). 7 is Array, handled below.
+            0..=6 | 8..=14 => typeid.into(),
             7 => {
                 reader.read_exact(&mut buf[0..2]).context("failed to read aggregate type parameters (array length and element types) from the reader.")?;
                 let t1: RadIntId = buf
@@ -1969,6 +1971,22 @@ mod tests {
         let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
         assert_eq!(desc.name, "mytag");
         assert_eq!(desc.typeid, RadType::Int(RadIntId::U64));
+    }
+
+    #[test]
+    fn can_parse_u128_tag_desc() {
+        // Regression: type id 9 (U128) was previously omitted from the scalar
+        // match arm in TagDesc::from_bytes and failed to decode.
+        let mut buf = Vec::<u8>::new();
+        let tag_name = b"mytag";
+        let _ = buf.write_all(&5_u16.to_ne_bytes());
+        let _ = buf.write_all(tag_name);
+        let tag_type = 9_u8;
+        let _ = buf.write_all(&tag_type.to_ne_bytes());
+
+        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(desc.name, "mytag");
+        assert_eq!(desc.typeid, RadType::Int(RadIntId::U128));
     }
 
     #[test]
