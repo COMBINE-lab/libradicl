@@ -43,9 +43,10 @@
 
 use crate::chunk::Chunk;
 use crate::header::RadPrelude;
-use crate::rad_types::TagMap;
+use crate::rad_types::{TagMap, TagValue};
 use crate::record::MappedRecord;
 use anyhow::Context;
+use std::collections::HashMap;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
@@ -61,6 +62,10 @@ pub struct RadFileWriter<W: Write + Seek> {
     inner: BufWriter<W>,
     num_chunks_offset: u64,
     num_chunks: u64,
+    /// `file_tag_name -> (byte_offset, byte_len)` for each file-tag value, so a
+    /// fixed-size reserved value (written as a placeholder in [`Self::new`]) can be
+    /// overwritten later via [`Self::backpatch_file_tag_value`].
+    file_tag_slots: HashMap<String, (u64, u64)>,
 }
 
 impl<W: Write + Seek> RadFileWriter<W> {
@@ -92,15 +97,65 @@ impl<W: Write + Seek> RadFileWriter<W> {
         prelude
             .write(&mut inner)
             .context("couldn't write prelude to RAD file")?;
-        file_tag_values
-            .write_values(&mut inner)
-            .context("couldn't write file-level tag values to RAD file")?;
+
+        // Write each file-tag value individually, recording the byte offset and
+        // length of each so a fixed-size reserved value can be backpatched after
+        // the chunks are written (e.g. a fragment-length distribution computed
+        // during the streaming pass). Equivalent to `file_tag_values.write_values`,
+        // but tracking offsets. `stream_position` flushes the buffered prelude
+        // once; offsets thereafter are tracked arithmetically (no per-tag flush).
+        let mut file_tag_slots: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut off = inner
+            .stream_position()
+            .context("couldn't get stream position before file-tag values")?;
+        for (desc, val) in file_tag_values.entries() {
+            let mut scratch = Vec::new();
+            val.write_with_type(&desc.typeid, &mut scratch)
+                .context("couldn't serialize file-level tag value")?;
+            inner
+                .write_all(&scratch)
+                .context("couldn't write file-level tag value to RAD file")?;
+            let len = scratch.len() as u64;
+            file_tag_slots.insert(desc.name.clone(), (off, len));
+            off += len;
+        }
 
         Ok(Self {
             inner,
             num_chunks_offset,
             num_chunks: 0,
+            file_tag_slots,
         })
+    }
+
+    /// Overwrite a previously-written file-tag value in place. The new `value`
+    /// must serialize to exactly the same number of bytes as the placeholder
+    /// written by [`Self::new`] (true for fixed-length arrays / fixed-width
+    /// scalars). Intended for values that are only known after the chunks have
+    /// streamed — e.g. a fragment-length distribution or abundance estimates
+    /// computed during the pass. Seeks are absolute, so this composes with the
+    /// `num_chunks` backpatch in [`Self::finalize`]; call it before `finalize`.
+    pub fn backpatch_file_tag_value(&mut self, name: &str, value: &TagValue) -> anyhow::Result<()> {
+        let &(offset, len) = self
+            .file_tag_slots
+            .get(name)
+            .with_context(|| format!("no reserved file-tag slot named '{name}'"))?;
+        let mut scratch = Vec::new();
+        value
+            .write_with_type(&value.rad_type(), &mut scratch)
+            .context("couldn't serialize backpatch file-tag value")?;
+        anyhow::ensure!(
+            scratch.len() as u64 == len,
+            "backpatch size mismatch for file tag '{name}': {} bytes vs reserved {len}",
+            scratch.len()
+        );
+        self.inner
+            .seek(SeekFrom::Start(offset))
+            .with_context(|| format!("couldn't seek to file-tag '{name}' for backpatch"))?;
+        self.inner
+            .write_all(&scratch)
+            .with_context(|| format!("couldn't backpatch file tag '{name}'"))?;
+        Ok(())
     }
 
     /// Write a fully-typed [`Chunk`] to the file.
@@ -195,15 +250,22 @@ impl<W: Write + Seek + Send> ConcurrentChunkWriter<W> {
     /// Unwrap the [`Arc`] (requires all clones to have been dropped), then
     /// call [`RadFileWriter::finalize`] to backpatch and flush.
     pub fn finalize(self) -> anyhow::Result<W> {
+        self.into_writer()?.finalize()
+    }
+
+    /// Unwrap back into the inner [`RadFileWriter`] (requires all clones returned
+    /// by [`Self::get_writer_ref`] to have been dropped). Use this to apply
+    /// [`RadFileWriter::backpatch_file_tag_value`] before calling
+    /// [`RadFileWriter::finalize`].
+    pub fn into_writer(self) -> anyhow::Result<RadFileWriter<W>> {
         let inner = Arc::try_unwrap(self.inner).map_err(|_| {
             anyhow::anyhow!(
-                "ConcurrentChunkWriter::finalize called while Arc clones are still alive"
+                "ConcurrentChunkWriter::into_writer called while Arc clones are still alive"
             )
         })?;
-        inner
+        Ok(inner
             .into_inner()
-            .expect("ConcurrentChunkWriter mutex was poisoned")
-            .finalize()
+            .expect("ConcurrentChunkWriter mutex was poisoned"))
     }
 }
 
@@ -213,7 +275,8 @@ mod tests {
     use crate::chunk::{Chunk, ChunkBuf};
     use crate::header::{RadHeader, RadPrelude};
     use crate::rad_types::{
-        RadIntId, RadType, TagDesc, TagMap, TagSection, TagSectionLabel, TagValue,
+        RadAtomicId, RadFloatId, RadIntId, RadType, TagDesc, TagMap, TagSection, TagSectionLabel,
+        TagValue,
     };
     use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext, RecordContext};
     use std::io::Cursor;
@@ -320,6 +383,106 @@ mod tests {
         assert_eq!(read_chunk1.nrec, 3);
         assert_eq!(read_chunk2.nrec, 3);
         assert_eq!(read_chunk1.reads[0], rec);
+    }
+
+    #[test]
+    fn backpatch_file_tag_value_roundtrip() {
+        // Prelude with a reserved fixed-length ArrayF64 file tag (placeholder),
+        // plus a scalar tag before it to exercise non-zero offsets.
+        let hdr = RadHeader {
+            is_paired: 0,
+            ref_count: 2,
+            ref_names: vec!["t0".to_string(), "t1".to_string()],
+            num_chunks: 0,
+        };
+        let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
+        file_tags.add_tag_desc(TagDesc {
+            name: "bclen".to_string(),
+            typeid: RadType::Int(RadIntId::U16),
+        });
+        file_tags.add_tag_desc(TagDesc {
+            name: "frag_length_dist".to_string(),
+            typeid: RadType::Array(RadIntId::U32, RadAtomicId::Float(RadFloatId::F64)),
+        });
+        let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        read_tags.add_tag_desc(TagDesc {
+            name: "b".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        read_tags.add_tag_desc(TagDesc {
+            name: "u".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+        aln_tags.add_tag_desc(TagDesc {
+            name: "compressed_ori_refid".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        let prelude = RadPrelude {
+            hdr,
+            file_tags,
+            read_tags,
+            aln_tags,
+        };
+        let mut file_tag_map = TagMap::with_keyset(&prelude.file_tags.tags);
+        file_tag_map.add(TagValue::U16(16)); // bclen
+        file_tag_map.add(TagValue::ArrayF64(vec![0.0; 4])); // reserved FLD placeholder
+
+        let rec = AlevinFryReadRecord {
+            bc: 1,
+            umi: 2,
+            dirs: vec![true, false],
+            refs: vec![0, 1],
+        };
+        let ctx = AlevinFryRecordContext::get_context_from_tag_section(
+            &prelude.file_tags,
+            &prelude.read_tags,
+            &prelude.aln_tags,
+        )
+        .unwrap();
+        let chunk = Chunk::<AlevinFryReadRecord> {
+            nbytes: 0,
+            nrec: 1,
+            reads: vec![rec.clone()],
+        };
+
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut fw = RadFileWriter::new(cursor, &prelude, &file_tag_map).unwrap();
+        fw.write_chunk(&chunk, &ctx).unwrap();
+        // backpatch the reserved slot with real values (same length ⇒ same size)
+        fw.backpatch_file_tag_value(
+            "frag_length_dist",
+            &TagValue::ArrayF64(vec![0.1, 0.2, 0.3, 0.4]),
+        )
+        .unwrap();
+        // a differently-sized value must be rejected, not silently corrupt the file
+        assert!(
+            fw.backpatch_file_tag_value("frag_length_dist", &TagValue::ArrayF64(vec![1.0]))
+                .is_err()
+        );
+        // an unknown tag name must error
+        assert!(
+            fw.backpatch_file_tag_value("nope", &TagValue::U16(0))
+                .is_err()
+        );
+        let cursor = fw.finalize().unwrap();
+
+        let mut cursor = Cursor::new(cursor.into_inner());
+        let read_prelude = RadPrelude::from_bytes(&mut cursor).unwrap();
+        let read_file_tags = read_prelude
+            .file_tags
+            .parse_tags_from_bytes(&mut cursor)
+            .unwrap();
+        assert_eq!(read_prelude.hdr.num_chunks, 1);
+        assert_eq!(read_file_tags.get("bclen"), Some(&TagValue::U16(16)));
+        assert_eq!(
+            read_file_tags.get("frag_length_dist"),
+            Some(&TagValue::ArrayF64(vec![0.1, 0.2, 0.3, 0.4]))
+        );
+        // the chunk still parses correctly after the backpatch
+        let read_chunk = Chunk::<AlevinFryReadRecord>::from_bytes(&mut cursor, &ctx);
+        assert_eq!(read_chunk.nrec, 1);
+        assert_eq!(read_chunk.reads[0], rec);
     }
 
     #[test]

@@ -1670,6 +1670,15 @@ impl TagMap {
         self.keys.iter()
     }
 
+    /// return an iterator over `(descriptor, value)` pairs, in write order. Used
+    /// by writers that need to emit each file-tag value individually (e.g. to
+    /// record the byte offset of a reserved slot for later backpatching).
+    pub fn entries(
+        &self,
+    ) -> impl std::iter::ExactSizeIterator<Item = (&TagDesc, &TagValue)> + use<'_> {
+        self.keys.iter().zip(self.dat.iter())
+    }
+
     /// Set the values for a homogeneous map tag pair previously declared with
     /// [TagSection::add_map_tags]. The `keys` and `vals` [TagValue]s must be array
     /// variants and must be the next two consecutive values to be added to this map
