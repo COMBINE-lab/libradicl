@@ -156,6 +156,26 @@ impl ChunkBuf {
         result.extend_from_slice(&body);
         result
     }
+
+    /// Like [`Self::into_bytes`], but the payload is compressed with `codec`.
+    /// The returned chunk keeps the `[u32 nbytes][u32 nrec]` header, with
+    /// `nbytes` set to the *compressed* framing size (header + compressed
+    /// payload). A reader restores it via [`crate::codec::decompress_payload`].
+    /// [`ChunkCodec::None`] is identical to [`Self::into_bytes`].
+    pub fn into_bytes_with_codec(self, codec: crate::codec::ChunkCodec) -> anyhow::Result<Vec<u8>> {
+        use crate::codec::ChunkCodec;
+        if codec == ChunkCodec::None {
+            return Ok(self.into_bytes());
+        }
+        let nrec = self.nrec;
+        let comp = crate::codec::compress_payload(codec, &self.buf)?;
+        let nbytes: u32 = (comp.len() as u32) + 8;
+        let mut result = Vec::with_capacity(comp.len() + 8);
+        result.extend_from_slice(&nbytes.to_le_bytes());
+        result.extend_from_slice(&nrec.to_le_bytes());
+        result.extend_from_slice(&comp);
+        Ok(result)
+    }
 }
 
 pub struct AlevinFryChunkContext {

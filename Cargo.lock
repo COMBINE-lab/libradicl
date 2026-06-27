@@ -452,6 +452,7 @@ dependencies = [
  "indicatif",
  "itertools",
  "libradicl-macros",
+ "lz4_flex",
  "needletail",
  "noodles",
  "num",
@@ -459,6 +460,7 @@ dependencies = [
  "serde",
  "smallvec",
  "snap",
+ "zstd",
 ]
 
 [[package]]
@@ -487,6 +489,15 @@ checksum = "3c168f8615b12bc01f9c17e2eb0cc07dcae1940121185446edc3744920e8ef45"
 dependencies = [
  "autocfg",
  "scopeguard",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b8c72594ac26bfd34f2d99dfced2edfaddfe8a476e3ff2ca0eb293d925c4f83"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]
@@ -884,6 +895,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "twox-hash"
+version = "1.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
+dependencies = [
+ "cfg-if",
+ "static_assertions",
 ]
 
 [[package]]

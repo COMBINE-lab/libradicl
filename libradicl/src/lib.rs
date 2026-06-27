@@ -54,6 +54,7 @@ use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
 pub mod chunk;
+pub mod codec;
 pub mod collation;
 pub mod constants;
 pub mod exit_codes;
@@ -67,6 +68,7 @@ pub mod unmapped;
 pub mod utils;
 pub mod writers;
 pub use chunk::ChunkBuf;
+pub use codec::{CHUNK_CODEC_TAG, ChunkCodec};
 pub use libradicl_macros::UmiTagged;
 pub use writers::{ConcurrentChunkWriter, RadFileWriter};
 

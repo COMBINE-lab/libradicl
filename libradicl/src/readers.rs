@@ -12,8 +12,9 @@
 //! interface for parsing RAD chunks in parallel for improved processing performance.
 
 use crate::libradicl::chunk::Chunk;
+use crate::libradicl::codec::{CHUNK_CODEC_TAG, ChunkCodec, decompress_payload};
 use crate::libradicl::header::RadPrelude;
-use crate::libradicl::rad_types::TagMap;
+use crate::libradicl::rad_types::{TagMap, TagValue};
 use crate::libradicl::record::{MappedRecord, RecordContext};
 use crate::libradicl::utils;
 use anyhow::Context;
@@ -28,6 +29,17 @@ use std::sync::{
 /// This represents an empty callback of the appropriate type for the [ParallelChunkReader] and
 /// [ParallelRadReader] functions.  Use this when you want the callback to be a no-op.
 pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64, u64)>> = None;
+
+/// Determine the chunk compression codec advertised by a file-tag map.
+/// An absent [`CHUNK_CODEC_TAG`] means [`ChunkCodec::None`] (every RAD file
+/// written before chunk compression existed reads unchanged).
+fn codec_from_tag_map(file_tag_map: &TagMap) -> anyhow::Result<ChunkCodec> {
+    match file_tag_map.get(CHUNK_CODEC_TAG) {
+        None => Ok(ChunkCodec::None),
+        Some(TagValue::U8(v)) => ChunkCodec::from_u8(*v),
+        Some(_) => anyhow::bail!("'{CHUNK_CODEC_TAG}' file tag must be a U8"),
+    }
+}
 
 /// A [MetaChunk] consists of a series of [Chunk]s that may be grouped together
 /// for efficiency.  One can easily iterate over the [Chunk]s of a [MetaChunk] by
@@ -160,6 +172,7 @@ fn fill_work_queue_filtered<
     filter_fn: FilterF,
     mut callback: Option<F>,
     prelude: &RadPrelude,
+    codec: ChunkCodec,
     meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
     done_var: Arc<AtomicBool>,
 ) -> anyhow::Result<()>
@@ -171,6 +184,9 @@ where
     const BUFSIZE: usize = 524208;
     // the buffer that will hold our records
     let mut buf = vec![0u8; BUFSIZE];
+    // scratch holding the compressed bytes of a chunk before decompression
+    // (only used when `codec != ChunkCodec::None`)
+    let mut scratch: Vec<u8> = Vec::new();
     // the number of bytes currently packed into the meta chunk
     let mut cbytes = 0u32;
     // the number of records currently packed into the meta chunk
@@ -199,28 +215,43 @@ where
         // at the bottom of the previous iteration of this loop, and
         // we will fill in the buffer appropriately here.
         if chunk_num > 0 {
-            // if the current chunk (the chunk whose header we read in the last iteration of
-            // the loop) alone is too big for the buffer, then resize the buffer to be big enough
-            if nbytes_chunk as usize > buf.len() {
-                // if we had to resize the buffer to fit this cell, then make sure we push
-                // immediately in the next round
-                force_push = true;
-                let chunk_resize = nbytes_chunk as usize + cbytes as usize;
-                buf.resize(chunk_resize, 0);
-            }
-            let br = chunk_iter.get_mut_buf_read();
-
-            // copy the data for the current chunk into the buffer
+            // Decompress (if needed) into `buf` at `boffset`, yielding an
+            // uncompressed `[eff_nbytes][nrec][records]` chunk; `eff_nbytes`
+            // equals `nbytes_chunk` when codec is None. The filter then runs on
+            // the uncompressed chunk bytes, exactly as before.
             let boffset = cbytes as usize;
-            buf.pwrite::<u32>(nbytes_chunk, boffset)?;
-            buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
-            // read everything from the end of the eader into the buffer
-            br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
-                .context("failed to read from work queue.")?;
+            let eff_nbytes = if codec == ChunkCodec::None {
+                if nbytes_chunk as usize > buf.len() {
+                    force_push = true;
+                    let chunk_resize = nbytes_chunk as usize + cbytes as usize;
+                    buf.resize(chunk_resize, 0);
+                }
+                let br = chunk_iter.get_mut_buf_read();
+                buf.pwrite::<u32>(nbytes_chunk, boffset)?;
+                buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
+                br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
+                    .context("failed to read from work queue.")?;
+                nbytes_chunk
+            } else {
+                let br = chunk_iter.get_mut_buf_read();
+                scratch.resize(nbytes_chunk as usize - 8, 0);
+                br.read_exact(&mut scratch)
+                    .context("failed to read compressed chunk from work queue.")?;
+                let decoded = decompress_payload(codec, &scratch)?;
+                let eff = decoded.len() as u32 + 8;
+                if boffset + eff as usize > buf.len() {
+                    force_push = true;
+                    buf.resize(boffset + eff as usize, 0);
+                }
+                buf.pwrite::<u32>(eff, boffset)?;
+                buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
+                buf[(boffset + 8)..(boffset + eff as usize)].copy_from_slice(&decoded);
+                eff
+            };
             // apply the filter
             if filter_fn(&buf[boffset..], &record_context) {
                 chunks_in_meta_chunk += 1;
-                cbytes += nbytes_chunk;
+                cbytes += eff_nbytes;
                 crec += nrec_chunk;
             } else {
                 // if we are skipping this collated chunk, and it triggered a
@@ -307,6 +338,7 @@ fn fill_work_queue<
     mut chunk_iter: ChunkIt,
     mut callback: Option<F>,
     prelude: &RadPrelude,
+    codec: ChunkCodec,
     meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
     done_var: Arc<AtomicBool>,
 ) -> anyhow::Result<()>
@@ -317,6 +349,9 @@ where
     const BUFSIZE: usize = 524208;
     // the buffer that will hold our records
     let mut buf = vec![0u8; BUFSIZE];
+    // scratch holding the compressed bytes of a chunk before decompression
+    // (only used when `codec != ChunkCodec::None`)
+    let mut scratch: Vec<u8> = Vec::new();
     // the number of bytes currently packed into the meta chunk
     let mut cbytes = 0u32;
     // the number of records currently packed into the meta chunk
@@ -346,27 +381,52 @@ where
         // at the bottom of the previous iteration of this loop, and
         // we will fill in the buffer appropriately here.
         if chunk_num > 0 {
-            // if the current chunk (the chunk whose header we read in the last iteration of
-            // the loop) alone is too big for the buffer, then resize the buffer to be big enough
-            if nbytes_chunk as usize > buf.len() {
-                // if we had to resize the buffer to fit this cell, then make sure we push
-                // immediately in the next round
-                force_push = true;
-                let chunk_resize = nbytes_chunk as usize + cbytes as usize;
-                buf.resize(chunk_resize, 0);
-            }
-            let br = chunk_iter.get_mut_buf_read();
+            if codec == ChunkCodec::None {
+                // if the current chunk (the chunk whose header we read in the last iteration of
+                // the loop) alone is too big for the buffer, then resize the buffer to be big enough
+                if nbytes_chunk as usize > buf.len() {
+                    // if we had to resize the buffer to fit this cell, then make sure we push
+                    // immediately in the next round
+                    force_push = true;
+                    let chunk_resize = nbytes_chunk as usize + cbytes as usize;
+                    buf.resize(chunk_resize, 0);
+                }
+                let br = chunk_iter.get_mut_buf_read();
 
-            // copy the data for the current chunk into the buffer
-            let boffset = cbytes as usize;
-            buf.pwrite::<u32>(nbytes_chunk, boffset)?;
-            buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
-            // read everything from the end of the eader into the buffer
-            br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
-                .context("failed to read from work queue.")?;
-            chunks_in_meta_chunk += 1;
-            cbytes += nbytes_chunk;
-            crec += nrec_chunk;
+                // copy the data for the current chunk into the buffer
+                let boffset = cbytes as usize;
+                buf.pwrite::<u32>(nbytes_chunk, boffset)?;
+                buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
+                // read everything from the end of the eader into the buffer
+                br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
+                    .context("failed to read from work queue.")?;
+                chunks_in_meta_chunk += 1;
+                cbytes += nbytes_chunk;
+                crec += nrec_chunk;
+            } else {
+                // Compressed chunk: `nbytes_chunk` is the compressed framing size.
+                // Read the compressed payload, decompress it, and write an
+                // *uncompressed* `[eff_nbytes][nrec][records]` chunk into `buf`,
+                // so downstream record parsing is identical to the codec=None case.
+                let br = chunk_iter.get_mut_buf_read();
+                scratch.resize(nbytes_chunk as usize - 8, 0);
+                br.read_exact(&mut scratch)
+                    .context("failed to read compressed chunk from work queue.")?;
+                let decoded = decompress_payload(codec, &scratch)?;
+                let eff_nbytes = decoded.len() as u32 + 8;
+                let boffset = cbytes as usize;
+                if boffset + eff_nbytes as usize > buf.len() {
+                    // the decoded chunk doesn't fit; grow and push immediately next round
+                    force_push = true;
+                    buf.resize(boffset + eff_nbytes as usize, 0);
+                }
+                buf.pwrite::<u32>(eff_nbytes, boffset)?;
+                buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
+                buf[(boffset + 8)..(boffset + eff_nbytes as usize)].copy_from_slice(&decoded);
+                chunks_in_meta_chunk += 1;
+                cbytes += eff_nbytes;
+                crec += nrec_chunk;
+            }
         }
 
         // in the last iteration of the loop, we will have read all headers already
@@ -542,6 +602,7 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
             prelude: &self.prelude,
             meta_chunk_queue: self.meta_chunk_queue.clone(),
             done_var: self.done_var.clone(),
+            codec: codec_from_tag_map(&self.file_tag_map)?,
         };
 
         pcr.start(&mut self.reader, callback)
@@ -574,6 +635,7 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
             prelude: &self.prelude,
             meta_chunk_queue: self.meta_chunk_queue.clone(),
             done_var: self.done_var.clone(),
+            codec: codec_from_tag_map(&self.file_tag_map)?,
         };
 
         pcr.start_filtered(&mut self.reader, filter_fn, callback)
@@ -695,6 +757,11 @@ pub struct ParallelChunkReader<'a, R: MappedRecord> {
     pub prelude: &'a RadPrelude,
     pub meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
     pub done_var: Arc<AtomicBool>,
+    /// Chunk compression codec (from the file-tag map); chunks are decompressed
+    /// transparently in the reader thread so consumers see uncompressed records.
+    /// Private so adding it stays a non-breaking change; set via [`Self::new`]
+    /// (defaults to [`ChunkCodec::None`]) or by [`ParallelRadReader`].
+    codec: ChunkCodec,
 }
 
 impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
@@ -706,6 +773,10 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             prelude,
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
             done_var: Arc::new(AtomicBool::new(false)),
+            // This constructor has no file-tag map, so it assumes no chunk
+            // compression. Use [ParallelRadReader] (which parses the file tags)
+            // to read compressed RAD files.
+            codec: ChunkCodec::None,
         }
     }
 
@@ -751,6 +822,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
                 chunk_iter,
                 callback,
                 self.prelude,
+                self.codec,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;
@@ -764,6 +836,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
                 chunk_iter,
                 callback,
                 self.prelude,
+                self.codec,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;
@@ -801,6 +874,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
                 filter_fn,
                 callback,
                 self.prelude,
+                self.codec,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;
@@ -815,6 +889,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
                 filter_fn,
                 callback,
                 self.prelude,
+                self.codec,
                 self.meta_chunk_queue.clone(),
                 self.done_var.clone(),
             )?;

@@ -19,9 +19,19 @@ keywords = [
 ]
 categories = ["command-line-utilities", "science"]
 
+[features]
+default = []
+# Enables zstd (codec id 2) for RAD chunk compression. Off by default so the
+# crate stays pure-Rust (lz4, codec id 1, is always available via lz4_flex);
+# zstd pulls in the C zstd-sys. Readers built without this feature can still
+# read uncompressed and lz4 RAD files, and error clearly on a zstd chunk.
+zstd = ["dep:zstd"]
+
 [dependencies]
 libradicl-macros = { version = "0.13.0", path = "../libradicl-macros" }
 snap = "1"
+lz4_flex = "0.10"
+zstd = { version = "0.13", optional = true }
 scroll = "0.13.0"
 num = "0.4.3"
 ahash = "0.8.12"
