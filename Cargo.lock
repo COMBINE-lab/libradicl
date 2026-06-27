@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "libradicl"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "libradicl-macros"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proc-macro2",
  "quote",

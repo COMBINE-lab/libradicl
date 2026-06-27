@@ -1,6 +1,6 @@
 [package]
 name = "libradicl"
-version = "0.13.0"
+version = "0.14.0"
 authors.workspace = true
 edition.workspace = true
 description = "support library for alevin-fry"
@@ -28,7 +28,7 @@ default = []
 zstd = ["dep:zstd"]
 
 [dependencies]
-libradicl-macros = { version = "0.13.0", path = "../libradicl-macros" }
+libradicl-macros = { version = "0.14.0", path = "../libradicl-macros" }
 snap = "1"
 lz4_flex = "0.10"
 zstd = { version = "0.13", optional = true }
