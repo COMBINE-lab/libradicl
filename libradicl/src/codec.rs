@@ -148,4 +148,17 @@ mod tests {
         let d = decompress_payload(ChunkCodec::Zstd, &c).unwrap();
         assert_eq!(d, data);
     }
+
+    // Without the `zstd` feature, a reader must refuse a zstd chunk with a clear
+    // error rather than mis-parse compressed bytes as records.
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn zstd_without_feature_errors() {
+        let err = decompress_payload(ChunkCodec::Zstd, &[1, 2, 3]).unwrap_err();
+        assert!(
+            err.to_string().contains("zstd"),
+            "error should mention the missing zstd feature: {err}"
+        );
+        assert!(compress_payload(ChunkCodec::Zstd, &[1, 2, 3]).is_err());
+    }
 }
