@@ -1644,10 +1644,20 @@ impl RecordContext for AtacSeqRecordContext {
         rt: &TagSection,
         _at: &TagSection,
     ) -> anyhow::Result<Self> {
-        // the tags we expect to exist
+        // The scATAC barcode read-level tag is named "barcode" by the original
+        // C++ piscem writer, but "b" by the Rust piscem-rs writer (which reuses
+        // the scRNA convention). Accept either so we can read RAD files produced
+        // by both implementations. Return an error rather than panicking so a
+        // genuinely missing tag surfaces cleanly instead of wedging a reader
+        // thread.
         let bct = rt
             .get_tag_type("barcode")
-            .expect("atac-reader record context requires a \'barcode\' read-level tag");
+            .or_else(|| rt.get_tag_type("b"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "atac-reader record context requires a 'barcode' (or 'b') read-level tag"
+                )
+            })?;
 
         if let RadType::Int(x) = bct {
             Ok(Self { bct: x })
