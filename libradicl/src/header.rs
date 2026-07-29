@@ -21,7 +21,7 @@ use scroll::Pread;
 use std::cmp::{Eq, PartialEq};
 use std::io::{Read, Write};
 
-use derivative::Derivative;
+use educe::Educe;
 
 /// The [RadPrelude] groups together the [RadHeader]
 /// as well as the relevant top-level [TagSection]s of the file.
@@ -38,13 +38,13 @@ pub struct RadPrelude {
 /// The [RadHeader] contains the relevant information about the
 /// references against which the reads in this file were mapped and
 /// information about the way in which mapping was performed.
-#[derive(Derivative)]
-#[derivative(Debug, PartialEq, Eq)]
+#[derive(Educe)]
+#[educe(Debug, PartialEq, Eq)]
 pub struct RadHeader {
     pub is_paired: u8,
     pub ref_count: u64,
     pub ref_names: Vec<String>,
-    #[derivative(PartialEq = "ignore")]
+    #[educe(PartialEq(ignore))]
     pub num_chunks: u64,
 }
 

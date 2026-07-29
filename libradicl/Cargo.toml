@@ -30,7 +30,7 @@ zstd = ["dep:zstd"]
 [dependencies]
 libradicl-macros = { version = "0.14.3", path = "../libradicl-macros" }
 snap = "1"
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 zstd = { version = "0.13", optional = true }
 scroll = "0.13.0"
 num = "0.4.3"
@@ -41,15 +41,19 @@ bio-types = "1.0.4"
 smallvec = "1.15.1"
 anyhow = "1.0.102"
 bincode = "1.3.3"
-itertools = "0.14.0"
+itertools = "0.15.0"
 bytemuck = { version = "1.25.0", features = [
   "aarch64_simd",
   "extern_crate_alloc",
 ] }
-derivative = "2.2.0"
+educe = { version = "0.7.4", default-features = false, features = [
+  "Debug",
+  "PartialEq",
+  "Eq",
+] }
 crossbeam-queue = "0.3.12"
 noodles = { version = "0.113.0", features = ["bam", "sam"] }
 
 [dev-dependencies]
-needletail = "0.6.3"
+needletail = "0.7.3"
 indicatif = "0.18.4"
