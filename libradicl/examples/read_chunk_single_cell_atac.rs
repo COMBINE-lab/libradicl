@@ -8,7 +8,6 @@ use libradicl::{
 use std::fs::File;
 use std::io::BufReader;
 use std::num::NonZeroUsize;
-use std::sync::atomic::Ordering;
 
 fn main() -> anyhow::Result<()> {
     let f = File::open("../piscem_atac_data/map.rad")?;
@@ -30,22 +29,19 @@ fn main() -> anyhow::Result<()> {
 
     let mut handles = Vec::<std::thread::JoinHandle<usize>>::new();
     for _ in 0..NWORKERS {
-        let rd = rad_reader.is_done();
-        let q = rad_reader.get_queue();
+        let chunks = rad_reader.chunk_iter();
         let handle = std::thread::spawn(move || {
             let mut nrec_processed = 0_usize;
-            while !rd.load(Ordering::SeqCst) {
-                while let Some(meta_chunk) = q.pop() {
-                    for c in meta_chunk.iter() {
-                        nrec_processed += c.nrec as usize;
-                        /*
-                        println!("Chunk :: nbytes: {}, nrecs: {}", c.nbytes, c.nrec);
-                        assert_eq!(c.nrec as usize, c.reads.len());
-                        for (i, r) in c.reads.iter().take(10).enumerate() {
-                            println!("record {i}: {:?}", r);
-                        }
-                        */
+            for meta_chunk in chunks {
+                for c in meta_chunk.iter() {
+                    nrec_processed += c.nrec as usize;
+                    /*
+                    println!("Chunk :: nbytes: {}, nrecs: {}", c.nbytes, c.nrec);
+                    assert_eq!(c.nrec as usize, c.reads.len());
+                    for (i, r) in c.reads.iter().take(10).enumerate() {
+                        println!("record {i}: {:?}", r);
                     }
+                    */
                 }
             }
             nrec_processed

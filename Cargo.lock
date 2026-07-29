@@ -558,6 +558,7 @@ dependencies = [
  "bio-types",
  "bytemuck",
  "crossbeam-queue",
+ "crossbeam-utils",
  "dashmap",
  "educe",
  "indicatif",
