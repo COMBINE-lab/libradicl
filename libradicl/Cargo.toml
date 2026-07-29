@@ -48,7 +48,7 @@ bytemuck = { version = "1.25.0", features = [
 ] }
 derivative = "2.2.0"
 crossbeam-queue = "0.3.12"
-noodles = { version = "0.111.0", features = ["bam", "sam"] }
+noodles = { version = "0.113.0", features = ["bam", "sam"] }
 
 [dev-dependencies]
 needletail = "0.6.3"
