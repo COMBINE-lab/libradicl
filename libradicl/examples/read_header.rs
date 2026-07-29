@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
                 v.iter().take(10).collect::<Vec<&u32>>()
             );
         } else {
-            println!("file-level tags: {:?}", &ftmp);
+            println!("file-level tags: {ftmp:?}");
         }
     }
     Ok(())

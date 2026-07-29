@@ -1,0 +1,101 @@
+name: CI
+
+# Build, lint and test on every branch and pull request. Before this workflow
+# nothing compiled the crate on push, which is how a batch of dependency
+# advisories and clippy lints accumulated unnoticed.
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: ${{ matrix.target_id }} / ${{ matrix.features_id }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-14]
+        # `zstd` (RAD chunk codec 2) is off by default so the crate stays pure
+        # Rust; enabling it pulls in the C zstd-sys. Both configurations ship, so
+        # both are built and tested — otherwise the non-default one only breaks
+        # for whoever turns it on.
+        features: ["", "--features zstd"]
+        include:
+          - os: ubuntu-22.04
+            target_id: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target_id: linux-aarch64
+          - os: macos-14
+            target_id: macos-arm64
+          - features: ""
+            features_id: default
+          - features: "--features zstd"
+            features_id: zstd
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features_id }}
+
+      # Formatting and lints are feature-independent, so run them once rather
+      # than on every matrix leg.
+      - name: Format check
+        if: matrix.os == 'ubuntu-22.04' && matrix.features == ''
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --release ${{ matrix.features }}
+
+      - name: Test
+        run: cargo test --workspace --release ${{ matrix.features }}
+
+      # The examples are the closest thing the crate has to integration
+      # coverage, and nothing else compiles them in release mode.
+      - name: Build examples
+        run: cargo build --workspace --release --examples ${{ matrix.features }}
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Fails on any advisory except those knowingly accepted below. This job
+      # exists because four advisories (two with fixes available) sat unnoticed
+      # in the lockfile until an ad-hoc scan found them.
+      #
+      # RUSTSEC-2025-0141 — bincode 1.3.3 is unmaintained. There is no fixed
+      # version: bincode 3.0.0 is a placeholder marking the end of the project,
+      # not a release, and a real migration to 2.x changes both the API and the
+      # default encoding config, making it a persisted-format change for the
+      # collation manifest in collation.rs. Accepted deliberately; revisit only
+      # with byte-level round-trip verification.
+      - name: Audit
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
