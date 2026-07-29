@@ -368,7 +368,7 @@ where
     // offset in `output_buffer` is where the corresponding
     // records should start.
     let mut next_offset = 0u64;
-    for (_, v) in cb_byte_map.iter_mut() {
+    for v in cb_byte_map.values_mut() {
         // jump to the position where this chunk should start
         // and write the header
         output_buffer.set_position(next_offset);
@@ -519,7 +519,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     // offset in `output_buffer` is where the corresponding
     // records should start.
     let mut next_offset = 0u64;
-    for (_, v) in cb_byte_map.iter_mut() {
+    for v in cb_byte_map.values_mut() {
         // jump to the position where this chunk should start
         // and write the header
         output_buffer.set_position(next_offset);
@@ -659,7 +659,7 @@ pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
     // offset in `output_buffer` is where the corresponding
     // records should start.
     let mut next_offset = 0u64;
-    for (_, v) in cb_byte_map.iter_mut() {
+    for v in cb_byte_map.values_mut() {
         // jump to the position where this chunk should start
         // and write the header
         output_buffer.set_position(next_offset);
