@@ -552,6 +552,17 @@ impl<R: MappedRecord> Iterator for MetaChunkQueueIter<R> {
     type Item = MetaChunk<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Spin briefly for the common case of a chunk landing almost
+        // immediately, then yield. Spinning unconditionally starves the
+        // producer whenever consumers outnumber the available cores: measured
+        // over a stalling reader with 8 consumers pinned to 2 CPUs, an
+        // unconditional spin took 1.36s against 0.032s here — a 42x wall-clock
+        // collapse, because the cores go to spinners rather than to the
+        // producer they are all waiting on. With cores to spare the two are
+        // indistinguishable, so the yield costs nothing.
+        const SPINS_BEFORE_YIELD: u32 = 64;
+        let mut spins = 0_u32;
+
         loop {
             if let Some(meta_chunk) = self.queue.pop() {
                 return Some(meta_chunk);
@@ -562,7 +573,13 @@ impl<R: MappedRecord> Iterator for MetaChunkQueueIter<R> {
                 // here. `None` from this final pop means genuinely exhausted.
                 return self.queue.pop();
             }
-            std::hint::spin_loop();
+            if spins < SPINS_BEFORE_YIELD {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                spins = 0;
+                std::thread::yield_now();
+            }
         }
     }
 }
