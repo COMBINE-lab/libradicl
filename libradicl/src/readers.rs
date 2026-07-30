@@ -55,14 +55,14 @@ pub struct MetaChunk<R: MappedRecord> {
 }
 
 /// An iterator over the [Chunk]s of a [MetaChunk].
-pub struct MetaChunkQueueIterator<'a, 'b, R: MappedRecord> {
+pub struct MetaChunkIterator<'a, 'b, R: MappedRecord> {
     curr_sub_chunk: usize,
     num_sub_chunks: usize,
     data: Cursor<&'a [u8]>,
     record_context: &'b <R as MappedRecord>::ParsingContext,
 }
 
-impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkQueueIterator<'a, 'b, R> {
+impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkIterator<'a, 'b, R> {
     type Item = Chunk<R>;
 
     /// Return the next [Chunk] contained within this [MetaChunk], returns
@@ -89,7 +89,7 @@ impl<'a, 'b, R: MappedRecord> Iterator for MetaChunkQueueIterator<'a, 'b, R> {
 
 // We know exactly how many [Chunk]s a [MetaChunk] will yield, so this is also an
 // [ExactSizeIterator].
-impl<'a, 'b, R: MappedRecord> ExactSizeIterator for MetaChunkQueueIterator<'a, 'b, R> {}
+impl<'a, 'b, R: MappedRecord> ExactSizeIterator for MetaChunkIterator<'a, 'b, R> {}
 
 impl<R: MappedRecord> MetaChunk<R>
 where
@@ -114,10 +114,10 @@ where
         }
     }
 
-    /// Returns a [MetaChunkQueueIterator] that can iterate over the
+    /// Returns a [MetaChunkIterator] that can iterate over the
     /// [Chunk]s of this [MetaChunk].
-    pub fn iter(&self) -> MetaChunkQueueIterator<'_, '_, R> {
-        MetaChunkQueueIterator {
+    pub fn iter(&self) -> MetaChunkIterator<'_, '_, R> {
+        MetaChunkIterator {
             curr_sub_chunk: 0,
             num_sub_chunks: self.num_sub_chunks,
             data: Cursor::new(self.chunk_blob.as_slice()),
@@ -508,7 +508,7 @@ pub struct ParallelRadReader<R: MappedRecord, T: BufRead + Seek> {
 /// > between those two observations.
 ///
 /// A loop that breaks as soon as it sees the flag set can therefore abandon
-/// chunks that are still queued, silently losing records. [`MetaChunkQueueIter`]
+/// chunks that are still queued, silently losing records. [`MetaChunkStream`]
 /// makes one final pass over the queue after first observing the flag, which
 /// closes that window.
 ///
@@ -536,12 +536,12 @@ pub struct ParallelRadReader<R: MappedRecord, T: BufRead + Seek> {
 /// A single iterator cannot be shared between threads ([`Iterator::next`] takes
 /// `&mut self`); do not wrap one in a `Mutex`, as that would serialize the
 /// consumers. Construct one each instead.
-pub struct MetaChunkQueueIter<R: MappedRecord> {
+pub struct MetaChunkStream<R: MappedRecord> {
     queue: Arc<ArrayQueue<MetaChunk<R>>>,
     done: Arc<AtomicBool>,
 }
 
-impl<R: MappedRecord> MetaChunkQueueIter<R> {
+impl<R: MappedRecord> MetaChunkStream<R> {
     /// Build an iterator over `queue`, terminating once `done` is set **and**
     /// the queue has been drained.
     pub fn new(queue: Arc<ArrayQueue<MetaChunk<R>>>, done: Arc<AtomicBool>) -> Self {
@@ -549,7 +549,7 @@ impl<R: MappedRecord> MetaChunkQueueIter<R> {
     }
 }
 
-impl<R: MappedRecord> Iterator for MetaChunkQueueIter<R> {
+impl<R: MappedRecord> Iterator for MetaChunkStream<R> {
     type Item = MetaChunk<R>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -604,20 +604,42 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     /// Create a new [ParallelRadReader] over the contents provided by `reader`.
     /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
     /// threads once the [Self::start_chunk_parsing()] method has been called.
-    pub fn new(mut reader: T, num_consumers: std::num::NonZeroUsize) -> Self {
-        let prelude = RadPrelude::from_bytes(&mut reader).unwrap();
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prelude or file-level tag map cannot be parsed —
+    /// an empty, truncated or otherwise malformed input, which is exactly what
+    /// a partial download or an interrupted write looks like. Prefer this over
+    /// [`Self::new`], which panics in that case.
+    pub fn try_new(mut reader: T, num_consumers: std::num::NonZeroUsize) -> anyhow::Result<Self> {
+        let prelude = RadPrelude::from_bytes(&mut reader).context(
+            "could not parse the RAD prelude; the input may be truncated or not a RAD file",
+        )?;
         let file_tag_map = prelude
             .file_tags
             .parse_tags_from_bytes(&mut reader)
-            .unwrap();
+            .context("could not parse the file-level tag map from the RAD prelude")?;
 
-        Self {
+        Ok(Self {
             prelude,
             file_tag_map,
             reader,
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
             done_var: Arc::new(AtomicBool::new(false)),
-        }
+        })
+    }
+
+    /// Create a new [ParallelRadReader] over the contents provided by `reader`.
+    /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
+    /// threads once the [Self::start_chunk_parsing()] method has been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the prelude or file-level tag map cannot be parsed. Use
+    /// [`Self::try_new`] to handle malformed input — reading a file the user
+    /// supplied is not a situation where a panic is the useful outcome.
+    pub fn new(reader: T, num_consumers: std::num::NonZeroUsize) -> Self {
+        Self::try_new(reader, num_consumers).expect("could not create ParallelRadReader")
     }
 
     /// Create a new [ParallelRadReader] given the provided `prelude`. It is
@@ -625,22 +647,43 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     /// This function will read and parse the file_tag_map.
     /// This [ParallelRadReader] will expect to provide chunks to `num_consumers` different
     /// threads once the [Self::start_chunk_parsing()] method has been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file-level tag map cannot be parsed; see
+    /// [`Self::try_from_prelude`] for the fallible form.
     pub fn from_prelude(
-        mut reader: T,
+        reader: T,
         prelude: RadPrelude,
         num_consumers: std::num::NonZeroUsize,
     ) -> Self {
+        Self::try_from_prelude(reader, prelude, num_consumers)
+            .expect("could not create ParallelRadReader from prelude")
+    }
+
+    /// Create a new [ParallelRadReader] given the provided `prelude`. It is
+    /// assumed that the input `reader` has been consumed up to the point of the end of the prelude.
+    /// This function will read and parse the file_tag_map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file-level tag map cannot be parsed.
+    pub fn try_from_prelude(
+        mut reader: T,
+        prelude: RadPrelude,
+        num_consumers: std::num::NonZeroUsize,
+    ) -> anyhow::Result<Self> {
         let file_tag_map = prelude
             .file_tags
             .parse_tags_from_bytes(&mut reader)
-            .unwrap();
-        Self {
+            .context("could not parse the file-level tag map from the RAD prelude")?;
+        Ok(Self {
             prelude,
             file_tag_map,
             reader,
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
             done_var: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     /// Create a new [ParallelRadReader] given the provided `prelude` and `file_tag_map`.  It is
@@ -667,7 +710,7 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     /// to parse records.
     ///
     /// This is a **low-level** accessor. Consuming the queue correctly requires
-    /// honouring the ordering contract documented on [`MetaChunkQueueIter`]: the
+    /// honouring the ordering contract documented on [`MetaChunkStream`]: the
     /// producer enqueues every meta-chunk *before* setting the done-flag, so a
     /// consumer that stops as soon as it observes the flag can abandon queued
     /// chunks and silently lose records. Prefer [`Self::chunk_iter`], which
@@ -690,12 +733,12 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     ///
     /// **Prefer this over [`Self::get_queue`] / [`Self::is_done`].** Those are
     /// the low-level primitives; using them correctly requires reproducing the
-    /// producer/consumer ordering contract described on [`MetaChunkQueueIter`], and
+    /// producer/consumer ordering contract described on [`MetaChunkStream`], and
     /// getting it wrong silently drops records rather than failing loudly.
     ///
-    /// Call once per consumer thread — see [`MetaChunkQueueIter`] for an example.
-    pub fn chunk_iter(&self) -> MetaChunkQueueIter<R> {
-        MetaChunkQueueIter::new(self.meta_chunk_queue.clone(), self.done_var.clone())
+    /// Call once per consumer thread — see [`MetaChunkStream`] for an example.
+    pub fn chunk_iter(&self) -> MetaChunkStream<R> {
+        MetaChunkStream::new(self.meta_chunk_queue.clone(), self.done_var.clone())
     }
 
     /// Get the current byte offset into the underlying `reader` stream from which this
@@ -757,7 +800,7 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
 
         std::thread::scope(|s| -> anyhow::Result<()> {
             for _ in 0..num_workers.get() {
-                let chunks = MetaChunkQueueIter::new(queue.clone(), done.clone());
+                let chunks = MetaChunkStream::new(queue.clone(), done.clone());
                 s.spawn(move || {
                     for meta_chunk in chunks {
                         process(meta_chunk);
@@ -980,12 +1023,12 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     ///
     /// **Prefer this over [`Self::get_queue`] / [`Self::is_done`].** Those are
     /// the low-level primitives; using them correctly requires reproducing the
-    /// producer/consumer ordering contract described on [`MetaChunkQueueIter`], and
+    /// producer/consumer ordering contract described on [`MetaChunkStream`], and
     /// getting it wrong silently drops records rather than failing loudly.
     ///
-    /// Call once per consumer thread — see [`MetaChunkQueueIter`] for an example.
-    pub fn chunk_iter(&self) -> MetaChunkQueueIter<R> {
-        MetaChunkQueueIter::new(self.meta_chunk_queue.clone(), self.done_var.clone())
+    /// Call once per consumer thread — see [`MetaChunkStream`] for an example.
+    pub fn chunk_iter(&self) -> MetaChunkStream<R> {
+        MetaChunkStream::new(self.meta_chunk_queue.clone(), self.done_var.clone())
     }
 }
 
@@ -1027,7 +1070,7 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
 
         std::thread::scope(|s| -> anyhow::Result<()> {
             for _ in 0..num_workers.get() {
-                let chunks = MetaChunkQueueIter::new(queue.clone(), done.clone());
+                let chunks = MetaChunkStream::new(queue.clone(), done.clone());
                 s.spawn(move || {
                     for meta_chunk in chunks {
                         process(meta_chunk);
@@ -1182,7 +1225,7 @@ mod tests {
 
             std::thread::scope(|s| {
                 for _ in 0..nconsumers {
-                    let chunks = MetaChunkQueueIter::new(queue.clone(), done.clone());
+                    let chunks = MetaChunkStream::new(queue.clone(), done.clone());
                     let seen = &seen;
                     s.spawn(move || {
                         for _meta_chunk in chunks {
@@ -1216,7 +1259,7 @@ mod tests {
 
             std::thread::scope(|s| {
                 for _ in 0..nconsumers {
-                    let chunks = MetaChunkQueueIter::new(queue.clone(), done.clone());
+                    let chunks = MetaChunkStream::new(queue.clone(), done.clone());
                     let started = started.clone();
                     let seen = &seen;
                     s.spawn(move || {
@@ -1242,6 +1285,29 @@ mod tests {
                 seen.load(Ordering::SeqCst),
                 NCHUNKS,
                 "{nconsumers} consumer(s)"
+            );
+        }
+    }
+
+    /// A malformed RAD stream must surface as an error, not a panic. Reading a
+    /// file the user supplied is a normal fallible operation: a truncated
+    /// download or an interrupted write should be reportable, and `new`'s
+    /// `unwrap` made that impossible.
+    #[test]
+    fn try_new_rejects_malformed_input() {
+        let n = std::num::NonZeroUsize::new(2).unwrap();
+        for (what, bytes) in [
+            ("truncated", vec![0_u8; 12]),
+            ("empty", Vec::new()),
+            ("not a rad file", b"@HD\tVN:1.6\nnot rad at all".to_vec()),
+        ] {
+            let res = ParallelRadReader::<PiscemBulkReadRecord, _>::try_new(
+                std::io::BufReader::new(Cursor::new(bytes)),
+                n,
+            );
+            assert!(
+                res.is_err(),
+                "{what} input was accepted as a valid RAD stream"
             );
         }
     }
