@@ -85,8 +85,16 @@ impl RadHeader {
 
         rh.is_paired = buf.pread(0)?;
         rh.ref_count = buf.pread::<u64>(1)?;
-        // we know how many names we will read in.
-        rh.ref_names.reserve_exact(rh.ref_count as usize);
+        // We know how many names we will read in, so reserve up front — but
+        // `ref_count` comes straight off the wire and is not yet corroborated by
+        // anything. Reserving it verbatim lets a malformed or truncated file
+        // request an arbitrary allocation, which aborts the process (capacity
+        // overflow / OOM) instead of surfacing as the parse error it is. Cap the
+        // speculative part; a genuine header just grows past it, and a bogus one
+        // fails at the first `read_exact` below.
+        const MAX_SPECULATIVE_REFS: usize = 64 * 1024;
+        rh.ref_names
+            .reserve_exact((rh.ref_count as usize).min(MAX_SPECULATIVE_REFS));
 
         let mut num_read = 0u64;
         while num_read < rh.ref_count {
@@ -284,6 +292,44 @@ mod tests {
     use super::{RadHeader, RadPrelude};
     use crate::rad_types::{RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue};
     use crate::rad_types::{RadType, TagDesc};
+
+    /// The speculative-reservation cap must not limit real headers. A human
+    /// transcriptome has a few hundred thousand references, well past the cap,
+    /// so the `Vec` has to keep growing past it.
+    #[test]
+    fn header_roundtrips_more_refs_than_the_prealloc_cap() {
+        const NREFS: usize = 70_000; // > MAX_SPECULATIVE_REFS
+        let names: Vec<String> = (0..NREFS).map(|i| format!("tx{i}")).collect();
+        let hdr = RadHeader {
+            is_paired: 0,
+            ref_count: NREFS as u64,
+            ref_names: names.clone(),
+            num_chunks: 7,
+        };
+
+        let mut buf: Vec<u8> = Vec::new();
+        hdr.write(&mut buf).expect("write header");
+
+        let read_back =
+            RadHeader::from_bytes(&mut std::io::Cursor::new(buf)).expect("parse header");
+        assert_eq!(read_back.ref_count, NREFS as u64);
+        assert_eq!(read_back.ref_names.len(), NREFS);
+        assert_eq!(read_back.ref_names[0], names[0]);
+        assert_eq!(read_back.ref_names[NREFS - 1], names[NREFS - 1]);
+        assert_eq!(read_back.num_chunks, 7);
+    }
+
+    /// A `ref_count` that is not corroborated by the rest of the stream must be
+    /// a parse error, not an aborting allocation.
+    #[test]
+    fn absurd_ref_count_is_an_error_not_an_abort() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.push(0); // is_paired
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // ref_count: absurd
+        // ...and then nothing, as a truncated file would have.
+        let res = RadHeader::from_bytes(&mut std::io::Cursor::new(buf));
+        assert!(res.is_err(), "an absurd ref_count was not rejected");
+    }
 
     #[test]
     fn can_write_prelude() {
