@@ -7,9 +7,44 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
-//! This module contains types and traits that provide a high-level iterface to
-//! reading and parsing RAD files.  Additionally, it provides types that give an
-//! interface for parsing RAD chunks in parallel for improved processing performance.
+//! Types and traits providing a high-level interface for reading and parsing
+//! RAD files, including parsing RAD chunks in parallel.
+//!
+//! # Reading a RAD file in parallel
+//!
+//! [`ParallelRadReader`] (and [`ParallelChunkReader`], for when you already hold
+//! a prelude or are reading from something that is not seekable) parses chunks
+//! on one thread and hands **meta-chunks** to consumers through a shared queue.
+//!
+//! There are three levels of control. **Prefer the highest one that fits.**
+//!
+//! | level | API | use when |
+//! | --- | --- | --- |
+//! | high | [`ParallelRadReader::process_parallel`] | you just want the records and do not care to own the threads |
+//! | **middle** | [`ParallelRadReader::chunk_iter`] | you want to drive the worker threads yourself — the common case |
+//! | low | [`ParallelRadReader::get_queue`] + [`ParallelRadReader::is_done`] | neither of the above fits |
+//!
+//! ## The contract the low level asks of you
+//!
+//! The producer pushes **every** meta-chunk onto the queue and only *then* sets
+//! the done-flag. Observing that flag therefore tells you nothing about whether
+//! the queue is empty. A loop shaped like
+//!
+//! ```ignore
+//! while !done.load(Ordering::SeqCst) {
+//!     while let Some(meta_chunk) = queue.pop() { /* ... */ }
+//! }
+//! ```
+//!
+//! abandons whatever is still queued if the flag becomes visible before its next
+//! check. It does not error — it just returns fewer records than the file holds.
+//!
+//! [`MetaChunkStream`], returned by [`ParallelRadReader::chunk_iter`], holds that
+//! invariant for you, and [`ParallelRadReader::process_parallel`] additionally
+//! owns the worker lifecycle. Both are drain-safe by construction; reach for
+//! [`ParallelRadReader::get_queue`] only when you genuinely need the primitives.
+//!
+//! See `examples/read_chunk_single_cell_parallel.rs` for a complete program.
 
 use crate::libradicl::chunk::Chunk;
 use crate::libradicl::codec::{CHUNK_CODEC_TAG, ChunkCodec, decompress_payload};
