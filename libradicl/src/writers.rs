@@ -16,16 +16,16 @@
 //! 1. **Header + file-level tags** — construct a [`RadPrelude`] (schema) and a
 //!    [`TagMap`] of file-level values, then create a [`RadFileWriter`].
 //! 2. **Chunks** — call [`RadFileWriter::write_chunk`] for typed chunks, or
-//!    [`RadFileWriter::write_chunk_bytes`] for raw bytes produced by [`ChunkBuf`]
+//!    [`RadFileWriter::write_chunk_bytes`] for raw bytes produced by [`crate::chunk::ChunkBuf`]
 //!    in a worker thread.
 //! 3. **Finalize** — call [`RadFileWriter::finalize`] to backpatch the `num_chunks`
 //!    field in the header and flush the output.
 //!
 //! # Multi-threaded writing
 //!
-//! Worker threads should each own a [`ChunkBuf`], call
-//! [`ChunkBuf::write_record`] for every record, then hand the bytes produced by
-//! [`ChunkBuf::into_bytes`] to a [`ConcurrentChunkWriter`]:
+//! Worker threads should each own a [`crate::chunk::ChunkBuf`], call
+//! [`crate::chunk::ChunkBuf::write_record`] for every record, then hand the bytes produced by
+//! [`crate::chunk::ChunkBuf::into_bytes`] to a [`ConcurrentChunkWriter`]:
 //!
 //! ```no_run
 //! use std::sync::{Arc, Mutex};
@@ -174,11 +174,11 @@ impl<W: Write + Seek> RadFileWriter<W> {
         Ok(())
     }
 
-    /// Append raw chunk bytes produced by [`ChunkBuf::into_bytes`].
+    /// Append raw chunk bytes produced by [`crate::chunk::ChunkBuf::into_bytes`].
     ///
     /// The bytes must already contain the complete chunk header (`nbytes` + `nrec`)
     /// followed by all record bytes. This is the low-overhead path for multi-threaded
-    /// writing where worker threads build chunks in local [`ChunkBuf`]s.
+    /// writing where worker threads build chunks in local [`crate::chunk::ChunkBuf`]s.
     pub fn write_chunk_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         self.inner
             .write_all(bytes)
@@ -213,7 +213,7 @@ impl<W: Write + Seek> RadFileWriter<W> {
 
 /// A thread-safe wrapper around a [`RadFileWriter`] for parallel chunk writing.
 ///
-/// Multiple threads each build a [`ChunkBuf`], then call
+/// Multiple threads each build a [`crate::chunk::ChunkBuf`], then call
 /// [`ConcurrentChunkWriter::append_chunk_bytes`] (or lock `get_writer_ref()` directly)
 /// to atomically append their chunk to the output file.
 ///

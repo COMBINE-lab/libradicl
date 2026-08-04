@@ -107,7 +107,7 @@ pub trait RecordHeader {
     fn naln(&self) -> u32;
 }
 
-/// This trait specifies that a [RecordHeader] is collatable by some [B] which can be converted
+/// This trait specifies that a [RecordHeader] is collatable by some `B` which can be converted
 /// to a primitive integer.  For example, the header might be collatable by the barcode, and this
 /// trait allows retriving that barcode / key as something convertible to an integer and also
 /// allows writing the header out to a stream.

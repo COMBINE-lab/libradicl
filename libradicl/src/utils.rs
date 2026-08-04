@@ -36,7 +36,7 @@ pub fn has_data_left<T: std::io::BufRead>(reader: &mut T) -> std::io::Result<boo
 /// In the returned tuple, the first [u32] is the number of bytes in the chunk and the
 /// second [u32] is the number of records in the chunk.
 ///
-/// This function lives in util and outside of the [Chunk] trait because it is agnostic
+/// This function lives in util and outside of the [`crate::chunk::Chunk`] trait because it is agnostic
 /// to the type of the chunk (i.e. the record type).
 #[inline]
 pub fn read_chunk_header<T: std::io::BufRead>(reader: &mut T) -> std::io::Result<(u32, u32)> {

@@ -161,7 +161,7 @@ impl ChunkBuf {
     /// The returned chunk keeps the `[u32 nbytes][u32 nrec]` header, with
     /// `nbytes` set to the *compressed* framing size (header + compressed
     /// payload). A reader restores it via [`crate::codec::decompress_payload`].
-    /// [`ChunkCodec::None`] is identical to [`Self::into_bytes`].
+    /// [`crate::codec::ChunkCodec::None`] is identical to [`Self::into_bytes`].
     pub fn into_bytes_with_codec(self, codec: crate::codec::ChunkCodec) -> anyhow::Result<Vec<u8>> {
         use crate::codec::ChunkCodec;
         if codec == ChunkCodec::None {
