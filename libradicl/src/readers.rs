@@ -44,6 +44,19 @@
 //! owns the worker lifecycle. Both are drain-safe by construction; reach for
 //! [`ParallelRadReader::get_queue`] only when you genuinely need the primitives.
 //!
+//! ## Failure
+//!
+//! A truncated or corrupt file makes the producer stop early. When it does, the
+//! done-flag is still set, so consumers finish rather than waiting on chunks
+//! that will never arrive, and the producer returns the error: the call that
+//! started it — [`ParallelRadReader::process_parallel`],
+//! [`ParallelRadReader::start_chunk_parsing`] and friends — yields `Err`.
+//!
+//! The flag therefore means "no more meta-chunks are coming", **not** "the whole
+//! file was read". Consumers see a short but well-formed stream; only the
+//! producer's `Result` distinguishes a complete file from a truncated one, so
+//! do not discard it.
+//!
 //! See `examples/read_chunk_single_cell_parallel.rs` for a complete program.
 
 use crate::libradicl::chunk::Chunk;
@@ -75,6 +88,66 @@ fn codec_from_tag_map(file_tag_map: &TagMap) -> anyhow::Result<ChunkCodec> {
         Some(TagValue::U8(v)) => ChunkCodec::from_u8(*v),
         Some(_) => anyhow::bail!("'{CHUNK_CODEC_TAG}' file tag must be a U8"),
     }
+}
+
+/// Sets the done-flag when dropped, whatever the reason for the drop.
+///
+/// The producer's consumers all wait on this flag, and *nothing* else wakes
+/// them: a producer that returns early (a truncated or corrupt file), or that
+/// panics, would otherwise leave every consumer parked forever, with the error
+/// it produced unable to escape — a caller inside [`std::thread::scope`] cannot
+/// return past the joins, and one joining handles by hand blocks on the first
+/// `join()`. The result is a silent hang rather than a reported failure.
+///
+/// Releasing the consumers from a `Drop` makes "consumers are always released"
+/// structural rather than a property of the happy path. The ordering contract
+/// [`MetaChunkStream`] relies on still holds: the guard is created before the
+/// first push and dropped after the last one, so a consumer that observes the
+/// flag still finds everything enqueued before it.
+///
+/// Note that the flag therefore means "no more meta-chunks will be enqueued",
+/// *not* "the file was read successfully". Whether the producer succeeded is
+/// reported by its [`anyhow::Result`], which callers must check.
+struct DoneOnDrop(Arc<AtomicBool>);
+
+impl Drop for DoneOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The size, in bytes, of the `[nbytes][nrec]` header that prefixes every
+/// chunk. Since `nbytes` counts the header itself, it is also the smallest
+/// legal value of `nbytes` (a chunk holding no records at all).
+const CHUNK_HEADER_BYTES: u32 = 8;
+
+/// Read the header of chunk `chunk_num`, failing rather than panicking on a
+/// short or nonsensical one.
+///
+/// Truncation lands here as often as it lands mid-record — the eight header
+/// bytes are as likely a place to cut a file as any other — and a `nbytes`
+/// smaller than the header it is part of would otherwise underflow the payload
+/// length computed from it.
+///
+/// Only the small end is checked. Callers size their buffer from `nbytes`
+/// before reading the payload, so a corrupt header claiming, say, `u32::MAX`
+/// still asks for ~4 GiB before the read that would have failed anyway — an
+/// OOM where a smaller lie gives a clean parse error. Validating that would
+/// mean knowing how much input remains, which a [BufRead] cannot say (and
+/// which is the point of being generic over it: pipes, streams, decompressors).
+/// Tracked in COMBINE-lab/libradicl#48; it needs a *corrupt* header rather than
+/// a merely truncated one, and stays bounded by the u32 framing.
+fn next_chunk_header<T: BufRead>(br: &mut T, chunk_num: usize) -> anyhow::Result<(u32, u32)> {
+    let (nbytes, nrec) = utils::read_chunk_header(br).with_context(|| {
+        format!("failed to read the header of chunk {chunk_num}; the RAD file may be truncated")
+    })?;
+    anyhow::ensure!(
+        nbytes >= CHUNK_HEADER_BYTES,
+        "chunk {chunk_num} declares a size of {nbytes} bytes, which cannot be right; \
+         a chunk is at least {CHUNK_HEADER_BYTES} bytes (its own header). \
+         The RAD file appears to be corrupt."
+    );
+    Ok((nbytes, nrec))
 }
 
 /// A [MetaChunk] consists of a series of [Chunk]s that may be grouped together
@@ -195,8 +268,10 @@ where
 /// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
 /// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
 ///   placed
-/// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
-///   underlying file have been read and added to the work queue.
+/// * `done_var` - An [AtomicBool] that is set to true once this function stops enqueuing work —
+///   whether because every [Chunk] of the underlying file has been read and added to the work
+///   queue, or because parsing failed part way through (see [`DoneOnDrop`]). Consumers are
+///   released either way; the returned [`anyhow::Result`] says which happened.
 fn fill_work_queue_filtered<
     R: MappedRecord,
     T: BufRead,
@@ -217,6 +292,10 @@ where
     <R as MappedRecord>::ParsingContext: Clone,
     FilterF: Fn(&[u8], &<R as MappedRecord>::ParsingContext) -> bool,
 {
+    // Release the consumers on *every* exit path — including the `?`s below and
+    // a panic — not just on a clean run through the loop.
+    let _done_guard = DoneOnDrop(done_var);
+
     const BUFSIZE: usize = 524208;
     // the buffer that will hold our records
     let mut buf = vec![0u8; BUFSIZE];
@@ -266,13 +345,24 @@ where
                 buf.pwrite::<u32>(nbytes_chunk, boffset)?;
                 buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
                 br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
-                    .context("failed to read from work queue.")?;
+                    .with_context(|| {
+                        format!(
+                            "failed to read the {nbytes_chunk} bytes of chunk {}; \
+                             the RAD file may be truncated",
+                            chunk_num - 1
+                        )
+                    })?;
                 nbytes_chunk
             } else {
                 let br = chunk_iter.get_mut_buf_read();
-                scratch.resize(nbytes_chunk as usize - 8, 0);
-                br.read_exact(&mut scratch)
-                    .context("failed to read compressed chunk from work queue.")?;
+                scratch.resize(nbytes_chunk as usize - CHUNK_HEADER_BYTES as usize, 0);
+                br.read_exact(&mut scratch).with_context(|| {
+                    format!(
+                        "failed to read the {nbytes_chunk} compressed bytes of chunk {}; \
+                         the RAD file may be truncated",
+                        chunk_num - 1
+                    )
+                })?;
                 let decoded = decompress_payload(codec, &scratch)?;
                 let eff = decoded.len() as u32 + 8;
                 if boffset + eff as usize > buf.len() {
@@ -301,7 +391,7 @@ where
         // headers left to read
         let last_chunk = chunk_iter.is_last_chunk();
         if !last_chunk {
-            let (nc, nr) = Chunk::<R>::read_header(chunk_iter.get_mut_buf_read());
+            let (nc, nr) = next_chunk_header(chunk_iter.get_mut_buf_read(), chunk_num)?;
             nbytes_chunk = nc;
             nrec_chunk = nr;
         }
@@ -342,7 +432,7 @@ where
             force_push = false;
         }
     }
-    done_var.store(true, Ordering::SeqCst);
+    // `_done_guard` sets the done-flag as it drops here.
     Ok(())
 }
 
@@ -363,8 +453,10 @@ where
 /// * `prelude` - A shared reference to the [RadPrelude] corresponding to the chunks in the file
 /// * `meta_chunk_queue` - A parallel queue onto which the raw data for each [MetaChunk] will be
 ///   placed
-/// * `done_var` - An [AtomicBool] that will be set to true only once all of the [Chunk]s of the
-///   underlying file have been read and added to the work queue.
+/// * `done_var` - An [AtomicBool] that is set to true once this function stops enqueuing work —
+///   whether because every [Chunk] of the underlying file has been read and added to the work
+///   queue, or because parsing failed part way through (see [`DoneOnDrop`]). Consumers are
+///   released either way; the returned [`anyhow::Result`] says which happened.
 fn fill_work_queue<
     R: MappedRecord,
     T: BufRead,
@@ -382,6 +474,10 @@ where
     <R as MappedRecord>::ParsingContext: RecordContext,
     <R as MappedRecord>::ParsingContext: Clone,
 {
+    // Release the consumers on *every* exit path — including the `?`s below and
+    // a panic — not just on a clean run through the loop.
+    let _done_guard = DoneOnDrop(done_var);
+
     const BUFSIZE: usize = 524208;
     // the buffer that will hold our records
     let mut buf = vec![0u8; BUFSIZE];
@@ -435,7 +531,13 @@ where
                 buf.pwrite::<u32>(nrec_chunk, boffset + 4)?;
                 // read everything from the end of the eader into the buffer
                 br.read_exact(&mut buf[(boffset + 8)..(boffset + nbytes_chunk as usize)])
-                    .context("failed to read from work queue.")?;
+                    .with_context(|| {
+                        format!(
+                            "failed to read the {nbytes_chunk} bytes of chunk {}; \
+                             the RAD file may be truncated",
+                            chunk_num - 1
+                        )
+                    })?;
                 chunks_in_meta_chunk += 1;
                 cbytes += nbytes_chunk;
                 crec += nrec_chunk;
@@ -445,9 +547,14 @@ where
                 // *uncompressed* `[eff_nbytes][nrec][records]` chunk into `buf`,
                 // so downstream record parsing is identical to the codec=None case.
                 let br = chunk_iter.get_mut_buf_read();
-                scratch.resize(nbytes_chunk as usize - 8, 0);
-                br.read_exact(&mut scratch)
-                    .context("failed to read compressed chunk from work queue.")?;
+                scratch.resize(nbytes_chunk as usize - CHUNK_HEADER_BYTES as usize, 0);
+                br.read_exact(&mut scratch).with_context(|| {
+                    format!(
+                        "failed to read the {nbytes_chunk} compressed bytes of chunk {}; \
+                         the RAD file may be truncated",
+                        chunk_num - 1
+                    )
+                })?;
                 let decoded = decompress_payload(codec, &scratch)?;
                 let eff_nbytes = decoded.len() as u32 + 8;
                 let boffset = cbytes as usize;
@@ -470,7 +577,7 @@ where
         // headers left to read
         let last_chunk = chunk_iter.is_last_chunk();
         if !last_chunk {
-            let (nc, nr) = Chunk::<R>::read_header(chunk_iter.get_mut_buf_read());
+            let (nc, nr) = next_chunk_header(chunk_iter.get_mut_buf_read(), chunk_num)?;
             nbytes_chunk = nc;
             nrec_chunk = nr;
         }
@@ -511,7 +618,7 @@ where
             force_push = false;
         }
     }
-    done_var.store(true, Ordering::SeqCst);
+    // `_done_guard` sets the done-flag as it drops here.
     Ok(())
 }
 
@@ -546,6 +653,13 @@ pub struct ParallelRadReader<R: MappedRecord, T: BufRead + Seek> {
 /// chunks that are still queued, silently losing records. [`MetaChunkStream`]
 /// makes one final pass over the queue after first observing the flag, which
 /// closes that window.
+///
+/// # Termination and failure
+///
+/// The flag is set on *every* producer exit path, including a parse error and a
+/// panic, so this iterator always terminates. It ends the same way whether the
+/// file was read in full or the producer gave up on a truncated one — check the
+/// producer's [`anyhow::Result`] to tell those apart.
 ///
 /// # Sharing across threads
 ///
@@ -760,6 +874,12 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
     /// and it is still possible that new [MetaChunk]s will be placed on the work queue.  However, once
     /// the contained [AtomicBool] has been set to true, the parsing is done and no further
     /// [MetaChunk]s will be placed on the queue, other than those that are already "in flight".
+    ///
+    /// "Done" means only that nothing further will be enqueued. It is also set when the
+    /// producer stops early on a truncated or corrupt file — deliberately, since consumers
+    /// waiting on a flag that never arrives is a hang with no diagnostic. Use the
+    /// [`anyhow::Result`] returned by the call that started the producer to tell a complete
+    /// read from a failed one.
     pub fn is_done(&self) -> Arc<AtomicBool> {
         self.done_var.clone()
     }
@@ -856,6 +976,12 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
         <R as MappedRecord>::ParsingContext: RecordContext,
         <R as MappedRecord>::ParsingContext: Clone,
     {
+        // The codec check below can fail before the producer starts — a file
+        // written by a newer producer, or a corrupt tag map — and consumers are
+        // already waiting by then. Guard the whole call, not just the parse
+        // loop, so no early exit from here can strand them either.
+        let _done_guard = DoneOnDrop(self.done_var.clone());
+
         let mut pcr = ParallelChunkReader::<R> {
             prelude: &self.prelude,
             meta_chunk_queue: self.meta_chunk_queue.clone(),
@@ -889,6 +1015,10 @@ impl<R: MappedRecord, T: BufRead + Seek> ParallelRadReader<R, T> {
         <R as MappedRecord>::ParsingContext: Clone,
         FilterFn: Fn(&[u8], &<R as MappedRecord>::ParsingContext) -> bool,
     {
+        // See the note in [`Self::start_chunk_parsing`]: the codec check can
+        // fail before the producer starts, with consumers already waiting.
+        let _done_guard = DoneOnDrop(self.done_var.clone());
+
         let mut pcr = ParallelChunkReader::<R> {
             prelude: &self.prelude,
             meta_chunk_queue: self.meta_chunk_queue.clone(),
@@ -1014,6 +1144,7 @@ impl<T: BufRead> LastChunkSignaler for ReadUntilEOFIter<T> {
 pub struct ParallelChunkReader<'a, R: MappedRecord> {
     pub prelude: &'a RadPrelude,
     pub meta_chunk_queue: Arc<ArrayQueue<MetaChunk<R>>>,
+    /// Set once the producer stops enqueuing meta-chunks; see [`Self::is_done`].
     pub done_var: Arc<AtomicBool>,
     /// Chunk compression codec (from the file-tag map); chunks are decompressed
     /// transparently in the reader thread so consumers see uncompressed records.
@@ -1050,6 +1181,12 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
     /// and it is still possible that new [MetaChunk]s will be placed on the work queue.  However, once
     /// the contained [AtomicBool] has been set to true, the parsing is done and no further
     /// [MetaChunk]s will be placed on the queue, other than those that are already "in flight".
+    ///
+    /// "Done" means only that nothing further will be enqueued. It is also set when the
+    /// producer stops early on a truncated or corrupt file — deliberately, since consumers
+    /// waiting on a flag that never arrives is a hang with no diagnostic. Use the
+    /// [`anyhow::Result`] returned by the call that started the producer to tell a complete
+    /// read from a failed one.
     pub fn is_done(&self) -> Arc<AtomicBool> {
         self.done_var.clone()
     }
@@ -1347,20 +1484,24 @@ mod tests {
         }
     }
 
-    /// End-to-end coverage of the high-level driver over a real RAD stream:
-    /// every record written must be handed to the closure exactly once, at any
-    /// worker count.
-    #[test]
-    fn process_parallel_visits_every_record() {
+    /// Number of records each chunk of [`test_rad_stream`] holds.
+    const RECS_PER_CHUNK: u32 = 3;
+
+    /// Build a complete, well-formed alevin-fry RAD stream of `nchunks` chunks,
+    /// each holding [`RECS_PER_CHUNK`] records.
+    fn test_rad_stream(nchunks: usize) -> Vec<u8> {
+        test_rad_stream_with_codec_tag(nchunks, None)
+    }
+
+    /// As [`test_rad_stream`], but optionally advertising `codec_tag` as the
+    /// chunk codec — used to stand in for a file this build cannot read.
+    fn test_rad_stream_with_codec_tag(nchunks: usize, codec_tag: Option<u8>) -> Vec<u8> {
         use crate::chunk::Chunk;
         use crate::header::RadPrelude;
         use crate::rad_types::{RadType, TagDesc, TagSection, TagSectionLabel};
         use crate::record::{AlevinFryReadRecord, AlevinFryRecordContext};
         use crate::writers::RadFileWriter;
         use std::io::Cursor;
-
-        const NCHUNKS: usize = 64;
-        const RECS_PER_CHUNK: u32 = 3;
 
         let hdr = crate::header::RadHeader {
             is_paired: 0,
@@ -1373,6 +1514,12 @@ mod tests {
             file_tags.add_tag_desc(TagDesc {
                 name: name.to_string(),
                 typeid: RadType::Int(RadIntId::U16),
+            });
+        }
+        if codec_tag.is_some() {
+            file_tags.add_tag_desc(TagDesc {
+                name: crate::codec::CHUNK_CODEC_TAG.to_string(),
+                typeid: RadType::Int(RadIntId::U8),
             });
         }
         let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
@@ -1396,6 +1543,9 @@ mod tests {
         let mut file_tag_map = crate::rad_types::TagMap::with_keyset(&prelude.file_tags.tags);
         file_tag_map.add(crate::rad_types::TagValue::U16(16));
         file_tag_map.add(crate::rad_types::TagValue::U16(12));
+        if let Some(id) = codec_tag {
+            file_tag_map.add(crate::rad_types::TagValue::U8(id));
+        }
 
         let ctx = AlevinFryRecordContext::get_context_from_tag_section(
             &prelude.file_tags,
@@ -1416,10 +1566,48 @@ mod tests {
         };
 
         let mut fw = RadFileWriter::new(Cursor::new(Vec::new()), &prelude, &file_tag_map).unwrap();
-        for _ in 0..NCHUNKS {
+        for _ in 0..nchunks {
             fw.write_chunk(&chunk, &ctx).unwrap();
         }
-        let bytes = fw.finalize().unwrap().into_inner();
+        fw.finalize().unwrap().into_inner()
+    }
+
+    /// Run `f` on its own thread and fail the test if it has not returned within
+    /// `secs`, rather than wedging the whole test binary.
+    ///
+    /// The failure this guards against *is* a hang, so a test that reproduces it
+    /// must not itself hang. A timed-out thread is left parked; the harness
+    /// exits the process once the run completes, which reaps it.
+    fn run_with_timeout<T: Send + 'static>(
+        what: &str,
+        secs: u64,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(v) => v,
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("{what}: never returned — consumers are still waiting on the done-flag")
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("{what}: panicked instead of returning an error")
+            }
+        }
+    }
+
+    /// End-to-end coverage of the high-level driver over a real RAD stream:
+    /// every record written must be handed to the closure exactly once, at any
+    /// worker count.
+    #[test]
+    fn process_parallel_visits_every_record() {
+        use crate::record::AlevinFryReadRecord;
+
+        const NCHUNKS: usize = 64;
+        let bytes = test_rad_stream(NCHUNKS);
 
         let expected = NCHUNKS * RECS_PER_CHUNK as usize;
         for nworkers in [1_usize, 2, 8] {
@@ -1442,5 +1630,125 @@ mod tests {
                 "process_parallel with {nworkers} worker(s) did not visit every record"
             );
         }
+    }
+
+    /// A producer that stops early must still release its consumers.
+    ///
+    /// Consumers wait on the done-flag and on nothing else. While that flag was
+    /// stored only after the parse loop ran to completion, any `?` in the loop
+    /// returned before the store: every consumer parked forever, and the error —
+    /// correctly produced — could never be delivered, because a caller inside
+    /// `std::thread::scope` cannot return past its joins. A truncated RAD file
+    /// (an interrupted write, a full disk) therefore hung the process with no
+    /// diagnostic at all. See COMBINE-lab/libradicl#47.
+    ///
+    /// Where the cut lands does not matter, so this walks several of them.
+    #[test]
+    fn truncated_input_fails_instead_of_hanging() {
+        use crate::record::AlevinFryReadRecord;
+
+        let bytes = test_rad_stream(64);
+        for pct in [99_usize, 80, 50, 20, 1] {
+            let truncated = bytes[..bytes.len() * pct / 100].to_vec();
+            let res = run_with_timeout(&format!("reading a file cut to {pct}%"), 60, move || {
+                let n = std::num::NonZeroUsize::new(4).unwrap();
+                let mut reader = ParallelRadReader::<AlevinFryReadRecord, _>::try_new(
+                    std::io::BufReader::new(Cursor::new(truncated)),
+                    n,
+                )?;
+                reader.process_parallel(n, |_meta_chunk| {})
+            });
+            assert!(
+                res.is_err(),
+                "a file cut to {pct}% was read as if it were complete"
+            );
+        }
+    }
+
+    /// The same guarantee at the low level, where the caller drives the flag
+    /// itself: after a failed parse the flag must be set, since that is the only
+    /// thing a hand-rolled `pop`/`is_done` loop has to go on.
+    #[test]
+    fn done_flag_is_set_when_parsing_fails() {
+        use crate::record::AlevinFryReadRecord;
+
+        let bytes = test_rad_stream(64);
+        let truncated = bytes[..bytes.len() / 2].to_vec();
+
+        let (failed, done) = run_with_timeout("parsing a truncated file", 60, move || {
+            let mut reader = ParallelRadReader::<AlevinFryReadRecord, _>::try_new(
+                std::io::BufReader::new(Cursor::new(truncated)),
+                std::num::NonZeroUsize::new(8).unwrap(),
+            )
+            .unwrap();
+            let done = reader.is_done();
+            let failed = reader
+                .start_chunk_parsing(EMPTY_METACHUNK_CALLBACK)
+                .is_err();
+            (failed, done.load(Ordering::SeqCst))
+        });
+
+        assert!(failed, "truncated input parsed without error");
+        assert!(done, "the producer failed without releasing its consumers");
+    }
+
+    /// A chunk header claiming a size smaller than the header itself is corrupt.
+    /// Believing it underflows the payload length derived from it — a panic, or
+    /// an enormous allocation — so it has to be rejected up front.
+    #[test]
+    fn undersized_chunk_header_is_rejected() {
+        use crate::header::RadPrelude;
+        use crate::record::AlevinFryReadRecord;
+
+        let mut bytes = test_rad_stream(8);
+
+        // Locate the first chunk header: immediately past the prelude and the
+        // file-level tag values.
+        let first_chunk_offset = {
+            let mut cursor = Cursor::new(&bytes[..]);
+            let prelude = RadPrelude::from_bytes(&mut cursor).unwrap();
+            prelude
+                .file_tags
+                .parse_tags_from_bytes(&mut cursor)
+                .unwrap();
+            cursor.position() as usize
+        };
+        // ... and claim it is 3 bytes long, header included.
+        bytes[first_chunk_offset..first_chunk_offset + 4].copy_from_slice(&3u32.to_le_bytes());
+
+        let res = run_with_timeout("reading a corrupt chunk header", 60, move || {
+            let n = std::num::NonZeroUsize::new(4).unwrap();
+            let mut reader = ParallelRadReader::<AlevinFryReadRecord, _>::try_new(
+                std::io::BufReader::new(Cursor::new(bytes)),
+                n,
+            )?;
+            reader.process_parallel(n, |_meta_chunk| {})
+        });
+
+        assert!(res.is_err(), "a corrupt chunk header was accepted");
+    }
+
+    /// The producer is not the only thing that can fail after the consumers are
+    /// already waiting: `start_chunk_parsing` checks the chunk codec first, and
+    /// a file advertising one this build cannot read fails there, before the
+    /// parse loop is ever entered. That exit has to release the consumers too.
+    #[test]
+    fn unreadable_codec_fails_instead_of_hanging() {
+        use crate::record::AlevinFryReadRecord;
+
+        // Codec id 42: no such codec here — what a file from a future producer
+        // looks like to this build.
+        let bytes = test_rad_stream_with_codec_tag(8, Some(42));
+
+        let res = run_with_timeout("reading an unknown chunk codec", 60, move || {
+            let n = std::num::NonZeroUsize::new(4).unwrap();
+            let mut reader = ParallelRadReader::<AlevinFryReadRecord, _>::try_new(
+                std::io::BufReader::new(Cursor::new(bytes)),
+                n,
+            )?;
+            reader.process_parallel(n, |_meta_chunk| {})
+        });
+
+        assert!(res.is_err(), "an unknown chunk codec was accepted");
     }
 }
