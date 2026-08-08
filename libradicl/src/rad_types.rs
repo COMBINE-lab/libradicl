@@ -1072,20 +1072,131 @@ pub enum OversizedValuePolicy {
     Error,
 }
 
-/// The number of elements (or bytes, for a string) a declared length type can
-/// address, or `None` for a type with no length field.
-fn max_addressable_len(tag_type: &RadType) -> Option<usize> {
+/// What actually happened when a tag value was written.
+///
+/// Returned by the `_reporting` writers. `#[must_use]`, because the outcome this
+/// exists to report — a value silently shortened — is exactly the kind that goes
+/// unnoticed: the write returned `Ok`, the file is valid, and only the content is
+/// short. Ignoring it stays possible via `let _ =`, which leaves a deliberate
+/// mark in the source rather than an absence of one.
+#[must_use = "a tag write can succeed while shortening the value; use the \
+              plain writer if the outcome genuinely does not matter"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TagWriteOutcome {
+    /// The value was written whole.
+    Complete,
+    /// The value did not fit its declared length type and was shortened.
+    Truncated {
+        /// elements written — bytes, for a string
+        written: usize,
+        /// elements the value actually held
+        requested: usize,
+    },
+}
+
+impl TagWriteOutcome {
+    /// Whether the value was written whole.
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    /// Whether the value had to be shortened — the case worth branching on.
+    pub fn is_truncated(self) -> bool {
+        matches!(self, Self::Truncated { .. })
+    }
+}
+
+/// A tag that had to be shortened, named so a caller can report which.
+///
+/// `#[non_exhaustive]` for the same reason as the types either side of it: of
+/// the three this is the likeliest to gain a field (which tag, where in the
+/// section), and adding one later would otherwise be a breaking change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TruncatedTag {
+    /// the tag's name, from its [`TagDesc`]
+    pub name: String,
+    /// elements written — bytes, for a string
+    pub written: usize,
+    /// elements the value actually held
+    pub requested: usize,
+}
+
+/// What happened when a whole tag section was written.
+///
+/// Saves a caller from threading per-value outcomes by hand. `#[must_use]` for
+/// the same reason as [`TagWriteOutcome`]; a clean report allocates nothing.
+#[must_use = "writing a tag section can succeed while shortening values; use \
+              the plain writer if the outcome genuinely does not matter"]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TagSectionWriteReport {
+    /// one entry per tag that was shortened, in write order
+    pub truncated: Vec<TruncatedTag>,
+}
+
+impl TagSectionWriteReport {
+    /// Whether every value was written whole.
+    pub fn is_clean(&self) -> bool {
+        self.truncated.is_empty()
+    }
+}
+
+/// How many elements (or bytes, for a string) a declared length type can
+/// address.
+///
+/// The three cases are kept distinct because they answer [`TagValue::fits`]
+/// differently. Folding "cannot be written at all" into the same arm as
+/// "effectively unbounded" is what made `fits` answer `true` for a signed
+/// length type whose write then failed.
+enum LengthBound {
+    /// No length field: the value is written whole whatever its size.
+    Unbounded,
+    /// The length field addresses at most this many elements.
+    Max(usize),
+    /// The declared length type cannot be written at all, so no value fits.
+    Unwritable,
+}
+
+/// How many bytes of `s` a write bounded to `max` bytes actually emits.
+///
+/// Backs off to the nearest UTF-8 character boundary at or below `max`: the
+/// read path uses `String::from_utf8_unchecked`, so splitting a multi-byte
+/// character would be undefined behaviour downstream rather than merely a wrong
+/// value. The result is therefore up to three bytes below `max`.
+///
+/// Shared by the write itself and by [`TagValue::outcome_under`], so the length
+/// reported and the length written are decided in one place.
+fn truncated_str_len(s: &str, max: usize) -> usize {
+    if s.len() <= max {
+        return s.len();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// The bound a declared length type places on the value written under it.
+fn length_bound(tag_type: &RadType) -> LengthBound {
     match tag_type {
         // A string's length is always written as a `u16`.
-        RadType::String => Some(u16::MAX as usize),
-        RadType::Array(len_t, _) => Some(match len_t {
-            RadIntId::U8 => u8::MAX as usize,
-            RadIntId::U16 => u16::MAX as usize,
-            RadIntId::U32 => u32::MAX as usize,
+        RadType::String => LengthBound::Max(u16::MAX as usize),
+        RadType::Array(len_t, _) => match len_t {
+            RadIntId::U8 => LengthBound::Max(u8::MAX as usize),
+            RadIntId::U16 => LengthBound::Max(u16::MAX as usize),
+            RadIntId::U32 => LengthBound::Max(u32::MAX as usize),
             // A `usize` can never exceed these.
-            _ => usize::MAX,
-        }),
-        _ => None,
+            RadIntId::U64 | RadIntId::U128 => LengthBound::Max(usize::MAX),
+            // The writer rejects a signed length outright; mirroring that here
+            // keeps `fits` from promising a write that cannot happen.
+            RadIntId::I8 | RadIntId::I16 | RadIntId::I32 | RadIntId::I64 | RadIntId::I128 => {
+                LengthBound::Unwritable
+            }
+        },
+        _ => LengthBound::Unbounded,
     }
 }
 
@@ -1096,11 +1207,51 @@ impl TagValue {
     /// Worth checking when the value is provenance or anything else where losing
     /// the tail silently would matter: [`OversizedValuePolicy::Truncate`] does
     /// not report what it dropped.
+    ///
+    /// `false` also covers a value the writer would refuse outright — an array
+    /// under a signed length type — so a `true` here means the write can
+    /// actually proceed, not merely that nothing would be dropped.
     pub fn fits(&self, tag_type: &RadType) -> bool {
-        let Some(max) = max_addressable_len(tag_type) else {
-            return true;
-        };
-        self.len_for_write().is_none_or(|len| len <= max)
+        match length_bound(tag_type) {
+            LengthBound::Unwritable => false,
+            LengthBound::Unbounded => true,
+            LengthBound::Max(max) => self.len_for_write().is_none_or(|len| len <= max),
+        }
+    }
+
+    /// The outcome writing this value under `tag_type` would produce, decided
+    /// without writing anything.
+    ///
+    /// Deciding it separately from the write is what lets the reporting writers
+    /// defer to the plain ones for the bytes: there is one implementation of
+    /// what gets written, and one of what to say about it.
+    ///
+    /// A value the writer would reject reports [`TagWriteOutcome::Complete`]
+    /// here; the write then fails and this outcome is discarded with it, so the
+    /// caller never sees it. Only [`Self::fits`] answers that question.
+    fn outcome_under(&self, tag_type: &RadType) -> TagWriteOutcome {
+        match (length_bound(tag_type), self.len_for_write()) {
+            (LengthBound::Max(max), Some(requested)) if requested > max => {
+                TagWriteOutcome::Truncated {
+                    written: self.written_len_under(tag_type, max),
+                    requested,
+                }
+            }
+            _ => TagWriteOutcome::Complete,
+        }
+    }
+
+    /// How many elements (bytes, for a string) the write would actually emit
+    /// once bounded to `max`.
+    ///
+    /// Not always `max`: a string is cut back to a UTF-8 character boundary, so
+    /// it can end up to three bytes shorter. Reporting `max` regardless would
+    /// name a length the file does not contain.
+    fn written_len_under(&self, tag_type: &RadType, max: usize) -> usize {
+        match (self, tag_type) {
+            (Self::String(s), RadType::String) => truncated_str_len(s, max),
+            _ => max,
+        }
     }
 
     /// The length this value would write, for the variants that write one.
@@ -1163,8 +1314,10 @@ impl TagValue {
     /// fit its declared length type.
     ///
     /// Equivalent to [`Self::write_with_type_and_policy`] with
-    /// [`OversizedValuePolicy::Truncate`]. Use [`Self::fits`] first if a silent
-    /// shortening would matter.
+    /// [`OversizedValuePolicy::Truncate`]. Shortening is silent, and this path
+    /// stays free of the machinery to report it: use
+    /// [`Self::write_with_type_reporting`] to be told, or [`Self::fits`] to ask
+    /// beforehand.
     #[inline]
     pub fn write_with_type<W: Write>(
         &self,
@@ -1172,6 +1325,46 @@ impl TagValue {
         writer: &mut W,
     ) -> anyhow::Result<()> {
         self.write_with_type_and_policy(tag_type, writer, OversizedValuePolicy::default())
+    }
+
+    /// Write this tag value and report whether it was written whole.
+    ///
+    /// The reporting counterpart of [`Self::write_with_type`]: same bytes, but the
+    /// [`TagWriteOutcome`] is `#[must_use]`, so a caller has to acknowledge the
+    /// possibility that the value was shortened instead of finding out later
+    /// from a short field. Prefer this for anything whose tail matters —
+    /// provenance, identifiers, free text.
+    ///
+    /// The cost of reporting falls here rather than on the plain writer: this
+    /// determines the outcome and then defers to the same write, so a caller who
+    /// does not want the outcome pays nothing to produce it.
+    #[inline]
+    pub fn write_with_type_reporting<W: Write>(
+        &self,
+        tag_type: &RadType,
+        writer: &mut W,
+    ) -> anyhow::Result<TagWriteOutcome> {
+        self.write_with_type_and_policy_reporting(tag_type, writer, OversizedValuePolicy::default())
+    }
+
+    /// Write this tag value under an explicit policy and report the outcome.
+    ///
+    /// With [`OversizedValuePolicy::Error`] an over-long value fails the write,
+    /// so the outcome is always [`TagWriteOutcome::Complete`] on success; the
+    /// combination is still useful for code that takes the policy from a config
+    /// and should behave sensibly either way.
+    pub fn write_with_type_and_policy_reporting<W: Write>(
+        &self,
+        tag_type: &RadType,
+        writer: &mut W,
+        policy: OversizedValuePolicy,
+    ) -> anyhow::Result<TagWriteOutcome> {
+        // Determined before writing, since the write bounds the value in place
+        // and cannot report afterwards what it dropped. The write itself is then
+        // the same one the plain path takes.
+        let outcome = self.outcome_under(tag_type);
+        self.write_with_type_and_policy(tag_type, writer, policy)?;
+        Ok(outcome)
     }
 
     /// Write this tag value, deciding what to do about a value too long for the
@@ -1356,16 +1549,11 @@ impl TagValue {
                             s.len(),
                             MAX
                         ),
+                        // Cut on a character boundary; `truncated_str_len` is the
+                        // one place that decides where, so the reporting writers
+                        // name the same length this emits.
                         OversizedValuePolicy::Truncate => {
-                            // Cut on a character boundary: the read path uses
-                            // `String::from_utf8_unchecked`, so splitting a
-                            // multi-byte character would be undefined behaviour
-                            // downstream rather than merely a wrong value.
-                            let mut end = MAX;
-                            while end > 0 && !s.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            &s.as_bytes()[..end]
+                            &s.as_bytes()[..truncated_str_len(s, MAX)]
                         }
                     }
                 } else {
@@ -1660,6 +1848,11 @@ pub fn get_tag_by_name<'a>(
 }
 
 #[inline(always)]
+/// Write each value in a tag map, in key order.
+///
+/// The single implementation of writing a tag section: the reporting variant
+/// decides its report and then calls this, so a caller who does not want the
+/// report pays nothing for it and neither path can drift from the other.
 fn write_tag_map_values<W: Write>(
     dat: &[TagValue],
     keys: &[TagDesc],
@@ -1670,6 +1863,33 @@ fn write_tag_map_values<W: Write>(
             .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
     }
     Ok(())
+}
+
+/// As [`write_tag_map_values`], additionally reporting any value that had to be
+/// shortened.
+///
+/// Decides the report first and then defers to [`write_tag_map_values`] for
+/// every byte, so there is exactly one implementation of the writing and the
+/// two cannot drift. The extra cost — a length comparison per value, and an
+/// allocation only if something was truncated — falls on the caller who asked
+/// for the report.
+fn write_tag_map_values_reporting<W: Write>(
+    dat: &[TagValue],
+    keys: &[TagDesc],
+    writer: &mut W,
+) -> anyhow::Result<TagSectionWriteReport> {
+    let mut report = TagSectionWriteReport::default();
+    for (n, v) in keys.iter().zip(dat.iter()) {
+        if let TagWriteOutcome::Truncated { written, requested } = v.outcome_under(&n.typeid) {
+            report.truncated.push(TruncatedTag {
+                name: n.name.clone(),
+                written,
+                requested,
+            });
+        }
+    }
+    write_tag_map_values(dat, keys, writer)?;
+    Ok(report)
 }
 
 impl<'a> TagViewMap<'a> {
@@ -1714,6 +1934,18 @@ impl<'a> TagViewMap<'a> {
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         write_tag_map_values(&self.dat, self.keys, writer)
+    }
+
+    /// Writes the values in this [TagViewMap] and reports which, if any, had to
+    /// be shortened to fit their declared length type.
+    ///
+    /// The reporting counterpart of [`Self::write_values`], which stays free of
+    /// this bookkeeping; see [`TagSectionWriteReport`].
+    pub fn write_values_reporting<W: Write>(
+        &self,
+        writer: &mut W,
+    ) -> anyhow::Result<TagSectionWriteReport> {
+        write_tag_map_values_reporting(&self.dat, self.keys, writer)
     }
 }
 
@@ -1779,6 +2011,18 @@ impl TagMap {
     /// writer, propagating any errors or returning Ok(()) on success.
     pub fn write_values<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         write_tag_map_values(&self.dat, &self.keys, writer)
+    }
+
+    /// Writes the values in this [TagMap] and reports which, if any, had to be
+    /// shortened to fit their declared length type.
+    ///
+    /// The reporting counterpart of [`Self::write_values`], which stays free of
+    /// this bookkeeping; see [`TagSectionWriteReport`].
+    pub fn write_values_reporting<W: Write>(
+        &self,
+        writer: &mut W,
+    ) -> anyhow::Result<TagSectionWriteReport> {
+        write_tag_map_values_reporting(&self.dat, &self.keys, writer)
     }
 
     /// return an iterator over the [TagDesc] for the keys
@@ -1988,7 +2232,8 @@ impl TagSection {
 mod tests {
     use crate::rad_types::RadType;
     use crate::rad_types::{
-        OversizedValuePolicy, RadAtomicId, RadIntId, TagSection, TagSectionLabel, TagValue,
+        OversizedValuePolicy, RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue,
+        TagWriteOutcome,
     };
     use std::io::Write;
 
@@ -2320,5 +2565,238 @@ mod tests {
 
         // Scalars have no length field to overflow.
         assert!(TagValue::U32(7).fits(&RadType::Int(RadIntId::U32)));
+    }
+
+    /// The reporting writer reports a shortening that the plain one performs
+    /// silently, and writes exactly the same bytes either way.
+    #[test]
+    fn reporting_write_reports_truncation_without_changing_the_bytes() {
+        let value = TagValue::String("x".repeat(70_000));
+
+        let mut plain = Vec::new();
+        value.write_with_type(&RadType::String, &mut plain).unwrap();
+
+        let mut reporting = Vec::new();
+        let outcome = value
+            .write_with_type_reporting(&RadType::String, &mut reporting)
+            .unwrap();
+
+        assert_eq!(
+            plain, reporting,
+            "reporting must not change what is written"
+        );
+        assert_eq!(
+            outcome,
+            TagWriteOutcome::Truncated {
+                written: u16::MAX as usize,
+                requested: 70_000,
+            }
+        );
+        assert!(!outcome.is_complete());
+    }
+
+    /// A string cut mid-character reports what the file actually contains.
+    ///
+    /// The write backs off to a UTF-8 character boundary, so it can emit up to
+    /// three bytes fewer than the length type addresses. Reporting the bound
+    /// rather than the emitted length named a size the file did not have —
+    /// invisible to an all-ASCII test, since there the two always coincide.
+    #[test]
+    fn reporting_write_counts_bytes_actually_written_not_the_bound() {
+        // 65_534 ASCII bytes, then a 3-byte character spanning 65_534..65_537,
+        // so the u16 bound (65_535) lands inside that character.
+        let s = format!("{}{}", "a".repeat(65_534), "\u{20ac}");
+        assert_eq!(s.len(), 65_537);
+
+        let mut buf = Vec::new();
+        let outcome = TagValue::String(s)
+            .write_with_type_reporting(&RadType::String, &mut buf)
+            .unwrap();
+
+        let declared = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        let payload = buf.len() - 2;
+        assert_eq!(
+            declared, payload,
+            "the length prefix must match the payload"
+        );
+        assert_eq!(
+            outcome,
+            TagWriteOutcome::Truncated {
+                written: 65_534,
+                requested: 65_537,
+            },
+            "reported length must be what was written, not the u16 bound"
+        );
+        assert!(outcome.is_truncated());
+
+        // And the bytes are still valid UTF-8 — the backoff is why.
+        assert!(std::str::from_utf8(&buf[2..]).is_ok());
+    }
+
+    /// `fits` answers for the writer, not just for length: an array under a
+    /// signed length type cannot be written at all, so it does not fit.
+    #[test]
+    fn fits_is_false_for_a_length_type_the_writer_rejects() {
+        let mut buf = Vec::new();
+        for len_t in [
+            RadIntId::I8,
+            RadIntId::I16,
+            RadIntId::I32,
+            RadIntId::I64,
+            RadIntId::I128,
+        ] {
+            let ty = RadType::Array(len_t, RadAtomicId::Int(RadIntId::U16));
+            let v = TagValue::ArrayU16(vec![1, 2, 3]);
+            assert!(
+                !v.fits(&ty),
+                "{len_t:?} length is unwritable, so nothing fits"
+            );
+            assert!(
+                v.write_with_type(&ty, &mut buf).is_err(),
+                "{len_t:?} length must fail the write, matching fits"
+            );
+        }
+    }
+
+    /// A value that fits reports `Complete`, so the outcome is worth branching on
+    /// rather than being a formality.
+    #[test]
+    fn reporting_write_reports_complete_for_a_value_that_fits() {
+        let mut buf = Vec::new();
+        let outcome = TagValue::String("short".into())
+            .write_with_type_reporting(&RadType::String, &mut buf)
+            .unwrap();
+        assert_eq!(outcome, TagWriteOutcome::Complete);
+        assert!(outcome.is_complete());
+
+        let ty = RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16));
+        let outcome = TagValue::ArrayU16(vec![1, 2, 3])
+            .write_with_type_reporting(&ty, &mut buf)
+            .unwrap();
+        assert_eq!(outcome, TagWriteOutcome::Complete);
+    }
+
+    /// Arrays report in elements, not bytes, so `written` is directly comparable
+    /// to the length that was declared.
+    #[test]
+    fn reporting_array_write_reports_elements() {
+        let ty = RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16));
+        let mut buf = Vec::new();
+        let outcome = TagValue::ArrayU16((0..300u16).collect())
+            .write_with_type_reporting(&ty, &mut buf)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            TagWriteOutcome::Truncated {
+                written: u8::MAX as usize,
+                requested: 300,
+            }
+        );
+    }
+
+    /// Under `Error` an over-long value fails rather than being reported, so a
+    /// successful reporting write is always `Complete`.
+    #[test]
+    fn reporting_write_under_error_policy_fails_rather_than_reporting() {
+        let mut buf = Vec::new();
+        assert!(
+            TagValue::String("x".repeat(70_000))
+                .write_with_type_and_policy_reporting(
+                    &RadType::String,
+                    &mut buf,
+                    OversizedValuePolicy::Error,
+                )
+                .is_err()
+        );
+        let outcome = TagValue::String("fits".into())
+            .write_with_type_and_policy_reporting(
+                &RadType::String,
+                &mut buf,
+                OversizedValuePolicy::Error,
+            )
+            .unwrap();
+        assert_eq!(outcome, TagWriteOutcome::Complete);
+    }
+
+    /// A section-level report names which tags were shortened, so a caller does
+    /// not have to thread per-value outcomes by hand.
+    #[test]
+    fn section_report_names_the_truncated_tags() {
+        let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
+        ts.add_tag_desc(TagDesc {
+            name: "ok".to_string(),
+            typeid: RadType::String,
+        });
+        ts.add_tag_desc(TagDesc {
+            name: "too_long".to_string(),
+            typeid: RadType::String,
+        });
+        let mut map = TagMap::with_keyset(&ts.tags);
+        map.add(TagValue::String("fine".into()));
+        map.add(TagValue::String("y".repeat(70_000)));
+
+        let mut buf = Vec::new();
+        let report = map.write_values_reporting(&mut buf).unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.truncated.len(), 1, "only the over-long tag");
+        assert_eq!(report.truncated[0].name, "too_long");
+        assert_eq!(report.truncated[0].requested, 70_000);
+        assert_eq!(report.truncated[0].written, u16::MAX as usize);
+    }
+
+    /// The common case allocates nothing and reads as clean.
+    #[test]
+    fn section_report_is_clean_when_everything_fits() {
+        let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
+        ts.add_tag_desc(TagDesc {
+            name: "a".to_string(),
+            typeid: RadType::String,
+        });
+        let mut map = TagMap::with_keyset(&ts.tags);
+        map.add(TagValue::String("fine".into()));
+
+        let mut buf = Vec::new();
+        let report = map.write_values_reporting(&mut buf).unwrap();
+        assert!(report.is_clean());
+        assert!(report.truncated.is_empty());
+    }
+
+    /// The reporting section writer decides its report and then defers to the plain
+    /// one for every byte, so the two cannot currently differ. This pins that
+    /// arrangement: re-duplicating the writing loop to add reporting would break
+    /// it here rather than in a file someone reads months later.
+    #[test]
+    fn plain_and_reporting_section_writers_emit_the_same_bytes() {
+        let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
+        for name in ["s", "arr", "long"] {
+            ts.add_tag_desc(TagDesc {
+                name: name.to_string(),
+                typeid: if name == "arr" {
+                    RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16))
+                } else {
+                    RadType::String
+                },
+            });
+        }
+        let mut map = TagMap::with_keyset(&ts.tags);
+        map.add(TagValue::String("fine".into()));
+        map.add(TagValue::ArrayU16((0..300u16).collect()));
+        map.add(TagValue::String("y".repeat(70_000)));
+
+        let mut plain = Vec::new();
+        map.write_values(&mut plain).unwrap();
+
+        let mut reporting = Vec::new();
+        let report = map.write_values_reporting(&mut reporting).unwrap();
+
+        assert_eq!(
+            plain, reporting,
+            "the two section writers must not drift apart"
+        );
+        // ...and the reporting one still names both over-long values.
+        assert_eq!(report.truncated.len(), 2);
+        assert_eq!(report.truncated[0].name, "arr");
+        assert_eq!(report.truncated[1].name, "long");
     }
 }
