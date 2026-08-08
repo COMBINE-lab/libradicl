@@ -1051,7 +1051,79 @@ tag_value_try_into_int!(i16);
 tag_value_try_into_int!(i32);
 tag_value_try_into_int!(i64);
 
+/// What to do when a tag value is longer than its declared length type can
+/// address.
+///
+/// The length field and the payload must agree; bounding only one of them leaves
+/// a reader parsing the next tag from the middle of this one, with no error
+/// anywhere. Both variants keep them consistent — they differ only in whether a
+/// caller would rather lose the tail or lose the write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OversizedValuePolicy {
+    /// Shorten the value to what the declared length type can address.
+    ///
+    /// The default, since a shortened value is usually better than a failed run,
+    /// and it is what callers written before this was enforced already expect.
+    /// Truncation is silent: use [`TagValue::fits`] beforehand if you need to
+    /// know, since this crate has no logger of its own.
+    #[default]
+    Truncate,
+    /// Fail the write instead, for a producer that can do something about it.
+    Error,
+}
+
+/// The number of elements (or bytes, for a string) a declared length type can
+/// address, or `None` for a type with no length field.
+fn max_addressable_len(tag_type: &RadType) -> Option<usize> {
+    match tag_type {
+        // A string's length is always written as a `u16`.
+        RadType::String => Some(u16::MAX as usize),
+        RadType::Array(len_t, _) => Some(match len_t {
+            RadIntId::U8 => u8::MAX as usize,
+            RadIntId::U16 => u16::MAX as usize,
+            RadIntId::U32 => u32::MAX as usize,
+            // A `usize` can never exceed these.
+            _ => usize::MAX,
+        }),
+        _ => None,
+    }
+}
+
 impl TagValue {
+    /// Whether this value can be written under `tag_type` without being
+    /// shortened.
+    ///
+    /// Worth checking when the value is provenance or anything else where losing
+    /// the tail silently would matter: [`OversizedValuePolicy::Truncate`] does
+    /// not report what it dropped.
+    pub fn fits(&self, tag_type: &RadType) -> bool {
+        let Some(max) = max_addressable_len(tag_type) else {
+            return true;
+        };
+        self.len_for_write().is_none_or(|len| len <= max)
+    }
+
+    /// The length this value would write, for the variants that write one.
+    fn len_for_write(&self) -> Option<usize> {
+        match self {
+            Self::String(s) => Some(s.len()),
+            Self::ArrayBool(v) => Some(v.len()),
+            Self::ArrayU8(v) => Some(v.len()),
+            Self::ArrayU16(v) => Some(v.len()),
+            Self::ArrayU32(v) => Some(v.len()),
+            Self::ArrayU64(v) => Some(v.len()),
+            Self::ArrayU128(v) => Some(v.len()),
+            Self::ArrayI8(v) => Some(v.len()),
+            Self::ArrayI16(v) => Some(v.len()),
+            Self::ArrayI32(v) => Some(v.len()),
+            Self::ArrayI64(v) => Some(v.len()),
+            Self::ArrayI128(v) => Some(v.len()),
+            Self::ArrayF32(v) => Some(v.len()),
+            Self::ArrayF64(v) => Some(v.len()),
+            _ => None,
+        }
+    }
+
     /// Return the [RadType] corresponding to this [TagValue].
     /// For array types, the length is always encoded as [RadIntId::U32].
     pub fn rad_type(&self) -> RadType {
@@ -1087,12 +1159,29 @@ impl TagValue {
         }
     }
 
-    /// Write this tag value to the provided writer
+    /// Write this tag value to the provided writer, shortening it if it does not
+    /// fit its declared length type.
+    ///
+    /// Equivalent to [`Self::write_with_type_and_policy`] with
+    /// [`OversizedValuePolicy::Truncate`]. Use [`Self::fits`] first if a silent
+    /// shortening would matter.
     #[inline]
     pub fn write_with_type<W: Write>(
         &self,
         tag_type: &RadType,
         writer: &mut W,
+    ) -> anyhow::Result<()> {
+        self.write_with_type_and_policy(tag_type, writer, OversizedValuePolicy::default())
+    }
+
+    /// Write this tag value, deciding what to do about a value too long for the
+    /// declared length type (see [`OversizedValuePolicy`]).
+    #[inline]
+    pub fn write_with_type_and_policy<W: Write>(
+        &self,
+        tag_type: &RadType,
+        writer: &mut W,
+        policy: OversizedValuePolicy,
     ) -> anyhow::Result<()> {
         match self {
             Self::Bool(b) => {
@@ -1163,91 +1252,91 @@ impl TagValue {
             }
             Self::ArrayBool(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, bool, x, writer);
+                    write_tag_value_array!(vb, len_t, bool, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayU8(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, u8, x, writer);
+                    write_tag_value_array!(vb, len_t, u8, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayU16(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, u16, x, writer);
+                    write_tag_value_array!(vb, len_t, u16, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayU32(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, u32, x, writer);
+                    write_tag_value_array!(vb, len_t, u32, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayU64(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, u64, x, writer);
+                    write_tag_value_array!(vb, len_t, u64, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayU128(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, u128, x, writer);
+                    write_tag_value_array!(vb, len_t, u128, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayI8(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, i8, x, writer);
+                    write_tag_value_array!(vb, len_t, i8, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayI16(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, i16, x, writer);
+                    write_tag_value_array!(vb, len_t, i16, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayI32(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, i32, x, writer);
+                    write_tag_value_array!(vb, len_t, i32, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayI64(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, i64, x, writer);
+                    write_tag_value_array!(vb, len_t, i64, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayI128(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, i128, x, writer);
+                    write_tag_value_array!(vb, len_t, i128, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayF32(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, f32, x, writer);
+                    write_tag_value_array!(vb, len_t, f32, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
             }
             Self::ArrayF64(vb) => {
                 if let RadType::Array(len_t, _) = tag_type {
-                    write_tag_value_array!(vb, len_t, f64, x, writer);
+                    write_tag_value_array!(vb, len_t, f64, x, writer, policy);
                 } else {
                     bail!("Array TagValue didn't correspond to an Array RadType");
                 }
@@ -1256,12 +1345,39 @@ impl TagValue {
                 todo!("Not yet implemented")
             }
             Self::String(s) => {
-                let slen: u16 = s.len() as u16;
+                // A string's length is written as a `u16`, so that is the most it
+                // can address.
+                const MAX: usize = u16::MAX as usize;
+                let bytes = if s.len() > MAX {
+                    match policy {
+                        OversizedValuePolicy::Error => bail!(
+                            "string tag value is {} bytes, more than the {} a u16 \
+                             length can address; either shorten it or allow truncation",
+                            s.len(),
+                            MAX
+                        ),
+                        OversizedValuePolicy::Truncate => {
+                            // Cut on a character boundary: the read path uses
+                            // `String::from_utf8_unchecked`, so splitting a
+                            // multi-byte character would be undefined behaviour
+                            // downstream rather than merely a wrong value.
+                            let mut end = MAX;
+                            while end > 0 && !s.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            &s.as_bytes()[..end]
+                        }
+                    }
+                } else {
+                    s.as_bytes()
+                };
+                // Exact rather than wrapping: `bytes.len() <= MAX` holds here.
+                let slen: u16 = bytes.len() as u16;
                 writer
                     .write_all(&slen.to_le_bytes())
                     .context("couldn't write String tag value's length")?;
                 writer
-                    .write_all(s.as_bytes())
+                    .write_all(bytes)
                     .context("couldn't write String tag value's content")?;
             }
         }
@@ -1871,7 +1987,9 @@ impl TagSection {
 #[cfg(test)]
 mod tests {
     use crate::rad_types::RadType;
-    use crate::rad_types::{RadAtomicId, RadIntId, TagSection, TagSectionLabel, TagValue};
+    use crate::rad_types::{
+        OversizedValuePolicy, RadAtomicId, RadIntId, TagSection, TagSectionLabel, TagValue,
+    };
     use std::io::Write;
 
     use super::TagDesc;
@@ -2103,5 +2221,104 @@ mod tests {
 
         assert_eq!(map[0], TagValue::ArrayU16(vec![1, 2, 3]));
         assert_eq!(map[1], TagValue::String(String::from("hi_rad")));
+    }
+
+    /// The length field and the payload must agree. Writing a wrapped length but
+    /// the whole payload leaves a reader parsing the next value from the middle
+    /// of this one, which is silent corruption rather than a short value.
+    #[test]
+    fn oversized_string_bounds_payload_as_well_as_length() {
+        let value = TagValue::String("x".repeat(70_000));
+        let mut buf = Vec::new();
+        value.write_with_type(&RadType::String, &mut buf).unwrap();
+
+        let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        assert_eq!(
+            buf.len() - 2,
+            len,
+            "the bytes written must match the length written"
+        );
+        assert_eq!(len, u16::MAX as usize, "and fill what a u16 can address");
+
+        // The value that follows must still be readable, which is the whole point.
+        TagValue::U32(7)
+            .write_with_type(&RadType::Int(RadIntId::U32), &mut buf)
+            .unwrap();
+        assert_eq!(buf.len(), 2 + u16::MAX as usize + 4);
+    }
+
+    /// A `u8` length addresses 255 elements, so an array longer than that used to
+    /// wrap; both the count and the elements must now be bounded.
+    #[test]
+    fn oversized_array_bounds_payload_as_well_as_length() {
+        let value = TagValue::ArrayU16((0..300u16).collect());
+        let ty = RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16));
+        let mut buf = Vec::new();
+        value.write_with_type(&ty, &mut buf).unwrap();
+
+        let len = buf[0] as usize;
+        assert_eq!(len, u8::MAX as usize);
+        assert_eq!(
+            buf.len() - 1,
+            len * 2,
+            "u16 elements written must match the count written"
+        );
+    }
+
+    /// The read path uses `String::from_utf8_unchecked`, so a cut through a
+    /// multi-byte character would be undefined behaviour downstream, not merely a
+    /// wrong value.
+    #[test]
+    fn string_truncation_lands_on_a_char_boundary() {
+        // 'é' is two bytes, so a cut at u16::MAX would split one.
+        let value = TagValue::String("é".repeat(40_000));
+        let mut buf = Vec::new();
+        value.write_with_type(&RadType::String, &mut buf).unwrap();
+
+        let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        assert_eq!(buf.len() - 2, len);
+        assert!(len < u16::MAX as usize, "backed off to a boundary");
+        std::str::from_utf8(&buf[2..]).expect("truncated bytes must still be valid UTF-8");
+    }
+
+    /// A producer that would rather fail than silently ship a shortened value.
+    #[test]
+    fn error_policy_refuses_instead_of_shortening() {
+        let mut buf = Vec::new();
+        let err = TagValue::String("x".repeat(70_000))
+            .write_with_type_and_policy(&RadType::String, &mut buf, OversizedValuePolicy::Error)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("70000"),
+            "the error should say how long the value was, got: {err}"
+        );
+
+        let ty = RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16));
+        assert!(
+            TagValue::ArrayU16((0..300u16).collect())
+                .write_with_type_and_policy(&ty, &mut buf, OversizedValuePolicy::Error)
+                .is_err()
+        );
+    }
+
+    /// `fits` is how a caller detects the shortening that `Truncate` performs
+    /// silently, since this crate has no logger of its own.
+    #[test]
+    fn fits_reports_what_truncate_would_shorten() {
+        let small = TagValue::String("x".repeat(10));
+        let big = TagValue::String("x".repeat(70_000));
+        assert!(small.fits(&RadType::String));
+        assert!(!big.fits(&RadType::String));
+
+        let ty = RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16));
+        assert!(TagValue::ArrayU16(vec![1, 2, 3]).fits(&ty));
+        assert!(!TagValue::ArrayU16((0..300u16).collect()).fits(&ty));
+
+        // A wider length type addresses the same array comfortably.
+        let wide = RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U16));
+        assert!(TagValue::ArrayU16((0..300u16).collect()).fits(&wide));
+
+        // Scalars have no length field to overflow.
+        assert!(TagValue::U32(7).fits(&RadType::Int(RadIntId::U32)));
     }
 }

@@ -30,36 +30,63 @@ macro_rules! u8_to_vec_of_bool {
 
 #[macro_export]
 macro_rules! write_tag_value_array {
-    ($v:ident , $len_t:expr, $val_t: ty, $slice_name: ident, $writer:expr) => {
-        // the tag_t tells us the width we should use to write
-        // the length
+    ($v:ident , $len_t:expr, $val_t: ty, $slice_name: ident, $writer:expr, $policy:expr) => {
+        // How many elements the declared length type can actually address. Both
+        // the length field *and* the payload are bounded by it: writing one
+        // without the other is what leaves a reader parsing the next tag from the
+        // middle of this one.
+        let max_len: usize = match $len_t {
+            RadIntId::U8 => u8::MAX as usize,
+            RadIntId::U16 => u16::MAX as usize,
+            RadIntId::U32 => u32::MAX as usize,
+            // A `usize` can never exceed these, so no bound is needed.
+            RadIntId::U64 | RadIntId::U128 => usize::MAX,
+            _ => {
+                anyhow::bail!("signed length values are unsupported in tag value arrays")
+            }
+        };
+        let n: usize = if $v.len() > max_len {
+            match $policy {
+                $crate::rad_types::OversizedValuePolicy::Error => anyhow::bail!(
+                    "array tag value has {} elements, more than the {} a {:?} length \
+                     can address; either declare a wider length type or allow truncation",
+                    $v.len(),
+                    max_len,
+                    $len_t
+                ),
+                $crate::rad_types::OversizedValuePolicy::Truncate => max_len,
+            }
+        } else {
+            $v.len()
+        };
+        // `n <= max_len` now, so every cast below is exact rather than wrapping.
         match $len_t {
             RadIntId::U8 => {
-                let l: u8 = $v.len() as u8;
+                let l: u8 = n as u8;
                 $writer
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u8")?;
             }
             RadIntId::U16 => {
-                let l: u16 = $v.len() as u16;
+                let l: u16 = n as u16;
                 $writer
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u16")?;
             }
             RadIntId::U32 => {
-                let l: u32 = $v.len() as u32;
+                let l: u32 = n as u32;
                 $writer
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u32")?;
             }
             RadIntId::U64 => {
-                let l: u64 = $v.len() as u64;
+                let l: u64 = n as u64;
                 $writer
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u64")?;
             }
             RadIntId::U128 => {
-                let l: u128 = $v.len() as u128;
+                let l: u128 = n as u128;
                 $writer
                     .write_all(&l.to_le_bytes())
                     .context("couldn't write array length as u128")?;
@@ -68,7 +95,8 @@ macro_rules! write_tag_value_array {
                 anyhow::bail!("signed length values are unsupported in tag value arrays")
             }
         }
-        let $slice_name: &[u8] = bytemuck::try_cast_slice(&$v)
+        // Bound the payload to match the length just written.
+        let $slice_name: &[u8] = bytemuck::try_cast_slice(&$v[..n])
             .or_else(|_e| Err(anyhow::anyhow!("could't convert array contents to &[u8]")))
             .context("array conversion failed")?;
         $writer
