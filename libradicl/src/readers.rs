@@ -92,22 +92,15 @@ fn codec_from_tag_map(file_tag_map: &TagMap) -> anyhow::Result<ChunkCodec> {
 
 /// Sets the done-flag when dropped, whatever the reason for the drop.
 ///
-/// The producer's consumers all wait on this flag, and *nothing* else wakes
-/// them: a producer that returns early (a truncated or corrupt file), or that
-/// panics, would otherwise leave every consumer parked forever, with the error
-/// it produced unable to escape — a caller inside [`std::thread::scope`] cannot
-/// return past the joins, and one joining handles by hand blocks on the first
-/// `join()`. The result is a silent hang rather than a reported failure.
+/// Consumers wait on this flag and on nothing else, so a producer that returns
+/// early or panics would otherwise park them forever — and the error it
+/// produced could never get past their joins. Releasing them from a `Drop`
+/// makes that structural rather than a property of the happy path.
 ///
-/// Releasing the consumers from a `Drop` makes "consumers are always released"
-/// structural rather than a property of the happy path. The ordering contract
-/// [`MetaChunkStream`] relies on still holds: the guard is created before the
-/// first push and dropped after the last one, so a consumer that observes the
-/// flag still finds everything enqueued before it.
-///
-/// Note that the flag therefore means "no more meta-chunks will be enqueued",
-/// *not* "the file was read successfully". Whether the producer succeeded is
-/// reported by its [`anyhow::Result`], which callers must check.
+/// The ordering [`MetaChunkStream`] relies on still holds: created before the
+/// first push, dropped after the last. So the flag means "nothing more is
+/// coming", not "the file was read in full"; see
+/// [`ParallelRadReader::is_done`].
 struct DoneOnDrop(Arc<AtomicBool>);
 
 impl Drop for DoneOnDrop {
@@ -122,21 +115,15 @@ impl Drop for DoneOnDrop {
 const CHUNK_HEADER_BYTES: u32 = 8;
 
 /// Read the header of chunk `chunk_num`, failing rather than panicking on a
-/// short or nonsensical one.
+/// short or nonsensical one: truncation lands in these eight bytes as readily
+/// as anywhere else, and an `nbytes` smaller than the header it counts would
+/// underflow the payload length derived from it.
 ///
-/// Truncation lands here as often as it lands mid-record — the eight header
-/// bytes are as likely a place to cut a file as any other — and a `nbytes`
-/// smaller than the header it is part of would otherwise underflow the payload
-/// length computed from it.
-///
-/// Only the small end is checked. Callers size their buffer from `nbytes`
-/// before reading the payload, so a corrupt header claiming, say, `u32::MAX`
-/// still asks for ~4 GiB before the read that would have failed anyway — an
-/// OOM where a smaller lie gives a clean parse error. Validating that would
-/// mean knowing how much input remains, which a [BufRead] cannot say (and
-/// which is the point of being generic over it: pipes, streams, decompressors).
-/// Tracked in COMBINE-lab/libradicl#48; it needs a *corrupt* header rather than
-/// a merely truncated one, and stays bounded by the u32 framing.
+/// Only the small end is checked. Callers size their buffer from `nbytes`, so a
+/// corrupt header claiming `u32::MAX` still asks for ~4 GiB before the read
+/// fails — bounded by the u32 framing, and needing a corrupt file rather than a
+/// merely truncated one. Validating it would mean knowing how much input
+/// remains, which a [BufRead] cannot say. Tracked in COMBINE-lab/libradicl#48.
 fn next_chunk_header<T: BufRead>(br: &mut T, chunk_num: usize) -> anyhow::Result<(u32, u32)> {
     let (nbytes, nrec) = utils::read_chunk_header(br).with_context(|| {
         format!("failed to read the header of chunk {chunk_num}; the RAD file may be truncated")
