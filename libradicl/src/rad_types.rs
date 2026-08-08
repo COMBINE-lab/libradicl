@@ -1159,6 +1159,26 @@ enum LengthBound {
     Unwritable,
 }
 
+/// How many bytes of `s` a write bounded to `max` bytes actually emits.
+///
+/// Backs off to the nearest UTF-8 character boundary at or below `max`: the
+/// read path uses `String::from_utf8_unchecked`, so splitting a multi-byte
+/// character would be undefined behaviour downstream rather than merely a wrong
+/// value. The result is therefore up to three bytes below `max`.
+///
+/// Shared by the write itself and by [`TagValue::outcome_under`], so the length
+/// reported and the length written are decided in one place.
+fn truncated_str_len(s: &str, max: usize) -> usize {
+    if s.len() <= max {
+        return s.len();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// The bound a declared length type places on the value written under it.
 fn length_bound(tag_type: &RadType) -> LengthBound {
     match tag_type {
@@ -1213,11 +1233,24 @@ impl TagValue {
         match (length_bound(tag_type), self.len_for_write()) {
             (LengthBound::Max(max), Some(requested)) if requested > max => {
                 TagWriteOutcome::Truncated {
-                    written: max,
+                    written: self.written_len_under(tag_type, max),
                     requested,
                 }
             }
             _ => TagWriteOutcome::Complete,
+        }
+    }
+
+    /// How many elements (bytes, for a string) the write would actually emit
+    /// once bounded to `max`.
+    ///
+    /// Not always `max`: a string is cut back to a UTF-8 character boundary, so
+    /// it can end up to three bytes shorter. Reporting `max` regardless would
+    /// name a length the file does not contain.
+    fn written_len_under(&self, tag_type: &RadType, max: usize) -> usize {
+        match (self, tag_type) {
+            (Self::String(s), RadType::String) => truncated_str_len(s, max),
+            _ => max,
         }
     }
 
@@ -1516,16 +1549,11 @@ impl TagValue {
                             s.len(),
                             MAX
                         ),
+                        // Cut on a character boundary; `truncated_str_len` is the
+                        // one place that decides where, so the reporting writers
+                        // name the same length this emits.
                         OversizedValuePolicy::Truncate => {
-                            // Cut on a character boundary: the read path uses
-                            // `String::from_utf8_unchecked`, so splitting a
-                            // multi-byte character would be undefined behaviour
-                            // downstream rather than merely a wrong value.
-                            let mut end = MAX;
-                            while end > 0 && !s.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            &s.as_bytes()[..end]
+                            &s.as_bytes()[..truncated_str_len(s, MAX)]
                         }
                     }
                 } else {
@@ -2565,6 +2593,44 @@ mod tests {
             }
         );
         assert!(!outcome.is_complete());
+    }
+
+    /// A string cut mid-character reports what the file actually contains.
+    ///
+    /// The write backs off to a UTF-8 character boundary, so it can emit up to
+    /// three bytes fewer than the length type addresses. Reporting the bound
+    /// rather than the emitted length named a size the file did not have —
+    /// invisible to an all-ASCII test, since there the two always coincide.
+    #[test]
+    fn reporting_write_counts_bytes_actually_written_not_the_bound() {
+        // 65_534 ASCII bytes, then a 3-byte character spanning 65_534..65_537,
+        // so the u16 bound (65_535) lands inside that character.
+        let s = format!("{}{}", "a".repeat(65_534), "\u{20ac}");
+        assert_eq!(s.len(), 65_537);
+
+        let mut buf = Vec::new();
+        let outcome = TagValue::String(s)
+            .write_with_type_reporting(&RadType::String, &mut buf)
+            .unwrap();
+
+        let declared = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        let payload = buf.len() - 2;
+        assert_eq!(
+            declared, payload,
+            "the length prefix must match the payload"
+        );
+        assert_eq!(
+            outcome,
+            TagWriteOutcome::Truncated {
+                written: 65_534,
+                requested: 65_537,
+            },
+            "reported length must be what was written, not the u16 bound"
+        );
+        assert!(outcome.is_truncated());
+
+        // And the bytes are still valid UTF-8 — the backoff is why.
+        assert!(std::str::from_utf8(&buf[2..]).is_ok());
     }
 
     /// `fits` answers for the writer, not just for length: an array under a
