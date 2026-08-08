@@ -4,16 +4,35 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
-## Unreleased
+## [0.17.0](https://github.com/COMBINE-lab/libradicl/compare/v0.16.0...v0.17.0) (2026-08-08)
 
 
 ### Bug Fixes
 
 * Release consumers when the producer stops early ([2302191](https://github.com/COMBINE-lab/libradicl/commit/23021916749d055fd17acad87032b6bc6e3f7be1))
+* Bound oversized tag values instead of wrapping their length ([3cf3e32](https://github.com/COMBINE-lab/libradicl/commit/3cf3e3243e1b1a11b684913a0808cbfc8e3e1de9))
+* Report the length actually written, not the bound ([9ce8426](https://github.com/COMBINE-lab/libradicl/commit/9ce8426808de13ae0998e5c00ad5f9a8d5b1bce3))
+
+### Build & CI
+
+* Replace release-please with git-cliff ([3f20ed9](https://github.com/COMBINE-lab/libradicl/commit/3f20ed945da3f731801e3dd4e89efb0247f86af6))
+* Create the GitHub Release from a pushed tag ([144d5b8](https://github.com/COMBINE-lab/libradicl/commit/144d5b8d5dae4b43994a71fc48681ef41f072bf6))
+* Fall back to the default-branch changelog for old tags ([8ec81e4](https://github.com/COMBINE-lab/libradicl/commit/8ec81e4d63872200d4cde52908d47be29cd3addf))
 
 ### Documentation
 
 * Tighten the DoneOnDrop and next_chunk_header comments ([3974e35](https://github.com/COMBINE-lab/libradicl/commit/3974e352338a19ad624bb9f0103c644f6c3499f9))
+* Note cargo publish --workspace as a possible simplification ([7d526b2](https://github.com/COMBINE-lab/libradicl/commit/7d526b21c99be651b802151188eda7d952a60344))
+
+### Features
+
+* Add checked tag writers that report a shortened value ([6aef88c](https://github.com/COMBINE-lab/libradicl/commit/6aef88c3e9084cc5c46e9a497db6b6a86a3a4f51))
+
+### Refactor
+
+* Keep the plain writers free of reporting machinery ([c70bb38](https://github.com/COMBINE-lab/libradicl/commit/c70bb3844de968d7f986d3c71f05c046b40065b3))
+* Have the checked writers defer for the bytes ([0a1645d](https://github.com/COMBINE-lab/libradicl/commit/0a1645dffd4a1b9f7de150263eea848ebb36ec5d))
+* Make fits answer for the writer, and rename to _reporting ([b99ee88](https://github.com/COMBINE-lab/libradicl/commit/b99ee88d90647487e7cf633fba861eb6aa83f443))
 
 ## [0.16.0](https://github.com/COMBINE-lab/libradicl/compare/v0.15.0...v0.16.0) (2026-08-04)
 
