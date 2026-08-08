@@ -193,6 +193,24 @@ run git add -f "$LOCKFILE"
 run git commit -m "chore(release): bump Rust crates to v${VERSION}"
 
 if [[ "$PUBLISH" == true ]]; then
+    # POSSIBLE SIMPLIFICATION (not done yet): `cargo publish --workspace`
+    # publishes workspace members in dependency order and resolves the
+    # in-flight libradicl -> libradicl-macros dependency itself, which would
+    # replace this whole two-step publish and the index-polling loop below
+    # with a single command.
+    #
+    # Not adopted because it changes the failure modes and deserves a
+    # deliberate trial rather than a swap on release day: the two publishes
+    # stop being separately observable, and a partial failure has to be
+    # reasoned about differently (crates.io accepts no rollback either way, so
+    # "macros published, libradicl did not" remains recoverable only by
+    # publishing a new version).
+    #
+    # Before switching: confirm `cargo publish --help` on the release machine
+    # lists --workspace (present in cargo 1.97.1; older toolchains may not have
+    # it), then rehearse with `cargo publish --workspace --dry-run`. If it
+    # works, everything from here to the end of the polling loop collapses to
+    #     run cargo publish --workspace
     run cargo publish -p "$MACROS_CRATE"
 
     if [[ "$DRY_RUN" == true ]]; then
