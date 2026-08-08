@@ -53,21 +53,55 @@ jobs:
 
       - name: Extract release notes from CHANGELOG.md
         id: notes
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: |
           version='${{ steps.ver.outputs.version }}'
-          # Take everything between this version's heading and the next one.
-          awk -v ver="$version" '
-            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-          ' CHANGELOG.md > RELEASE_NOTES.md || true
 
-          if [[ -s RELEASE_NOTES.md ]] && grep -q '[^[:space:]]' RELEASE_NOTES.md; then
+          # Everything between this version's heading and the next one.
+          extract() {
+            awk -v ver="$version" '
+              $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+              found && /^## / { exit }
+              found { print }
+            ' "$1"
+          }
+
+          nonempty() { [[ -s "$1" ]] && grep -q '[^[:space:]]' "$1"; }
+
+          have_notes=false
+
+          # Preferred source: the changelog as committed at the tag, so the
+          # release page and that tag's changelog cannot disagree.
+          if [[ -f CHANGELOG.md ]]; then
+            extract CHANGELOG.md > RELEASE_NOTES.md || true
+            if nonempty RELEASE_NOTES.md; then
+              have_notes=true
+              echo "Notes for $version from the changelog committed at the tag"
+            fi
+          fi
+
+          # Backfill path: tags cut before the changelog was generated (v0.11
+          # through v0.16) carry a CHANGELOG.md that predates them, so they have
+          # no section of their own. The current one on the default branch does
+          # cover them — use it before falling back to generated notes.
+          if [[ "$have_notes" == false ]]; then
+            git fetch --quiet --depth=1 origin "$DEFAULT_BRANCH" 2>/dev/null || true
+            if git show FETCH_HEAD:CHANGELOG.md > changelog-default.md 2>/dev/null; then
+              extract changelog-default.md > RELEASE_NOTES.md || true
+              if nonempty RELEASE_NOTES.md; then
+                have_notes=true
+                echo "Notes for $version from the changelog on $DEFAULT_BRANCH (backfill)"
+              fi
+            fi
+          fi
+
+          if [[ "$have_notes" == true ]]; then
             echo "have_notes=true" >> "$GITHUB_OUTPUT"
-            echo "Extracted $(wc -l < RELEASE_NOTES.md) lines of notes for $version"
+            echo "$(wc -l < RELEASE_NOTES.md) lines of notes"
           else
             echo "have_notes=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::no CHANGELOG.md section for $version; falling back to generated notes"
+            echo "::warning::no changelog section for $version on the tag or on $DEFAULT_BRANCH; using generated notes"
           fi
 
       - name: Create or update the release
