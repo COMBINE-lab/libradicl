@@ -1,0 +1,101 @@
+name: Release
+
+# Creates the GitHub Release for a tag pushed by ./bump_and_publish.sh.
+#
+# This workflow does NOT publish to crates.io — the script does that, before it
+# pushes the tag. By the time this runs, the release is already on crates.io;
+# all that is left is the release page, which had been missing since v0.10.0
+# (tags v0.11 through v0.16 have no release entry at all).
+#
+# Notes come from the CHANGELOG.md committed at the tag, so the release page and
+# the changelog cannot drift apart. If that section is missing — a tag cut with
+# --no-changelog, or one from before git-cliff — it falls back to GitHub's
+# auto-generated notes rather than publishing an empty release.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)create the release for, e.g. v0.17.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve tag and version
+        id: ver
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A prerelease is any version carrying a suffix: 0.17.0-rc.1, not 0.17.0.
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          version='${{ steps.ver.outputs.version }}'
+          # Take everything between this version's heading and the next one.
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md || true
+
+          if [[ -s RELEASE_NOTES.md ]] && grep -q '[^[:space:]]' RELEASE_NOTES.md; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+            echo "Extracted $(wc -l < RELEASE_NOTES.md) lines of notes for $version"
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::no CHANGELOG.md section for $version; falling back to generated notes"
+          fi
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          args=(--title "$TAG" --verify-tag)
+          if [[ '${{ steps.ver.outputs.prerelease }}' == 'true' ]]; then
+            args+=(--prerelease)
+          fi
+          if [[ '${{ steps.notes.outputs.have_notes }}' == 'true' ]]; then
+            args+=(--notes-file RELEASE_NOTES.md)
+          else
+            args+=(--generate-notes)
+          fi
+
+          # Re-runnable: workflow_dispatch on an existing tag updates in place
+          # instead of failing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — updating notes"
+            if [[ '${{ steps.notes.outputs.have_notes }}' == 'true' ]]; then
+              gh release edit "$TAG" --notes-file RELEASE_NOTES.md
+            else
+              echo "::notice::leaving existing notes alone (nothing better to replace them with)"
+            fi
+          else
+            gh release create "$TAG" "${args[@]}"
+          fi
+
+          echo "Release page: $(gh release view "$TAG" --json url -q .url)"
