@@ -1158,10 +1158,23 @@ impl TagValue {
     /// the tail silently would matter: [`OversizedValuePolicy::Truncate`] does
     /// not report what it dropped.
     pub fn fits(&self, tag_type: &RadType) -> bool {
-        let Some(max) = max_addressable_len(tag_type) else {
-            return true;
-        };
-        self.len_for_write().is_none_or(|len| len <= max)
+        self.outcome_under(tag_type).is_complete()
+    }
+
+    /// The outcome writing this value under `tag_type` would produce, decided
+    /// without writing anything.
+    ///
+    /// Deciding it separately from the write is what lets the checked writers
+    /// defer to the plain ones for the bytes: there is one implementation of
+    /// what gets written, and one of what to say about it.
+    fn outcome_under(&self, tag_type: &RadType) -> TagWriteOutcome {
+        match (max_addressable_len(tag_type), self.len_for_write()) {
+            (Some(max), Some(requested)) if requested > max => TagWriteOutcome::Truncated {
+                written: max,
+                requested,
+            },
+            _ => TagWriteOutcome::Complete,
+        }
     }
 
     /// The length this value would write, for the variants that write one.
@@ -1270,14 +1283,9 @@ impl TagValue {
         policy: OversizedValuePolicy,
     ) -> anyhow::Result<TagWriteOutcome> {
         // Determined before writing, since the write bounds the value in place
-        // and cannot report afterwards what it dropped.
-        let outcome = match (max_addressable_len(tag_type), self.len_for_write()) {
-            (Some(max), Some(requested)) if requested > max => TagWriteOutcome::Truncated {
-                written: max,
-                requested,
-            },
-            _ => TagWriteOutcome::Complete,
-        };
+        // and cannot report afterwards what it dropped. The write itself is then
+        // the same one the plain path takes.
+        let outcome = self.outcome_under(tag_type);
         self.write_with_type_and_policy(tag_type, writer, policy)?;
         Ok(outcome)
     }
@@ -1770,10 +1778,9 @@ pub fn get_tag_by_name<'a>(
 #[inline(always)]
 /// Write each value in a tag map, in key order.
 ///
-/// Deliberately does *not* route through [`write_tag_map_values_checked`]: a
-/// caller who does not want the outcome should not pay to produce it. The two
-/// are kept in step by review rather than by delegation — they are a single loop
-/// each, and the shared per-value work lives in [`TagValue::write_with_type`].
+/// The single implementation of writing a tag section: the checked variant
+/// decides its report and then calls this, so a caller who does not want the
+/// report pays nothing for it and neither path can drift from the other.
 fn write_tag_map_values<W: Write>(
     dat: &[TagValue],
     keys: &[TagDesc],
@@ -1787,9 +1794,13 @@ fn write_tag_map_values<W: Write>(
 }
 
 /// As [`write_tag_map_values`], additionally reporting any value that had to be
-/// shortened. The extra cost — a length comparison per value, and an allocation
-/// only if something was actually truncated — falls on the caller who asked for
-/// it.
+/// shortened.
+///
+/// Decides the report first and then defers to [`write_tag_map_values`] for
+/// every byte, so there is exactly one implementation of the writing and the
+/// two cannot drift. The extra cost — a length comparison per value, and an
+/// allocation only if something was truncated — falls on the caller who asked
+/// for the report.
 fn write_tag_map_values_checked<W: Write>(
     dat: &[TagValue],
     keys: &[TagDesc],
@@ -1797,10 +1808,7 @@ fn write_tag_map_values_checked<W: Write>(
 ) -> anyhow::Result<TagSectionWriteReport> {
     let mut report = TagSectionWriteReport::default();
     for (n, v) in keys.iter().zip(dat.iter()) {
-        let outcome = v
-            .write_with_type_checked(&n.typeid, writer)
-            .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
-        if let TagWriteOutcome::Truncated { written, requested } = outcome {
+        if let TagWriteOutcome::Truncated { written, requested } = v.outcome_under(&n.typeid) {
             report.truncated.push(TruncatedTag {
                 name: n.name.clone(),
                 written,
@@ -1808,6 +1816,7 @@ fn write_tag_map_values_checked<W: Write>(
             });
         }
     }
+    write_tag_map_values(dat, keys, writer)?;
     Ok(report)
 }
 
@@ -2615,9 +2624,10 @@ mod tests {
         assert!(report.truncated.is_empty());
     }
 
-    /// The plain and checked section writers are separate implementations, so
-    /// that the plain one pays nothing for reporting. That makes drift the risk
-    /// worth guarding: they must emit identical bytes.
+    /// The checked section writer decides its report and then defers to the plain
+    /// one for every byte, so the two cannot currently differ. This pins that
+    /// arrangement: re-duplicating the writing loop to add reporting would break
+    /// it here rather than in a file someone reads months later.
     #[test]
     fn plain_and_checked_section_writers_emit_the_same_bytes() {
         let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
