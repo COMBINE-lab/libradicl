@@ -1224,8 +1224,10 @@ impl TagValue {
     /// fit its declared length type.
     ///
     /// Equivalent to [`Self::write_with_type_and_policy`] with
-    /// [`OversizedValuePolicy::Truncate`]. Use [`Self::fits`] first if a silent
-    /// shortening would matter.
+    /// [`OversizedValuePolicy::Truncate`]. Shortening is silent, and this path
+    /// stays free of the machinery to report it: use
+    /// [`Self::write_with_type_checked`] to be told, or [`Self::fits`] to ask
+    /// beforehand.
     #[inline]
     pub fn write_with_type<W: Write>(
         &self,
@@ -1242,6 +1244,10 @@ impl TagValue {
     /// possibility that the value was shortened instead of finding out later
     /// from a short field. Prefer this for anything whose tail matters —
     /// provenance, identifiers, free text.
+    ///
+    /// The cost of reporting falls here rather than on the plain writer: this
+    /// determines the outcome and then defers to the same write, so a caller who
+    /// does not want the outcome pays nothing to produce it.
     #[inline]
     pub fn write_with_type_checked<W: Write>(
         &self,
@@ -1762,15 +1768,28 @@ pub fn get_tag_by_name<'a>(
 }
 
 #[inline(always)]
+/// Write each value in a tag map, in key order.
+///
+/// Deliberately does *not* route through [`write_tag_map_values_checked`]: a
+/// caller who does not want the outcome should not pay to produce it. The two
+/// are kept in step by review rather than by delegation — they are a single loop
+/// each, and the shared per-value work lives in [`TagValue::write_with_type`].
 fn write_tag_map_values<W: Write>(
     dat: &[TagValue],
     keys: &[TagDesc],
     writer: &mut W,
 ) -> anyhow::Result<()> {
-    let _ = write_tag_map_values_checked(dat, keys, writer)?;
+    for (n, v) in keys.iter().zip(dat.iter()) {
+        v.write_with_type(&n.typeid, writer)
+            .with_context(|| format!("couldn't write tag value for tag {}", n.name))?;
+    }
     Ok(())
 }
 
+/// As [`write_tag_map_values`], additionally reporting any value that had to be
+/// shortened. The extra cost — a length comparison per value, and an allocation
+/// only if something was actually truncated — falls on the caller who asked for
+/// it.
 fn write_tag_map_values_checked<W: Write>(
     dat: &[TagValue],
     keys: &[TagDesc],
@@ -1839,8 +1858,8 @@ impl<'a> TagViewMap<'a> {
     /// Writes the values in this [TagViewMap] and reports which, if any, had to
     /// be shortened to fit their declared length type.
     ///
-    /// The checked counterpart of [`Self::write_values`]; see
-    /// [`TagSectionWriteReport`].
+    /// The checked counterpart of [`Self::write_values`], which stays free of
+    /// this bookkeeping; see [`TagSectionWriteReport`].
     pub fn write_values_checked<W: Write>(
         &self,
         writer: &mut W,
@@ -1916,8 +1935,8 @@ impl TagMap {
     /// Writes the values in this [TagMap] and reports which, if any, had to be
     /// shortened to fit their declared length type.
     ///
-    /// The checked counterpart of [`Self::write_values`]; see
-    /// [`TagSectionWriteReport`].
+    /// The checked counterpart of [`Self::write_values`], which stays free of
+    /// this bookkeeping; see [`TagSectionWriteReport`].
     pub fn write_values_checked<W: Write>(
         &self,
         writer: &mut W,
@@ -2594,5 +2613,42 @@ mod tests {
         let report = map.write_values_checked(&mut buf).unwrap();
         assert!(report.is_clean());
         assert!(report.truncated.is_empty());
+    }
+
+    /// The plain and checked section writers are separate implementations, so
+    /// that the plain one pays nothing for reporting. That makes drift the risk
+    /// worth guarding: they must emit identical bytes.
+    #[test]
+    fn plain_and_checked_section_writers_emit_the_same_bytes() {
+        let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
+        for name in ["s", "arr", "long"] {
+            ts.add_tag_desc(TagDesc {
+                name: name.to_string(),
+                typeid: if name == "arr" {
+                    RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16))
+                } else {
+                    RadType::String
+                },
+            });
+        }
+        let mut map = TagMap::with_keyset(&ts.tags);
+        map.add(TagValue::String("fine".into()));
+        map.add(TagValue::ArrayU16((0..300u16).collect()));
+        map.add(TagValue::String("y".repeat(70_000)));
+
+        let mut plain = Vec::new();
+        map.write_values(&mut plain).unwrap();
+
+        let mut checked = Vec::new();
+        let report = map.write_values_checked(&mut checked).unwrap();
+
+        assert_eq!(
+            plain, checked,
+            "the two section writers must not drift apart"
+        );
+        // ...and the checked one still reports both over-long values.
+        assert_eq!(report.truncated.len(), 2);
+        assert_eq!(report.truncated[0].name, "arr");
+        assert_eq!(report.truncated[1].name, "long");
     }
 }
