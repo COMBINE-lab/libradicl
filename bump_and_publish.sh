@@ -9,13 +9,20 @@ die() {
 usage() {
     cat <<'EOF'
 Usage:
-  ./bump_and_publish.sh <version> [--publish] [--dry-run]
-  ./bump_and_publish.sh [--publish] [--dry-run] <version>
+  ./bump_and_publish.sh <version> [--publish] [--dry-run] [--no-changelog]
+  ./bump_and_publish.sh [--publish] [--dry-run] [--no-changelog] <version>
 
 Options:
-  --publish  Publish libradicl-macros first, then libradicl, after bumping and committing
-  --dry-run  Show what would be done without modifying files, creating commits, tags, or publishing
-  -h, --help Show this help message
+  --publish       Publish libradicl-macros first, then libradicl, after bumping and committing
+  --dry-run       Show what would be done without modifying files, creating commits, tags, or publishing
+  --no-changelog  Skip regenerating CHANGELOG.md (requires git-cliff otherwise)
+  -h, --help      Show this help message
+
+CHANGELOG.md is regenerated from conventional commits by git-cliff (see
+cliff.toml) and included in the release commit. Preview the section the next
+release would add, without writing anything:
+
+  git-cliff --tag v<version> --unreleased
 EOF
 }
 
@@ -36,6 +43,7 @@ run() {
 VERSION=""
 PUBLISH=false
 DRY_RUN=false
+CHANGELOG_ENABLED=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +52,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            ;;
+        --no-changelog)
+            CHANGELOG_ENABLED=false
             ;;
         -h|--help)
             usage
@@ -77,6 +88,8 @@ cd "$SCRIPT_DIR"
 LOCKFILE="Cargo.lock"
 MACROS_CARGO="libradicl-macros/Cargo.toml"
 LIBRADICL_CARGO="libradicl/Cargo.toml"
+CHANGELOG="CHANGELOG.md"
+CLIFF_CONFIG="cliff.toml"
 TAG="v${VERSION}"
 MACROS_CRATE="libradicl-macros"
 LIBRADICL_CRATE="libradicl"
@@ -84,6 +97,11 @@ LIBRADICL_CRATE="libradicl"
 [[ -f "$LOCKFILE" ]] || die "not found: $LOCKFILE"
 [[ -f "$MACROS_CARGO" ]] || die "not found: $MACROS_CARGO"
 [[ -f "$LIBRADICL_CARGO" ]] || die "not found: $LIBRADICL_CARGO"
+
+if [[ "$CHANGELOG_ENABLED" == true ]]; then
+    [[ -f "$CLIFF_CONFIG" ]] || die "not found: $CLIFF_CONFIG (pass --no-changelog to skip changelog generation)"
+    command -v git-cliff >/dev/null 2>&1 || die "git-cliff is not installed; install it (cargo binstall git-cliff) or pass --no-changelog"
+fi
 
 CURRENT_MACROS_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$MACROS_CARGO" | head -1)"
 CURRENT_LIBRADICL_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$LIBRADICL_CARGO" | head -1)"
@@ -114,6 +132,11 @@ if [[ "$PUBLISH" == true ]]; then
     echo "Publish crates                     : yes"
 else
     echo "Publish crates                     : no"
+fi
+if [[ "$CHANGELOG_ENABLED" == true ]]; then
+    echo "Regenerate ${CHANGELOG}              : yes"
+else
+    echo "Regenerate ${CHANGELOG}              : no"
 fi
 if [[ "$DRY_RUN" == true ]]; then
     echo "Dry-run                            : yes"
@@ -152,7 +175,20 @@ else
 fi
 
 run cargo check -p "$MACROS_CRATE" -p "$LIBRADICL_CRATE" -q
+
+if [[ "$CHANGELOG_ENABLED" == true ]]; then
+    # Regenerate the whole file rather than prepending: the result is
+    # idempotent and stays in one format throughout. `--tag` labels the
+    # not-yet-tagged commits with the version about to be cut; without it they
+    # would land under "Unreleased".
+    echo "Regenerating $CHANGELOG for $TAG"
+    run git-cliff --tag "$TAG" -o "$CHANGELOG"
+fi
+
 run git add "$MACROS_CARGO" "$LIBRADICL_CARGO"
+if [[ "$CHANGELOG_ENABLED" == true ]]; then
+    run git add "$CHANGELOG"
+fi
 run git add -f "$LOCKFILE"
 run git commit -m "chore(release): bump Rust crates to v${VERSION}"
 
