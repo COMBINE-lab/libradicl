@@ -9,6 +9,7 @@
 
 //! Parallel collation engine for single-barcode RAD records.
 
+use crate::collation::normalize_collation_resources;
 use crate::collation_spool::{BucketSpoolSet, BucketSpoolWriter};
 use crate::rad_types::{MappedFragmentOrientation, RadIntId};
 use crate::record::{
@@ -72,9 +73,11 @@ impl SingleBarcodeCollationPlan {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SingleBarcodeCollationOptions {
-    /// Total coordinator and worker threads (minimum 2).
+    /// Total coordinator and worker threads requested by the caller. Values
+    /// below 2 produce a warning and are raised to 2.
     pub num_threads: usize,
     /// Working-memory budget for queues, spool buffers, and gather workers.
+    /// Values below 256 MiB produce a warning and are raised to 256 MiB.
     pub memory_budget_bytes: u64,
     pub compress_output: bool,
 }
@@ -215,18 +218,17 @@ pub fn collate_single_barcode<R, W>(
     output: Arc<Mutex<W>>,
     temp_parent: &Path,
     expected_orientation: MappedFragmentOrientation,
-    options: SingleBarcodeCollationOptions,
+    mut options: SingleBarcodeCollationOptions,
 ) -> anyhow::Result<SingleBarcodeCollationStats>
 where
     R: Read,
     W: Write + Send + 'static,
 {
-    if options.num_threads < 2 {
-        bail!("single-barcode collation requires at least two threads");
-    }
-    if options.memory_budget_bytes < 256 * 1024 * 1024 {
-        bail!("single-barcode collation requires a memory budget of at least 256 MiB");
-    }
+    (options.num_threads, options.memory_budget_bytes) = normalize_collation_resources(
+        "single-barcode collation",
+        options.num_threads,
+        options.memory_budget_bytes,
+    );
 
     let num_scatter_workers = options.num_threads - 1;
     let tuning_budget = options.memory_budget_bytes.min(2 * 1024 * 1024 * 1024);
@@ -650,6 +652,7 @@ mod tests {
             chunk.pwrite::<u32>(3, 4).unwrap();
 
             for compress_output in [false, true] {
+                let exercise_resource_clamping = context.bct == RadIntId::U16 && compress_output;
                 let plan = Arc::new(
                     SingleBarcodeCollationPlan::new(correction.clone(), buckets.clone(), 1)
                         .unwrap(),
@@ -665,14 +668,19 @@ mod tests {
                     &std::env::temp_dir(),
                     MappedFragmentOrientation::Unknown,
                     SingleBarcodeCollationOptions {
-                        num_threads: 2,
-                        memory_budget_bytes: 256 * 1024 * 1024,
+                        num_threads: if exercise_resource_clamping { 1 } else { 2 },
+                        memory_budget_bytes: if exercise_resource_clamping {
+                            1024
+                        } else {
+                            256 * 1024 * 1024
+                        },
                         compress_output,
                     },
                 )
                 .unwrap();
                 assert_eq!(stats.records_scattered, 2);
                 assert_eq!(stats.output_chunks, 1);
+                assert_eq!(stats.num_scatter_workers, 1);
 
                 let encoded = Arc::try_unwrap(output).unwrap().into_inner().unwrap();
                 let bytes = if compress_output {
