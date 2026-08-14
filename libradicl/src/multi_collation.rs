@@ -905,15 +905,9 @@ mod tests {
         let mut group_map = AHashMap::new();
         group_map.insert(cell, 0);
         group_map.insert((1_u64 << 32) | cell, 0);
-        let error = MultiBarcodeCollationPlan::new(
-            AHashMap::new(),
-            samples,
-            group_map,
-            32,
-            1,
-        )
-        .err()
-        .expect("a gather bucket spanning samples must be rejected");
+        let error = MultiBarcodeCollationPlan::new(AHashMap::new(), samples, group_map, 32, 1)
+            .err()
+            .expect("a gather bucket spanning samples must be rejected");
         assert!(error.to_string().contains("mixes output sample groups"));
     }
 
