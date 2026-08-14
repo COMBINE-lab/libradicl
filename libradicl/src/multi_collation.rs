@@ -11,6 +11,7 @@
 
 use crate::BarcodeLookupMap;
 use crate::collation::BarcodeRole;
+use crate::collation::normalize_collation_resources;
 use crate::collation_spool::{BucketSpoolSet, BucketSpoolWriter};
 use crate::rad_types::MappedFragmentOrientation;
 use crate::record::{
@@ -203,9 +204,12 @@ impl MultiBarcodeCollationPlan {
 /// Runtime controls for multi-barcode collation.
 #[derive(Clone, Copy, Debug)]
 pub struct MultiBarcodeCollationOptions {
-    /// Total scatter and gather threads requested by the caller (minimum 2).
+    /// Total coordinator and worker threads requested by the caller. Values
+    /// below 2 produce a warning and are raised to 2.
     pub num_threads: usize,
     /// Working-memory budget for queues, spool buffers, and gather workers.
+    ///
+    /// Values below 256 MiB produce a warning and are raised to 256 MiB.
     ///
     /// This does not include the caller-owned correction plan, the operating
     /// system's page cache, allocator overhead, or the output writer.
@@ -368,18 +372,17 @@ pub fn collate_multi_barcode<R, W>(
     output: Arc<Mutex<W>>,
     temp_parent: &Path,
     expected_orientation: MappedFragmentOrientation,
-    options: MultiBarcodeCollationOptions,
+    mut options: MultiBarcodeCollationOptions,
 ) -> anyhow::Result<MultiBarcodeCollationStats>
 where
     R: Read,
     W: Write + Send + 'static,
 {
-    if options.num_threads < 2 {
-        bail!("multi-barcode collation requires at least two threads");
-    }
-    if options.memory_budget_bytes < 256 * 1024 * 1024 {
-        bail!("multi-barcode collation requires a memory budget of at least 256 MiB");
-    }
+    (options.num_threads, options.memory_budget_bytes) = normalize_collation_resources(
+        "multi-barcode collation",
+        options.num_threads,
+        options.memory_budget_bytes,
+    );
     let num_scatter_workers = options.num_threads - 1;
     let tuning_budget = options.memory_budget_bytes.min(2 * 1024 * 1024 * 1024);
     let scatter_buffer_budget = (tuning_budget / 4).clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
