@@ -14,6 +14,36 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+pub(crate) const MIN_COLLATION_THREADS: usize = 2;
+pub(crate) const MIN_COLLATION_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Normalize resource requests shared by the single- and multi-barcode
+/// collators. These implementations require a coordinator and at least one
+/// worker, and their buffer tuning has a 256 MiB lower design bound.
+pub(crate) fn normalize_collation_resources(
+    collator: &str,
+    num_threads: usize,
+    memory_budget_bytes: u64,
+) -> (usize, u64) {
+    let effective_threads = if num_threads < MIN_COLLATION_THREADS {
+        eprintln!(
+            "WARNING: {collator} is not designed to work with fewer than {MIN_COLLATION_THREADS} threads; requested {num_threads}, so it will proceed with a thread count of {MIN_COLLATION_THREADS}."
+        );
+        MIN_COLLATION_THREADS
+    } else {
+        num_threads
+    };
+    let effective_memory = if memory_budget_bytes < MIN_COLLATION_MEMORY_BYTES {
+        eprintln!(
+            "WARNING: {collator} is not designed to work with less than 256 MiB of memory; requested {memory_budget_bytes} bytes, so it will proceed with a memory bound of 256 MiB."
+        );
+        MIN_COLLATION_MEMORY_BYTES
+    } else {
+        memory_budget_bytes
+    };
+    (effective_threads, effective_memory)
+}
+
 /// The semantic role of a barcode in the experiment hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BarcodeRole {
@@ -143,6 +173,18 @@ impl CollationManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collation_resources_are_clamped_to_design_minima() {
+        assert_eq!(
+            normalize_collation_resources("test collator", 0, 1024),
+            (MIN_COLLATION_THREADS, MIN_COLLATION_MEMORY_BYTES)
+        );
+        assert_eq!(
+            normalize_collation_resources("test collator", 7, MIN_COLLATION_MEMORY_BYTES + 1),
+            (7, MIN_COLLATION_MEMORY_BYTES + 1)
+        );
+    }
 
     #[test]
     fn collation_manifest_roundtrip() {

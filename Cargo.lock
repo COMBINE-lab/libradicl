@@ -557,6 +557,7 @@ dependencies = [
  "bincode",
  "bio-types",
  "bytemuck",
+ "crossbeam-channel",
  "crossbeam-queue",
  "crossbeam-utils",
  "dashmap",

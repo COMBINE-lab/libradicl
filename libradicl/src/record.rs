@@ -2879,6 +2879,257 @@ impl<B: ConvertiblePrimitiveInteger> MultiBarcodeReadRecordT<B> {
     }
 }
 
+/// Reusable alignment storage for allocation-free single-barcode record
+/// filtering and rewriting during collation.
+#[derive(Debug, Default)]
+pub struct SingleBarcodeRecordScratch {
+    alignments: Vec<u32>,
+}
+
+impl SingleBarcodeRecordScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read, orientation-filter, and reference-sort a record's alignments.
+    pub fn read_filtered<T: Read>(
+        &mut self,
+        reader: &mut T,
+        num_alignments: u32,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> anyhow::Result<()> {
+        self.alignments.clear();
+        self.alignments.reserve(num_alignments as usize);
+        let mut bytes = [0_u8; 4];
+        for _ in 0..num_alignments {
+            reader.read_exact(&mut bytes)?;
+            let encoded = u32::from_le_bytes(bytes);
+            let observed = if encoded & utils::MASK_LOWER_31_U32 != 0 {
+                MappedFragmentOrientation::Forward
+            } else {
+                MappedFragmentOrientation::Reverse
+            };
+            if expected_ori.is_unknown() || expected_ori.same(&observed) {
+                self.alignments.push(encoded);
+            }
+        }
+
+        if !self
+            .alignments
+            .windows(2)
+            .all(|pair| (pair[0] & utils::MASK_TOP_BIT_U32) <= (pair[1] & utils::MASK_TOP_BIT_U32))
+        {
+            self.alignments
+                .sort_unstable_by_key(|encoded| encoded & utils::MASK_TOP_BIT_U32);
+        }
+        Ok(())
+    }
+
+    pub fn num_alignments(&self) -> usize {
+        self.alignments.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.alignments.is_empty()
+    }
+
+    /// Append a corrected single-barcode record using its declared integer
+    /// encodings. Common same-width layouts avoid virtualized writes.
+    pub fn append_corrected(
+        &self,
+        umi: u64,
+        corrected_barcode: u64,
+        context: &AlevinFryRecordContext,
+        output: &mut Vec<u8>,
+    ) -> anyhow::Result<()> {
+        output.extend_from_slice(&(self.alignments.len() as u32).to_le_bytes());
+        if context.bct == RadIntId::U32 && context.umit == RadIntId::U32 {
+            output.extend_from_slice(&(corrected_barcode as u32).to_le_bytes());
+            output.extend_from_slice(&(umi as u32).to_le_bytes());
+        } else if context.bct == RadIntId::U64 && context.umit == RadIntId::U64 {
+            output.extend_from_slice(&corrected_barcode.to_le_bytes());
+            output.extend_from_slice(&umi.to_le_bytes());
+        } else {
+            context.bct.write_to(corrected_barcode, output)?;
+            context.umit.write_to(umi, output)?;
+        }
+        #[cfg(target_endian = "little")]
+        output.extend_from_slice(bytemuck::cast_slice(&self.alignments));
+        #[cfg(not(target_endian = "little"))]
+        for encoded in &self.alignments {
+            output.extend_from_slice(&encoded.to_le_bytes());
+        }
+        Ok(())
+    }
+}
+
+/// Reusable alignment storage for allocation-free multi-barcode record
+/// filtering and rewriting during collation.
+#[derive(Debug, Default)]
+pub struct MultiBarcodeRecordScratch {
+    alignments: Vec<u32>,
+}
+
+impl MultiBarcodeRecordScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read and retain the alignments selected by `expected_ori`, then sort
+    /// them by reference id while preserving the packed orientation bit.
+    pub fn read_filtered<T: Read>(
+        &mut self,
+        reader: &mut T,
+        num_alignments: u32,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> anyhow::Result<()> {
+        self.alignments.clear();
+        self.alignments.reserve(num_alignments as usize);
+        let mut bytes = [0_u8; 4];
+        for _ in 0..num_alignments {
+            reader.read_exact(&mut bytes)?;
+            let encoded = u32::from_le_bytes(bytes);
+            let observed = if encoded & utils::MASK_LOWER_31_U32 != 0 {
+                MappedFragmentOrientation::Forward
+            } else {
+                MappedFragmentOrientation::Reverse
+            };
+            if expected_ori.is_unknown() || expected_ori.same(&observed) {
+                self.alignments.push(encoded);
+            }
+        }
+
+        if !self
+            .alignments
+            .windows(2)
+            .all(|pair| (pair[0] & utils::MASK_TOP_BIT_U32) <= (pair[1] & utils::MASK_TOP_BIT_U32))
+        {
+            self.alignments
+                .sort_unstable_by_key(|encoded| encoded & utils::MASK_TOP_BIT_U32);
+        }
+        Ok(())
+    }
+
+    pub fn num_alignments(&self) -> usize {
+        self.alignments.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.alignments.is_empty()
+    }
+
+    #[inline]
+    fn append_packed_alignments(&self, output: &mut Vec<u8>) {
+        #[cfg(target_endian = "little")]
+        output.extend_from_slice(bytemuck::cast_slice(&self.alignments));
+        #[cfg(not(target_endian = "little"))]
+        for encoded in &self.alignments {
+            output.extend_from_slice(&encoded.to_le_bytes());
+        }
+    }
+
+    /// Append the common two-`u32`-barcode, `u32`-UMI record encoding.
+    ///
+    /// Callers must select this only after validating the record context. It
+    /// exists separately from [`Self::append_corrected`] so a fixed-layout
+    /// decoder does not need to construct a generic barcode header merely to
+    /// serialize the corrected record.
+    #[inline]
+    pub fn append_u32_pair_corrected(
+        &self,
+        umi: u32,
+        sample_ordinal: u32,
+        corrected_cell: u32,
+        output: &mut Vec<u8>,
+    ) {
+        output.extend_from_slice(&(self.alignments.len() as u32).to_le_bytes());
+        output.extend_from_slice(&sample_ordinal.to_le_bytes());
+        output.extend_from_slice(&corrected_cell.to_le_bytes());
+        output.extend_from_slice(&umi.to_le_bytes());
+        self.append_packed_alignments(output);
+    }
+
+    /// Write a corrected record header and the retained packed alignments.
+    #[inline]
+    pub fn write_corrected<W: Write>(
+        &self,
+        header: &MultiBarcodeReadRecordHeader<u64>,
+        context: &MultiBarcodeRecordContext,
+        sample_ordinal: u64,
+        corrected_cell: u64,
+        writer: &mut W,
+    ) -> anyhow::Result<()> {
+        let mut corrected_barcodes = header.barcodes.clone();
+        let first = corrected_barcodes
+            .first_mut()
+            .context("multi-barcode record has no sample barcode")?;
+        *first = sample_ordinal;
+        let last = corrected_barcodes
+            .last_mut()
+            .context("multi-barcode record has no cell barcode")?;
+        *last = corrected_cell;
+
+        RadIntId::U32.write_to(self.alignments.len() as u32, writer)?;
+        for (barcode, barcode_type) in corrected_barcodes.iter().zip(&context.bc_types) {
+            barcode_type.write_to(*barcode, writer)?;
+        }
+        context.umit.write_to(header.umi, writer)?;
+        for encoded in &self.alignments {
+            writer.write_all(&encoded.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Append a corrected record directly to a byte vector.
+    ///
+    /// This is the collation hot path. The common Flex encoding (two `u32`
+    /// barcodes and a `u32` UMI) is written without cloning the barcode list,
+    /// virtualized integer writes, or one `write_all` call per alignment.
+    #[inline]
+    pub fn append_corrected(
+        &self,
+        header: &MultiBarcodeReadRecordHeader<u64>,
+        context: &MultiBarcodeRecordContext,
+        sample_ordinal: u64,
+        corrected_cell: u64,
+        output: &mut Vec<u8>,
+    ) -> anyhow::Result<()> {
+        if context.bc_types.as_slice() == [RadIntId::U32, RadIntId::U32]
+            && context.umit == RadIntId::U32
+        {
+            self.append_u32_pair_corrected(
+                header.umi as u32,
+                sample_ordinal as u32,
+                corrected_cell as u32,
+                output,
+            );
+            return Ok(());
+        } else {
+            output.extend_from_slice(&(self.alignments.len() as u32).to_le_bytes());
+            let last_index = header
+                .barcodes
+                .len()
+                .checked_sub(1)
+                .context("multi-barcode record has no barcode fields")?;
+            for (index, (barcode, barcode_type)) in
+                header.barcodes.iter().zip(&context.bc_types).enumerate()
+            {
+                let corrected = if index == 0 {
+                    sample_ordinal
+                } else if index == last_index {
+                    corrected_cell
+                } else {
+                    *barcode
+                };
+                barcode_type.write_to(corrected, output)?;
+            }
+            context.umit.write_to(header.umi, output)?;
+        }
+        self.append_packed_alignments(output);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::rad_types::{RadIntId, TagSection, TagSectionLabel};
@@ -3002,5 +3253,51 @@ mod tests {
             hdr_a.collation_group_key(&ctx),
             hdr_b.collation_group_key(&ctx)
         );
+    }
+
+    #[test]
+    fn multi_barcode_scratch_filters_sorts_and_rewrites() {
+        use crate::collation::BarcodeRole;
+        use crate::rad_types::MappedFragmentOrientation;
+        use crate::record::{
+            MultiBarcodeReadRecord, MultiBarcodeReadRecordHeader, MultiBarcodeRecordContext,
+            MultiBarcodeRecordScratch,
+        };
+        use smallvec::smallvec;
+
+        let context = MultiBarcodeRecordContext {
+            bc_types: smallvec![RadIntId::U32, RadIntId::U32],
+            umit: RadIntId::U32,
+            roles: smallvec![BarcodeRole::Sample, BarcodeRole::Cell],
+        };
+        let encoded = [0x8000_0005_u32, 3, 0x8000_0001];
+        let bytes: Vec<u8> = encoded
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let mut scratch = MultiBarcodeRecordScratch::new();
+        scratch
+            .read_filtered(
+                &mut Cursor::new(bytes),
+                encoded.len() as u32,
+                &MappedFragmentOrientation::Forward,
+            )
+            .unwrap();
+
+        let header = MultiBarcodeReadRecordHeader {
+            naln: encoded.len() as u32,
+            barcodes: smallvec![99, 88],
+            umi: 42,
+        };
+        let mut rewritten = Vec::new();
+        scratch
+            .append_corrected(&header, &context, 2, 7, &mut rewritten)
+            .unwrap();
+        let record =
+            MultiBarcodeReadRecord::from_bytes_with_context(&mut Cursor::new(rewritten), &context);
+        assert_eq!(record.barcodes.as_slice(), &[2, 7]);
+        assert_eq!(record.umi, 42);
+        assert_eq!(record.refs, vec![1, 5]);
+        assert_eq!(record.dirs, vec![true, true]);
     }
 }
