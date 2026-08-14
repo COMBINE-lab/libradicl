@@ -66,6 +66,7 @@ pub mod rad_types;
 pub mod readers;
 pub mod record;
 pub mod schema;
+pub mod single_collation;
 pub mod unmapped;
 pub mod utils;
 pub mod writers;
