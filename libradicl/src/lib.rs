@@ -886,9 +886,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<
 >(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
-    correct_map: &HashMap<u64, u64>,
+    correct_map: &HashMap<u64, u64, impl std::hash::BuildHasher>,
     expected_ori: &Strand,
-    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    output_cache: &HashMap<u64, Arc<TempBucket>, impl std::hash::BuildHasher>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
 ) where
@@ -1007,9 +1007,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
     reader: &mut BufReader<T>,
     bct: &RadIntId,
     umit: &RadIntId,
-    correct_map: &HashMap<u64, u64>,
+    correct_map: &HashMap<u64, u64, impl std::hash::BuildHasher>,
     expected_ori: &Strand,
-    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    output_cache: &HashMap<u64, Arc<TempBucket>, impl std::hash::BuildHasher>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
 ) {
@@ -1115,8 +1115,8 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
     reader: &mut BufReader<T>,
     bct: &RadIntId,
-    correct_map: &HashMap<u64, u64>,
-    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    correct_map: &HashMap<u64, u64, impl std::hash::BuildHasher>,
+    output_cache: &HashMap<u64, Arc<TempBucket>, impl std::hash::BuildHasher>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
     ck: CollateKey, // f: F
