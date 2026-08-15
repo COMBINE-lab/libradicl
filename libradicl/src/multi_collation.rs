@@ -44,9 +44,55 @@ enum MultiBarcodeCorrectionLookup {
         bucket_by_valid_index: Vec<u32>,
     },
     Compiled {
-        corrections: AHashMap<u64, u64>,
-        correction_and_bucket: AHashMap<u64, (u64, u32)>,
+        pending: Vec<(u64, u64)>,
+        correction_and_bucket: Option<CompiledCorrectionLookup>,
     },
+}
+
+/// Prefix-partitioned compiled decisions. Flex-sized barcodes use a packed
+/// corrected-barcode/bucket value; wider future designs fall back to separate
+/// values without changing correctness.
+struct CompiledCorrectionLookup {
+    observed: Vec<u64>,
+    resolved: CompiledResolvedValues,
+    offsets: Vec<usize>,
+    suffix_bits: u32,
+}
+
+enum CompiledResolvedValues {
+    Packed {
+        values: Vec<u64>,
+        bucket_bits: u32,
+        bucket_mask: u64,
+    },
+    Wide(Vec<(u64, u32)>),
+}
+
+impl CompiledCorrectionLookup {
+    #[inline]
+    fn get(&self, observed: u64) -> Option<(u64, u32)> {
+        let prefix = usize::try_from(observed >> self.suffix_bits).ok()?;
+        if prefix + 1 >= self.offsets.len() {
+            return None;
+        }
+        let start = self.offsets[prefix];
+        let end = self.offsets[prefix + 1];
+        let index = self.observed[start..end]
+            .binary_search(&observed)
+            .ok()
+            .map(|index| start + index)?;
+        match &self.resolved {
+            CompiledResolvedValues::Packed {
+                values,
+                bucket_bits,
+                bucket_mask,
+            } => {
+                let value = values[index];
+                Some((value >> bucket_bits, (value & bucket_mask) as u32))
+            }
+            CompiledResolvedValues::Wide(values) => Some(values[index]),
+        }
+    }
 }
 
 impl MultiBarcodeSampleCorrection {
@@ -94,19 +140,28 @@ impl MultiBarcodeSampleCorrection {
     where
         I: IntoIterator<Item = (u64, u64)>,
     {
-        let mut compiled = AHashMap::new();
-        for (observed, corrected) in corrections {
-            if let Some(previous) = compiled.insert(observed, corrected)
-                && previous != corrected
-            {
-                bail!("observed barcode {observed} has conflicting compiled corrections");
+        let mut pending: Vec<_> = corrections.into_iter().collect();
+        pending.sort_unstable();
+        let mut write = 0usize;
+        for read in 0..pending.len() {
+            if write > 0 && pending[write - 1].0 == pending[read].0 {
+                if pending[write - 1].1 != pending[read].1 {
+                    bail!(
+                        "observed barcode {} has conflicting compiled corrections",
+                        pending[read].0
+                    );
+                }
+                continue;
             }
+            pending.swap(write, read);
+            write += 1;
         }
+        pending.truncate(write);
         Ok(Self {
             output_ordinal,
             lookup: MultiBarcodeCorrectionLookup::Compiled {
-                corrections: compiled,
-                correction_and_bucket: AHashMap::new(),
+                pending,
+                correction_and_bucket: None,
             },
         })
     }
@@ -133,13 +188,18 @@ impl MultiBarcodeSampleCorrection {
                 }
             }
             MultiBarcodeCorrectionLookup::Compiled {
-                corrections,
+                pending,
                 correction_and_bucket,
-            } => corrections.get(&observed).copied().or_else(|| {
-                correction_and_bucket
-                    .get(&observed)
-                    .map(|&(corrected, _)| corrected)
-            }),
+            } => correction_and_bucket
+                .as_ref()
+                .and_then(|lookup| lookup.get(observed))
+                .map(|(corrected, _)| corrected)
+                .or_else(|| {
+                    pending
+                        .binary_search_by_key(&observed, |&(source, _)| source)
+                        .ok()
+                        .map(|index| pending[index].1)
+                }),
         }
     }
 
@@ -178,7 +238,9 @@ impl MultiBarcodeSampleCorrection {
             MultiBarcodeCorrectionLookup::Compiled {
                 correction_and_bucket,
                 ..
-            } => correction_and_bucket.get(&observed).copied(),
+            } => correction_and_bucket
+                .as_ref()
+                .and_then(|lookup| lookup.get(observed)),
         }
     }
 }
@@ -225,6 +287,22 @@ impl MultiBarcodeCollationPlan {
             bail!("sample indices and cell barcode bits exceed the composite-key capacity");
         }
         let cell_mask = (1_u64 << cell_barcode_bits) - 1;
+        let bucket_bits = if num_buckets <= 1 {
+            0
+        } else {
+            usize::BITS - (num_buckets - 1).leading_zeros()
+        };
+        let use_packed_values = cell_barcode_bits + bucket_bits <= 64;
+        let bucket_mask = if bucket_bits == 0 {
+            0
+        } else {
+            (1_u64 << bucket_bits) - 1
+        };
+        let barcode_len = cell_barcode_bits / 2;
+        let prefix_bases = barcode_len.div_ceil(2).min(8);
+        let prefix_bits = 2 * prefix_bases;
+        let suffix_bits = cell_barcode_bits - prefix_bits;
+        let prefix_count = 1usize << prefix_bits;
         let mut bucket_output_group = vec![None; num_buckets];
         for (sample_index, sample) in samples.iter_mut().enumerate() {
             match &mut sample.lookup {
@@ -254,11 +332,15 @@ impl MultiBarcodeCollationPlan {
                     }
                 }
                 MultiBarcodeCorrectionLookup::Compiled {
-                    corrections,
+                    pending,
                     correction_and_bucket,
                 } => {
-                    correction_and_bucket.reserve(corrections.len());
-                    for (&observed, &corrected) in corrections.iter() {
+                    let mut observed_barcodes = Vec::with_capacity(pending.len());
+                    let mut packed_values =
+                        use_packed_values.then(|| Vec::with_capacity(pending.len()));
+                    let mut wide_values =
+                        (!use_packed_values).then(|| Vec::with_capacity(pending.len()));
+                    for (observed, corrected) in pending.drain(..) {
                         let composite =
                             ((sample_index as u64) << cell_barcode_bits) | (corrected & cell_mask);
                         // Match the historical single-barcode behavior: a
@@ -271,11 +353,45 @@ impl MultiBarcodeCollationPlan {
                                 bucket,
                                 sample.output_ordinal,
                             )?;
-                            correction_and_bucket.insert(observed, (corrected, bucket));
+                            observed_barcodes.push(observed);
+                            if let Some(values) = &mut packed_values {
+                                values.push(
+                                    ((corrected & cell_mask) << bucket_bits) | u64::from(bucket),
+                                );
+                            } else if let Some(values) = &mut wide_values {
+                                values.push((corrected, bucket));
+                            }
                         }
                     }
-                    corrections.clear();
-                    corrections.shrink_to_fit();
+                    pending.shrink_to_fit();
+
+                    let mut offsets = vec![0usize; prefix_count + 1];
+                    let mut cursor = 0usize;
+                    for (prefix, offset) in offsets.iter_mut().enumerate() {
+                        while cursor < observed_barcodes.len()
+                            && (observed_barcodes[cursor] >> suffix_bits) < prefix as u64
+                        {
+                            cursor += 1;
+                        }
+                        *offset = cursor;
+                    }
+                    let resolved = if let Some(values) = packed_values {
+                        CompiledResolvedValues::Packed {
+                            values,
+                            bucket_bits,
+                            bucket_mask,
+                        }
+                    } else {
+                        CompiledResolvedValues::Wide(
+                            wide_values.expect("wide compiled values were initialized"),
+                        )
+                    };
+                    *correction_and_bucket = Some(CompiledCorrectionLookup {
+                        observed: observed_barcodes,
+                        resolved,
+                        offsets,
+                        suffix_bits,
+                    });
                 }
             }
         }
@@ -1057,6 +1173,30 @@ mod tests {
             error
                 .to_string()
                 .contains("conflicting compiled corrections")
+        );
+    }
+
+    #[test]
+    fn compiled_corrections_fall_back_when_value_packing_would_overflow() {
+        let observed = (1_u64 << 60) | 7;
+        let corrected = (1_u64 << 60) | 3;
+        let sample = MultiBarcodeSampleCorrection::from_corrections(
+            0,
+            [(observed, corrected), (corrected, corrected)],
+        )
+        .unwrap();
+        let plan = MultiBarcodeCollationPlan::new(
+            AHashMap::new(),
+            vec![sample],
+            AHashMap::from([(corrected, 7)]),
+            62,
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.samples()[0].correct_barcode_and_bucket(observed),
+            Some((corrected, 7))
         );
     }
 
