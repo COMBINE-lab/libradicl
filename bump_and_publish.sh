@@ -177,10 +177,12 @@ fi
 run cargo check -p "$MACROS_CRATE" -p "$LIBRADICL_CRATE" -q
 
 # Exercise exactly what crates.io will package before either irreversible
-# publish. The path dependency between the two workspace crates is retained in
-# the package together with its matching version requirement.
-run cargo publish -p "$MACROS_CRATE" --dry-run --allow-dirty
-run cargo publish -p "$LIBRADICL_CRATE" --dry-run --allow-dirty
+# publish. This must be a workspace dry-run: an individual libradicl dry-run
+# resolves its packaged libradicl-macros dependency from crates.io, where the
+# new version intentionally does not exist yet. Cargo's workspace publisher
+# supplies that in-flight dependency through a temporary local registry and
+# verifies both packages in dependency order.
+run cargo publish --workspace --dry-run --allow-dirty
 
 if [[ "$CHANGELOG_ENABLED" == true ]]; then
     # Regenerate the whole file rather than prepending: the result is
