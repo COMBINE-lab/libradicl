@@ -77,10 +77,15 @@ impl CompiledCorrectionLookup {
         }
         let start = self.offsets[prefix];
         let end = self.offsets[prefix + 1];
-        let index = self.observed[start..end]
-            .binary_search(&observed)
-            .ok()
-            .map(|index| start + index)?;
+        let candidates = &self.observed[start..end];
+        let local_index = if candidates.len() <= 8 {
+            candidates
+                .iter()
+                .position(|&candidate| candidate == observed)?
+        } else {
+            candidates.binary_search(&observed).ok()?
+        };
+        let index = start + local_index;
         match &self.resolved {
             CompiledResolvedValues::Packed {
                 values,
@@ -298,11 +303,6 @@ impl MultiBarcodeCollationPlan {
         } else {
             (1_u64 << bucket_bits) - 1
         };
-        let barcode_len = cell_barcode_bits / 2;
-        let prefix_bases = barcode_len.div_ceil(2).min(8);
-        let prefix_bits = 2 * prefix_bases;
-        let suffix_bits = cell_barcode_bits - prefix_bits;
-        let prefix_count = 1usize << prefix_bits;
         let mut bucket_output_group = vec![None; num_buckets];
         for (sample_index, sample) in samples.iter_mut().enumerate() {
             match &mut sample.lookup {
@@ -335,6 +335,9 @@ impl MultiBarcodeCollationPlan {
                     pending,
                     correction_and_bucket,
                 } => {
+                    if pending.is_empty() {
+                        continue;
+                    }
                     let mut observed_barcodes = Vec::with_capacity(pending.len());
                     let mut packed_values =
                         use_packed_values.then(|| Vec::with_capacity(pending.len()));
@@ -365,6 +368,24 @@ impl MultiBarcodeCollationPlan {
                     }
                     pending.shrink_to_fit();
 
+                    if observed_barcodes.is_empty() {
+                        continue;
+                    }
+
+                    // Choose enough leading barcode bases to keep the typical
+                    // lookup slice tiny, while capping the direct-addressed
+                    // table at 4^10 entries for future long barcodes.
+                    let barcode_len = cell_barcode_bits / 2;
+                    let desired_prefixes = observed_barcodes.len().div_ceil(8);
+                    let mut prefix_bases = 0u32;
+                    while prefix_bases < barcode_len.min(10)
+                        && (1usize << (2 * prefix_bases)) < desired_prefixes
+                    {
+                        prefix_bases += 1;
+                    }
+                    let prefix_bits = 2 * prefix_bases;
+                    let suffix_bits = cell_barcode_bits - prefix_bits;
+                    let prefix_count = 1usize << prefix_bits;
                     let mut offsets = vec![0usize; prefix_count + 1];
                     let mut cursor = 0usize;
                     for (prefix, offset) in offsets.iter_mut().enumerate() {
