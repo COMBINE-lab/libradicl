@@ -36,14 +36,26 @@ pub struct SingleBarcodeCollationPlan {
 }
 
 impl SingleBarcodeCollationPlan {
-    pub fn new(
-        correction_map: AHashMap<u64, u64>,
-        group_to_bucket: AHashMap<u64, u32>,
+    /// Build a collation plan from caller-resolved barcode corrections.
+    ///
+    /// The caller owns all barcode-resolution semantics.  This constructor
+    /// only fuses each accepted `(observed, corrected)` decision with the
+    /// logical bucket assigned to the corrected barcode.  Accepting iterators
+    /// keeps the public API independent of the caller's map and hasher types.
+    pub fn from_corrections<C, G>(
+        corrections: C,
+        group_to_bucket: G,
         num_buckets: usize,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<Self>
+    where
+        C: IntoIterator<Item = (u64, u64)>,
+        G: IntoIterator<Item = (u64, u32)>,
+    {
         if num_buckets == 0 {
             bail!("single-barcode collation requires at least one logical bucket");
         }
+
+        let group_to_bucket: AHashMap<u64, u32> = group_to_bucket.into_iter().collect();
         if group_to_bucket
             .values()
             .any(|&bucket| bucket as usize >= num_buckets)
@@ -51,19 +63,35 @@ impl SingleBarcodeCollationPlan {
             bail!("group-to-bucket lookup contains an out-of-range bucket id");
         }
 
-        let mut correction_and_bucket = AHashMap::with_capacity(correction_map.len());
-        for (observed, corrected) in correction_map {
+        let corrections = corrections.into_iter();
+        let (lower_bound, _) = corrections.size_hint();
+        let mut correction_and_bucket = AHashMap::with_capacity(lower_bound);
+        for (observed, corrected) in corrections {
             // The historical collator silently ignored correction entries
             // whose target was not in the output permit list. Preserve that
             // behavior instead of imposing a new plan-construction contract.
             if let Some(&bucket) = group_to_bucket.get(&corrected) {
-                correction_and_bucket.insert(observed, (corrected, bucket));
+                let resolved = (corrected, bucket);
+                if let Some(previous) = correction_and_bucket.insert(observed, resolved)
+                    && previous != resolved
+                {
+                    bail!("observed barcode {observed} has conflicting compiled corrections");
+                }
             }
         }
         Ok(Self {
             correction_and_bucket,
             num_buckets,
         })
+    }
+
+    /// Compatibility constructor for callers already using `AHashMap`.
+    pub fn new(
+        correction_map: AHashMap<u64, u64>,
+        group_to_bucket: AHashMap<u64, u32>,
+        num_buckets: usize,
+    ) -> anyhow::Result<Self> {
+        Self::from_corrections(correction_map, group_to_bucket, num_buckets)
     }
 
     pub fn num_buckets(&self) -> usize {
@@ -613,6 +641,31 @@ mod tests {
         assert_eq!(plan.correction_and_bucket[&11], (7, 2));
         assert_eq!(plan.correction_and_bucket[&7], (7, 2));
         assert!(!plan.correction_and_bucket.contains_key(&99));
+    }
+
+    #[test]
+    fn iterator_constructor_is_map_agnostic_and_rejects_conflicts() {
+        let plan = SingleBarcodeCollationPlan::from_corrections(
+            vec![(11, 7), (7, 7), (99, 42)],
+            vec![(7, 2)],
+            3,
+        )
+        .unwrap();
+        assert_eq!(plan.correction_and_bucket[&11], (7, 2));
+        assert!(!plan.correction_and_bucket.contains_key(&99));
+
+        let error = SingleBarcodeCollationPlan::from_corrections(
+            vec![(11, 7), (11, 8)],
+            vec![(7, 0), (8, 1)],
+            2,
+        )
+        .err()
+        .expect("conflicting compiled decisions must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting compiled corrections")
+        );
     }
 
     #[test]
