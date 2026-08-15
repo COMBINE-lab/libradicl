@@ -34,12 +34,27 @@ use std::time::{Duration, Instant};
 /// Correction data for one sparse/global sample position.
 pub struct MultiBarcodeSampleCorrection {
     output_ordinal: u64,
-    identity: AHashMap<u64, usize>,
-    lookup: Option<BarcodeLookupMap>,
-    bucket_by_valid_index: Vec<u32>,
+    lookup: MultiBarcodeCorrectionLookup,
+}
+
+enum MultiBarcodeCorrectionLookup {
+    LegacyHamming {
+        identity: AHashMap<u64, usize>,
+        lookup: Option<BarcodeLookupMap>,
+        bucket_by_valid_index: Vec<u32>,
+    },
+    Compiled {
+        corrections: AHashMap<u64, u64>,
+        correction_and_bucket: AHashMap<u64, (u64, u32)>,
+    },
 }
 
 impl MultiBarcodeSampleCorrection {
+    /// Construct the legacy unique-Hamming correction fallback.
+    ///
+    /// New workflows should resolve barcode policy before collation and use
+    /// [`Self::from_corrections`]. This constructor remains available for old
+    /// permit-list directories that do not contain compiled decisions.
     pub fn new(output_ordinal: u64, mut valid_barcodes: Vec<u64>, barcode_len: u32) -> Self {
         valid_barcodes.sort_unstable();
         valid_barcodes.dedup();
@@ -62,47 +77,109 @@ impl MultiBarcodeSampleCorrection {
             .unwrap_or_default();
         Self {
             output_ordinal,
-            identity,
-            lookup,
-            bucket_by_valid_index: Vec::new(),
+            lookup: MultiBarcodeCorrectionLookup::LegacyHamming {
+                identity,
+                lookup,
+                bucket_by_valid_index: Vec::new(),
+            },
         }
+    }
+
+    /// Construct correction data from decisions made by the workflow layer.
+    ///
+    /// libradicl does not interpret or recompute these decisions. During
+    /// [`MultiBarcodeCollationPlan`] construction they are fused with bucket
+    /// ids so scatter performs one direct lookup per accepted record.
+    pub fn from_corrections<I>(output_ordinal: u64, corrections: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = (u64, u64)>,
+    {
+        let mut compiled = AHashMap::new();
+        for (observed, corrected) in corrections {
+            if let Some(previous) = compiled.insert(observed, corrected)
+                && previous != corrected
+            {
+                bail!("observed barcode {observed} has conflicting compiled corrections");
+            }
+        }
+        Ok(Self {
+            output_ordinal,
+            lookup: MultiBarcodeCorrectionLookup::Compiled {
+                corrections: compiled,
+                correction_and_bucket: AHashMap::new(),
+            },
+        })
     }
 
     pub fn output_ordinal(&self) -> u64 {
         self.output_ordinal
     }
 
-    /// Return the corrected barcode for an identity or unique one-edit match.
+    /// Return the caller-compiled correction, or the legacy unique-Hamming
+    /// correction when this sample was constructed with [`Self::new`].
     #[inline]
     pub fn correct_barcode(&self, observed: u64) -> Option<u64> {
-        if self.identity.contains_key(&observed) {
-            return Some(observed);
-        }
-        let lookup = self.lookup.as_ref()?;
-        match lookup.find_neighbors(observed, false) {
-            (Some(index), 1) => Some(lookup.barcodes[index]),
-            _ => None,
+        match &self.lookup {
+            MultiBarcodeCorrectionLookup::LegacyHamming {
+                identity, lookup, ..
+            } => {
+                if identity.contains_key(&observed) {
+                    return Some(observed);
+                }
+                let lookup = lookup.as_ref()?;
+                match lookup.find_neighbors(observed, false) {
+                    (Some(index), 1) => Some(lookup.barcodes[index]),
+                    _ => None,
+                }
+            }
+            MultiBarcodeCorrectionLookup::Compiled {
+                corrections,
+                correction_and_bucket,
+            } => corrections.get(&observed).copied().or_else(|| {
+                correction_and_bucket
+                    .get(&observed)
+                    .map(|&(corrected, _)| corrected)
+            }),
         }
     }
 
     #[inline]
     fn correction_index(&self, observed: u64) -> Option<usize> {
-        if let Some(&index) = self.identity.get(&observed) {
-            return Some(index);
-        }
-        let lookup = self.lookup.as_ref()?;
-        match lookup.find_neighbors(observed, false) {
-            (Some(index), 1) => Some(index),
-            _ => None,
+        let MultiBarcodeCorrectionLookup::LegacyHamming {
+            identity, lookup, ..
+        } = &self.lookup
+        else {
+            return None;
+        };
+        if let Some(&index) = identity.get(&observed) {
+            Some(index)
+        } else {
+            let lookup = lookup.as_ref()?;
+            match lookup.find_neighbors(observed, false) {
+                (Some(index), 1) => Some(index),
+                _ => None,
+            }
         }
     }
 
     #[inline]
     fn correct_barcode_and_bucket(&self, observed: u64) -> Option<(u64, u32)> {
-        let index = self.correction_index(observed)?;
-        let corrected = self.lookup.as_ref()?.barcodes[index];
-        let bucket = *self.bucket_by_valid_index.get(index)?;
-        Some((corrected, bucket))
+        match &self.lookup {
+            MultiBarcodeCorrectionLookup::LegacyHamming {
+                lookup,
+                bucket_by_valid_index,
+                ..
+            } => {
+                let index = self.correction_index(observed)?;
+                let corrected = lookup.as_ref()?.barcodes[index];
+                let bucket = *bucket_by_valid_index.get(index)?;
+                Some((corrected, bucket))
+            }
+            MultiBarcodeCorrectionLookup::Compiled {
+                correction_and_bucket,
+                ..
+            } => correction_and_bucket.get(&observed).copied(),
+        }
     }
 }
 
@@ -150,29 +227,56 @@ impl MultiBarcodeCollationPlan {
         let cell_mask = (1_u64 << cell_barcode_bits) - 1;
         let mut bucket_output_group = vec![None; num_buckets];
         for (sample_index, sample) in samples.iter_mut().enumerate() {
-            let Some(lookup) = sample.lookup.as_ref() else {
-                continue;
-            };
-            sample.bucket_by_valid_index.reserve(lookup.barcodes.len());
-            for &cell_barcode in &lookup.barcodes {
-                let composite =
-                    ((sample_index as u64) << cell_barcode_bits) | (cell_barcode & cell_mask);
-                let bucket = group_to_bucket.get(&composite).copied().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "sample {sample_index} cell barcode {cell_barcode} has no logical bucket"
-                    )
-                })?;
-                let output_group = sample.output_ordinal;
-                match bucket_output_group[bucket as usize] {
-                    Some(existing) if existing != output_group => {
-                        bail!(
-                            "logical bucket {bucket} mixes output sample groups {existing} and {output_group}"
-                        );
+            match &mut sample.lookup {
+                MultiBarcodeCorrectionLookup::LegacyHamming {
+                    lookup,
+                    bucket_by_valid_index,
+                    ..
+                } => {
+                    let Some(lookup) = lookup.as_ref() else {
+                        continue;
+                    };
+                    bucket_by_valid_index.reserve(lookup.barcodes.len());
+                    for &cell_barcode in &lookup.barcodes {
+                        let composite = ((sample_index as u64) << cell_barcode_bits)
+                            | (cell_barcode & cell_mask);
+                        let bucket = group_to_bucket.get(&composite).copied().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "sample {sample_index} cell barcode {cell_barcode} has no logical bucket"
+                            )
+                        })?;
+                        register_bucket_output_group(
+                            &mut bucket_output_group,
+                            bucket,
+                            sample.output_ordinal,
+                        )?;
+                        bucket_by_valid_index.push(bucket);
                     }
-                    None => bucket_output_group[bucket as usize] = Some(output_group),
-                    _ => {}
                 }
-                sample.bucket_by_valid_index.push(bucket);
+                MultiBarcodeCorrectionLookup::Compiled {
+                    corrections,
+                    correction_and_bucket,
+                } => {
+                    correction_and_bucket.reserve(corrections.len());
+                    for (&observed, &corrected) in corrections.iter() {
+                        let composite =
+                            ((sample_index as u64) << cell_barcode_bits) | (corrected & cell_mask);
+                        // Match the historical single-barcode behavior: a
+                        // decision targeting a barcode outside the output
+                        // permit list is ignored rather than becoming a new
+                        // plan-construction contract.
+                        if let Some(&bucket) = group_to_bucket.get(&composite) {
+                            register_bucket_output_group(
+                                &mut bucket_output_group,
+                                bucket,
+                                sample.output_ordinal,
+                            )?;
+                            correction_and_bucket.insert(observed, (corrected, bucket));
+                        }
+                    }
+                    corrections.clear();
+                    corrections.shrink_to_fit();
+                }
             }
         }
         let mut groups_by_ordinal = BTreeMap::<u64, Vec<usize>>::new();
@@ -199,6 +303,23 @@ impl MultiBarcodeCollationPlan {
     pub fn num_buckets(&self) -> usize {
         self.num_buckets
     }
+}
+
+fn register_bucket_output_group(
+    bucket_output_group: &mut [Option<u64>],
+    bucket: u32,
+    output_group: u64,
+) -> anyhow::Result<()> {
+    match bucket_output_group[bucket as usize] {
+        Some(existing) if existing != output_group => {
+            bail!(
+                "logical bucket {bucket} mixes output sample groups {existing} and {output_group}"
+            );
+        }
+        None => bucket_output_group[bucket as usize] = Some(output_group),
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Runtime controls for multi-barcode collation.
@@ -896,6 +1017,47 @@ mod tests {
         assert_eq!(record.umi, 7);
         assert_eq!(record.refs, vec![5]);
         assert_eq!(record.dirs, vec![true]);
+    }
+
+    #[test]
+    fn compiled_corrections_are_fused_with_buckets() {
+        let observed = 29_u64;
+        let corrected = 23_u64;
+        let sample = MultiBarcodeSampleCorrection::from_corrections(
+            4,
+            [(observed, corrected), (corrected, corrected), (99, 88)],
+        )
+        .unwrap();
+        let group_map = AHashMap::from([(corrected, 1)]);
+        let plan = MultiBarcodeCollationPlan::new(
+            AHashMap::from([(11, 0)]),
+            vec![sample],
+            group_map,
+            32,
+            2,
+        )
+        .unwrap();
+
+        let sample = &plan.samples()[0];
+        assert_eq!(sample.correct_barcode(observed), Some(corrected));
+        assert_eq!(sample.correct_barcode(corrected), Some(corrected));
+        assert_eq!(sample.correct_barcode(99), None);
+        assert_eq!(
+            sample.correct_barcode_and_bucket(observed),
+            Some((corrected, 1))
+        );
+    }
+
+    #[test]
+    fn compiled_corrections_reject_conflicting_sources() {
+        let error = MultiBarcodeSampleCorrection::from_corrections(0, [(7, 11), (7, 13)])
+            .err()
+            .expect("conflicting compiled decisions must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting compiled corrections")
+        );
     }
 
     #[test]
