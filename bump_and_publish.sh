@@ -176,6 +176,12 @@ fi
 
 run cargo check -p "$MACROS_CRATE" -p "$LIBRADICL_CRATE" -q
 
+# Exercise exactly what crates.io will package before either irreversible
+# publish. The path dependency between the two workspace crates is retained in
+# the package together with its matching version requirement.
+run cargo publish -p "$MACROS_CRATE" --dry-run --allow-dirty
+run cargo publish -p "$LIBRADICL_CRATE" --dry-run --allow-dirty
+
 if [[ "$CHANGELOG_ENABLED" == true ]]; then
     # Regenerate the whole file rather than prepending: the result is
     # idempotent and stays in one format throughout. `--tag` labels the

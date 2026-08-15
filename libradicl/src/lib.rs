@@ -56,14 +56,17 @@ use std::vec::Vec;
 pub mod chunk;
 pub mod codec;
 pub mod collation;
+pub(crate) mod collation_spool;
 pub mod constants;
 pub mod exit_codes;
 pub mod header;
 pub mod io;
+pub mod multi_collation;
 pub mod rad_types;
 pub mod readers;
 pub mod record;
 pub mod schema;
+pub mod single_collation;
 pub mod unmapped;
 pub mod utils;
 pub mod writers;
@@ -883,9 +886,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file_generic<
 >(
     reader: &mut BufReader<T>,
     rec_context: &<R as MappedRecord>::ParsingContext,
-    correct_map: &HashMap<u64, u64>,
+    correct_map: &HashMap<u64, u64, impl std::hash::BuildHasher>,
     expected_ori: &Strand,
-    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    output_cache: &HashMap<u64, Arc<TempBucket>, impl std::hash::BuildHasher>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
 ) where
@@ -1004,9 +1007,9 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
     reader: &mut BufReader<T>,
     bct: &RadIntId,
     umit: &RadIntId,
-    correct_map: &HashMap<u64, u64>,
+    correct_map: &HashMap<u64, u64, impl std::hash::BuildHasher>,
     expected_ori: &Strand,
-    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    output_cache: &HashMap<u64, Arc<TempBucket>, impl std::hash::BuildHasher>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
 ) {
@@ -1112,8 +1115,8 @@ pub fn dump_corrected_cb_chunk_to_temp_file<T: Read>(
 pub fn dump_corrected_cb_chunk_to_temp_file_atac<T: Read>(
     reader: &mut BufReader<T>,
     bct: &RadIntId,
-    correct_map: &HashMap<u64, u64>,
-    output_cache: &HashMap<u64, Arc<TempBucket>>,
+    correct_map: &HashMap<u64, u64, impl std::hash::BuildHasher>,
+    output_cache: &HashMap<u64, Arc<TempBucket>, impl std::hash::BuildHasher>,
     local_buffers: &mut [Cursor<&mut [u8]>],
     flush_limit: usize,
     ck: CollateKey, // f: F

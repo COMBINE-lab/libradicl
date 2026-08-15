@@ -69,6 +69,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --release ${{ matrix.features }}
 
+      - name: Strict API documentation
+        if: matrix.os == 'ubuntu-22.04' && matrix.features == ''
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
       # The examples are the closest thing the crate has to integration
       # coverage, and nothing else compiles them in release mode.
       - name: Build examples
