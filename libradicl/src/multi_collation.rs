@@ -49,53 +49,34 @@ enum MultiBarcodeCorrectionLookup {
     },
 }
 
-/// Prefix-partitioned compiled decisions. Flex-sized barcodes use a packed
-/// corrected-barcode/bucket value; wider future designs fall back to separate
-/// values without changing correctness.
+/// Direct compiled decisions. Flex-sized barcodes pack the corrected barcode
+/// and bucket into one word; wider future designs fall back to a wide value.
 struct CompiledCorrectionLookup {
-    observed: Vec<u64>,
-    resolved: CompiledResolvedValues,
-    offsets: Vec<usize>,
-    suffix_bits: u32,
+    entries: CompiledResolvedValues,
 }
 
 enum CompiledResolvedValues {
     Packed {
-        values: Vec<u64>,
+        values: AHashMap<u64, u64>,
         bucket_bits: u32,
         bucket_mask: u64,
     },
-    Wide(Vec<(u64, u32)>),
+    Wide(AHashMap<u64, (u64, u32)>),
 }
 
 impl CompiledCorrectionLookup {
     #[inline]
     fn get(&self, observed: u64) -> Option<(u64, u32)> {
-        let prefix = usize::try_from(observed >> self.suffix_bits).ok()?;
-        if prefix + 1 >= self.offsets.len() {
-            return None;
-        }
-        let start = self.offsets[prefix];
-        let end = self.offsets[prefix + 1];
-        let candidates = &self.observed[start..end];
-        let local_index = if candidates.len() <= 8 {
-            candidates
-                .iter()
-                .position(|&candidate| candidate == observed)?
-        } else {
-            candidates.binary_search(&observed).ok()?
-        };
-        let index = start + local_index;
-        match &self.resolved {
+        match &self.entries {
             CompiledResolvedValues::Packed {
                 values,
                 bucket_bits,
                 bucket_mask,
             } => {
-                let value = values[index];
+                let value = *values.get(&observed)?;
                 Some((value >> bucket_bits, (value & bucket_mask) as u32))
             }
-            CompiledResolvedValues::Wide(values) => Some(values[index]),
+            CompiledResolvedValues::Wide(values) => values.get(&observed).copied(),
         }
     }
 }
@@ -338,11 +319,10 @@ impl MultiBarcodeCollationPlan {
                     if pending.is_empty() {
                         continue;
                     }
-                    let mut observed_barcodes = Vec::with_capacity(pending.len());
                     let mut packed_values =
-                        use_packed_values.then(|| Vec::with_capacity(pending.len()));
+                        use_packed_values.then(|| AHashMap::with_capacity(pending.len()));
                     let mut wide_values =
-                        (!use_packed_values).then(|| Vec::with_capacity(pending.len()));
+                        (!use_packed_values).then(|| AHashMap::with_capacity(pending.len()));
                     for (observed, corrected) in pending.drain(..) {
                         let composite =
                             ((sample_index as u64) << cell_barcode_bits) | (corrected & cell_mask);
@@ -356,47 +336,26 @@ impl MultiBarcodeCollationPlan {
                                 bucket,
                                 sample.output_ordinal,
                             )?;
-                            observed_barcodes.push(observed);
                             if let Some(values) = &mut packed_values {
-                                values.push(
+                                values.insert(
+                                    observed,
                                     ((corrected & cell_mask) << bucket_bits) | u64::from(bucket),
                                 );
                             } else if let Some(values) = &mut wide_values {
-                                values.push((corrected, bucket));
+                                values.insert(observed, (corrected, bucket));
                             }
                         }
                     }
                     pending.shrink_to_fit();
 
-                    if observed_barcodes.is_empty() {
+                    if packed_values
+                        .as_ref()
+                        .is_some_and(|values| values.is_empty())
+                        || wide_values.as_ref().is_some_and(|values| values.is_empty())
+                    {
                         continue;
                     }
-
-                    // Choose enough leading barcode bases to keep the typical
-                    // lookup slice tiny, while capping the direct-addressed
-                    // table at 4^10 entries for future long barcodes.
-                    let barcode_len = cell_barcode_bits / 2;
-                    let desired_prefixes = observed_barcodes.len().div_ceil(8);
-                    let mut prefix_bases = 0u32;
-                    while prefix_bases < barcode_len.min(10)
-                        && (1usize << (2 * prefix_bases)) < desired_prefixes
-                    {
-                        prefix_bases += 1;
-                    }
-                    let prefix_bits = 2 * prefix_bases;
-                    let suffix_bits = cell_barcode_bits - prefix_bits;
-                    let prefix_count = 1usize << prefix_bits;
-                    let mut offsets = vec![0usize; prefix_count + 1];
-                    let mut cursor = 0usize;
-                    for (prefix, offset) in offsets.iter_mut().enumerate() {
-                        while cursor < observed_barcodes.len()
-                            && (observed_barcodes[cursor] >> suffix_bits) < prefix as u64
-                        {
-                            cursor += 1;
-                        }
-                        *offset = cursor;
-                    }
-                    let resolved = if let Some(values) = packed_values {
+                    let entries = if let Some(values) = packed_values {
                         CompiledResolvedValues::Packed {
                             values,
                             bucket_bits,
@@ -407,12 +366,7 @@ impl MultiBarcodeCollationPlan {
                             wide_values.expect("wide compiled values were initialized"),
                         )
                     };
-                    *correction_and_bucket = Some(CompiledCorrectionLookup {
-                        observed: observed_barcodes,
-                        resolved,
-                        offsets,
-                        suffix_bits,
-                    });
+                    *correction_and_bucket = Some(CompiledCorrectionLookup { entries });
                 }
             }
         }
@@ -713,6 +667,12 @@ where
         worker_spools.push(result.spool);
     }
     let scatter_duration = scatter_started.elapsed();
+    let num_buckets = plan.num_buckets();
+    let gather_groups = plan.gather_groups.clone();
+    // Correction lookups are scatter-only. Release this Arc before gather
+    // allocates bucket-sized output buffers and cell indexes, so the two
+    // independent working sets do not determine peak RSS together.
+    drop(plan);
     let spools = Arc::new(BucketSpoolSet::from_workers(worker_spools)?);
 
     let gather_started = Instant::now();
@@ -731,7 +691,7 @@ where
     let gather_budget = tuning_budget.saturating_mul(3) / 4;
     let budgeted_gather_workers = (gather_budget / per_gather_worker).max(1) as usize;
     let num_gather_workers = (options.num_threads - 1)
-        .min(plan.num_buckets())
+        .min(num_buckets)
         .min(budgeted_gather_workers)
         .max(1);
     let (bucket_tx, bucket_rx) = bounded::<usize>(num_gather_workers);
@@ -780,7 +740,7 @@ where
 
     let mut output_chunks = 0_u64;
     let mut gather_error = None;
-    'gather_groups: for buckets in &plan.gather_groups {
+    'gather_groups: for buckets in &gather_groups {
         let initial_window = num_gather_workers.min(buckets.len());
         for &bucket_id in &buckets[..initial_window] {
             if bucket_tx.send(bucket_id).is_err() {
@@ -828,7 +788,7 @@ where
     Ok(MultiBarcodeCollationStats {
         records_scattered,
         output_chunks,
-        num_buckets: plan.num_buckets(),
+        num_buckets,
         num_scatter_workers,
         num_gather_workers,
         spool_flush_limit,
