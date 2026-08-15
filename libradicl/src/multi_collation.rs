@@ -324,6 +324,11 @@ impl MultiBarcodeCollationPlan {
                     let mut wide_values =
                         (!use_packed_values).then(|| AHashMap::with_capacity(pending.len()));
                     for (observed, corrected) in pending.drain(..) {
+                        if corrected & !cell_mask != 0 {
+                            bail!(
+                                "compiled corrected barcode {corrected} exceeds the declared {cell_barcode_bits}-bit cell key"
+                            );
+                        }
                         let composite =
                             ((sample_index as u64) << cell_barcode_bits) | (corrected & cell_mask);
                         // Match the historical single-barcode behavior: a
@@ -1179,6 +1184,16 @@ mod tests {
             plan.samples()[0].correct_barcode_and_bucket(observed),
             Some((corrected, 7))
         );
+    }
+
+    #[test]
+    fn compiled_corrections_reject_targets_wider_than_the_declared_cell_key() {
+        let sample = MultiBarcodeSampleCorrection::from_corrections(0, [(7, 1_u64 << 20)]).unwrap();
+        let error =
+            MultiBarcodeCollationPlan::new(AHashMap::new(), vec![sample], AHashMap::new(), 16, 1)
+                .err()
+                .expect("out-of-range corrected targets must be rejected");
+        assert!(error.to_string().contains("exceeds the declared 16-bit"));
     }
 
     #[test]
