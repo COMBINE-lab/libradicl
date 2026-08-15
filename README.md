@@ -24,7 +24,7 @@ The working format specification lives
 
 ```toml
 [dependencies]
-libradicl = "0.15"
+libradicl = "0.18"
 ```
 
 ## Reading
@@ -141,8 +141,51 @@ zstd is behind a feature flag so the crate stays pure Rust by default (it pulls 
 reports a clear error on a zstd chunk rather than mis-parsing it.
 
 ```toml
-libradicl = { version = "0.15", features = ["zstd"] }
+libradicl = { version = "0.18", features = ["zstd"] }
 ```
+
+## Bounded collation
+
+The `single_collation` and `multi_collation` modules provide bounded-memory,
+parallel collators for single-cell and hierarchical multi-barcode RAD files.
+Barcode resolution remains the caller's responsibility: pass the accepted
+`(observed, corrected)` decisions to a plan constructor and libradicl privately
+builds the fused correction-and-bucket lookup used by the record hot path.
+
+For a single-barcode RAD file:
+
+```rust
+use libradicl::single_collation::SingleBarcodeCollationPlan;
+
+let corrections = [(10_u64, 100_u64), (100, 100)];
+let corrected_group_buckets = [(100_u64, 0_u32)];
+let plan = SingleBarcodeCollationPlan::from_corrections(
+    corrections,
+    corrected_group_buckets,
+    1,
+)?;
+assert_eq!(plan.num_buckets(), 1);
+```
+
+For a multi-barcode RAD file, compile the cell decisions independently within
+each canonical sample before constructing the complete collation plan:
+
+```rust
+use libradicl::multi_collation::MultiBarcodeSampleCorrection;
+
+let sample = MultiBarcodeSampleCorrection::from_corrections(
+    0,
+    [(10_u64, 100_u64), (100, 100)],
+)?;
+assert_eq!(sample.output_ordinal(), 0);
+```
+
+`SingleBarcodeCollationOptions` and `MultiBarcodeCollationOptions` both control
+the total thread count, working-memory budget, and output compression. These
+engines use two threads and 256 MiB as practical minima: smaller requests emit
+a warning and continue with the corresponding minimum. The memory budget
+excludes caller-owned indexes, the operating-system page cache, allocator
+overhead, and the output writer.
 
 ## Fallible vs panicking constructors
 
@@ -180,7 +223,9 @@ cargo run --release --example read_header -- <path-to-rad-file>
 | `readers` | `ParallelRadReader`, `ParallelChunkReader`, `MetaChunk` |
 | `writers` | `RadFileWriter`, `ConcurrentChunkWriter` |
 | `codec` | per-chunk compression codecs |
-| `collation` | hierarchical collation, including multi-barcode protocols (e.g. 10x Flex) |
+| `collation` | shared collation types, resource normalization, and legacy helpers |
+| `single_collation` | bounded single-barcode collation with caller-compiled corrections |
+| `multi_collation` | bounded hierarchical collation for multi-barcode protocols such as 10x Flex |
 | `unmapped` | the self-describing side file recording unmapped barcode counts |
 
 ## Contributing
