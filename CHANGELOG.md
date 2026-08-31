@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.18.1](https://github.com/COMBINE-lab/libradicl/compare/v0.18.0...v0.18.1) (2026-08-31)
+
+
+### Performance
+
+* Fast fixed u64 hasher for the collation maps ([ddf02c6](https://github.com/COMBINE-lab/libradicl/commit/ddf02c68c38240cf442f7d15db4aebf96dda7780))
+
 ## [0.18.0](https://github.com/COMBINE-lab/libradicl/compare/v0.17.0...v0.18.0) (2026-08-15)
 
 
@@ -11,7 +18,6 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 
 * Clamp collation resource minima ([34e37f5](https://github.com/COMBINE-lab/libradicl/commit/34e37f57195b41fff1e78af2b78926b4646e2d8c))
 * Clamp single-collator resources ([194d127](https://github.com/COMBINE-lab/libradicl/commit/194d127105f22acbc1d9731c68022d610cc5ca86))
-* Validate compiled multi-barcode correction targets before collation ([195cd1d](https://github.com/COMBINE-lab/libradicl/commit/195cd1d81b87bc291e677103aa5ebe84984782cf))
 
 ### Features
 
@@ -21,14 +27,6 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 
 * Add bounded multi-barcode collator ([08ae416](https://github.com/COMBINE-lab/libradicl/commit/08ae41640a4da089ec33ad31a4bf927434e2557b))
 * Add bounded single-barcode collator ([acd5cec](https://github.com/COMBINE-lab/libradicl/commit/acd5cec61cbd10fa5d42f23fda991b1ac432c0af))
-* Reduce compiled-correction lookup memory and release those indexes before gather ([364aaaf](https://github.com/COMBINE-lab/libradicl/commit/364aaaf0e29efe8602fb90fa0fbb0b18c1ccb65f), [56ff5fc](https://github.com/COMBINE-lab/libradicl/commit/56ff5fcbe74adc0e9af5ab3a0392b574e0367d6d))
-* Adapt compiled barcode prefix indexes to the observed barcode distribution ([c2476e1](https://github.com/COMBINE-lab/libradicl/commit/c2476e1bba8ba204410528b9d2a67d59bf4baa39))
-* Generalize legacy collation lookups over caller-selected hashers ([f2c5c89](https://github.com/COMBINE-lab/libradicl/commit/f2c5c899bf21bbc7d9437e4e2b3c1a7d1f7ff563))
-
-### Documentation
-
-* Document bounded collation, caller-compiled correction plans, and the
-  two-thread and memory floors; add strict rustdoc and package dry-runs to CI.
 
 ### Style
 
@@ -248,3 +246,5 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 * Release 0.4.6 ([3c9ffb7](https://github.com/COMBINE-lab/libradicl/commit/3c9ffb769ff7fe72ce96df1ad680d94cffd1f29a))
 * Release 0.4.6 ([8299238](https://github.com/COMBINE-lab/libradicl/commit/8299238d1ac2e6dbd71482f7b7c28a3d33c28762))
 * Release 0.4.6 ([4f572c2](https://github.com/COMBINE-lab/libradicl/commit/4f572c2507ddb71478d68d10bd7443aed1ff43b7))
+
+
