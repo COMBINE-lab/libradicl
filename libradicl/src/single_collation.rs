@@ -18,11 +18,10 @@ use crate::record::{
     SingleBarcodeRecordScratch,
 };
 use crate::schema::TempCellInfo;
-use ahash::{AHashMap, RandomState};
+use ahash::AHashMap;
 use anyhow::{Context, bail};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use scroll::Pread;
-use std::collections::HashMap;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -353,8 +352,7 @@ where
         let context = record_context.clone();
         let output = output.clone();
         gather_handles.push(thread::spawn(move || -> anyhow::Result<u64> {
-            let state = RandomState::with_seeds(2, 7, 1, 8);
-            let mut cell_map = HashMap::<u64, TempCellInfo, RandomState>::with_hasher(state);
+            let mut cell_map = crate::schema::U64Map::<TempCellInfo>::default();
             let mut chunks = 0_u64;
             for bucket_id in bucket_rx {
                 cell_map.clear();
@@ -472,7 +470,7 @@ fn collate_single_barcode_bucket<T, W>(
     num_records: u32,
     output: &Mutex<W>,
     compress: bool,
-    cell_map: &mut HashMap<u64, TempCellInfo, RandomState>,
+    cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
 where
     T: Read + Seek,

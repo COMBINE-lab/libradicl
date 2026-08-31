@@ -20,11 +20,11 @@ use crate::record::{
     RecordHeader,
 };
 use crate::schema::TempCellInfo;
-use ahash::{AHashMap, RandomState};
+use ahash::AHashMap;
 use anyhow::{Context, bail};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use scroll::Pread;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -709,8 +709,7 @@ where
         let context = record_context.clone();
         let output = output.clone();
         gather_handles.push(thread::spawn(move || {
-            let state = RandomState::with_seeds(2, 7, 1, 8);
-            let mut cell_map = HashMap::<u64, TempCellInfo, RandomState>::with_hasher(state);
+            let mut cell_map = crate::schema::U64Map::<TempCellInfo>::default();
             for bucket_id in bucket_rx {
                 let result = (|| -> anyhow::Result<u64> {
                     cell_map.clear();
@@ -808,7 +807,7 @@ fn collate_multi_barcode_bucket<T, W>(
     num_records: u32,
     output: &Mutex<W>,
     compress: bool,
-    cell_map: &mut HashMap<u64, TempCellInfo, RandomState>,
+    cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
 where
     T: Read + Seek,
@@ -1232,8 +1231,7 @@ mod tests {
         for compress in [false, true] {
             let mut reader = BufReader::new(Cursor::new(input.as_slice()));
             let output = Mutex::new(Vec::new());
-            let state = RandomState::with_seeds(2, 7, 1, 8);
-            let mut cell_map = HashMap::with_hasher(state);
+            let mut cell_map = crate::schema::U64Map::default();
             let chunks = collate_multi_barcode_bucket(
                 &mut reader,
                 &context,

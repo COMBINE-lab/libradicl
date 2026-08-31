@@ -317,7 +317,7 @@ pub fn collate_temporary_bucket_twopass_generic<
     nrec: u32,
     owriter: &Mutex<U>,
     compress: bool,
-    cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
+    cb_byte_map: &mut HashMap<u64, TempCellInfo, impl std::hash::BuildHasher>,
 ) -> usize
 where
     u64: From<B>,
@@ -387,6 +387,7 @@ where
         next_offset += nbytes;
     }
 
+    // now each key points to where we should write the next record for the CB
     // now each key points to where we should write the next record for the CB
     // reset the input pointer
     reader
@@ -471,7 +472,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
     nrec: u32,
     owriter: &Mutex<U>,
     compress: bool,
-    cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
+    cb_byte_map: &mut HashMap<u64, TempCellInfo, impl std::hash::BuildHasher>,
 ) -> usize {
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
@@ -538,6 +539,7 @@ pub fn collate_temporary_bucket_twopass<T: Read + Seek, U: Write>(
         next_offset += nbytes;
     }
 
+    // now each key points to where we should write the next record for the CB
     // now each key points to where we should write the next record for the CB
     // reset the input pointer
     reader
@@ -609,7 +611,7 @@ pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
     nrec: u32,
     owriter: &Mutex<U>,
     compress: bool,
-    cb_byte_map: &mut HashMap<u64, TempCellInfo, ahash::RandomState>,
+    cb_byte_map: &mut HashMap<u64, TempCellInfo, impl std::hash::BuildHasher>,
 ) -> usize {
     let mut tbuf = vec![0u8; 65536];
     let mut total_bytes = 0usize;
@@ -678,6 +680,7 @@ pub fn collate_temporary_bucket_twopass_atac<T: Read + Seek, U: Write>(
         next_offset += nbytes;
     }
 
+    // now each key points to where we should write the next record for the CB
     // now each key points to where we should write the next record for the CB
     // reset the input pointer
     reader
