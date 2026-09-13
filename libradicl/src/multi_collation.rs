@@ -10,7 +10,7 @@
 //! Parallel collation engine for two-level multi-barcode RAD records.
 
 use crate::BarcodeLookupMap;
-use crate::codec::ChunkCodec;
+use crate::codec::{ChunkCodec, ChunkIndexBuilder};
 use crate::collation::BarcodeRole;
 use crate::collation::normalize_collation_resources;
 use crate::collation_spool::{BucketSpoolSet, BucketSpoolWriter};
@@ -461,6 +461,12 @@ pub struct MultiBarcodeCollationStats {
     pub spool_flush_limit: usize,
     pub scatter_duration: Duration,
     pub gather_duration: Duration,
+    /// Gather-relative chunk offsets recorded during the write, in file order:
+    /// `output_chunks + 1` entries, the last equal to the total gathered byte
+    /// length. Lets the caller write a chunk index without re-scanning the RAD;
+    /// add the length of the header the caller wrote before collation to get
+    /// absolute offsets. See [`crate::codec::ChunkIndexBuilder`].
+    pub chunk_offsets: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -708,6 +714,9 @@ where
         .min(num_buckets)
         .min(budgeted_gather_workers)
         .max(1);
+    // Records each output chunk's offset as buckets are written, so the caller
+    // can emit a chunk index without a second pass over the RAD.
+    let chunk_index = Arc::new(Mutex::new(ChunkIndexBuilder::default()));
     let (bucket_tx, bucket_rx) = bounded::<usize>(num_gather_workers);
     let (result_tx, result_rx) = bounded::<anyhow::Result<u64>>(num_gather_workers);
     let mut gather_handles = Vec::with_capacity(num_gather_workers);
@@ -717,6 +726,7 @@ where
         let spools = spools.clone();
         let context = record_context.clone();
         let output = output.clone();
+        let chunk_index = chunk_index.clone();
         gather_handles.push(thread::spawn(move || {
             let mut cell_map = crate::schema::U64Map::<TempCellInfo>::default();
             for bucket_id in bucket_rx {
@@ -737,6 +747,7 @@ where
                         &context,
                         num_records,
                         &output,
+                        &chunk_index,
                         options.chunk_codec,
                         &mut cell_map,
                     )? as u64;
@@ -798,6 +809,12 @@ where
     let gather_duration = gather_started.elapsed();
     drop(spools);
 
+    let chunk_offsets = Arc::try_unwrap(chunk_index)
+        .map_err(|_| anyhow::anyhow!("chunk index still shared after gather"))?
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("chunk index mutex was poisoned"))?
+        .into_offsets();
+
     Ok(MultiBarcodeCollationStats {
         records_scattered,
         output_chunks,
@@ -807,6 +824,7 @@ where
         spool_flush_limit,
         scatter_duration,
         gather_duration,
+        chunk_offsets,
     })
 }
 
@@ -815,6 +833,7 @@ fn collate_multi_barcode_bucket<T, W>(
     context: &MultiBarcodeRecordContext,
     num_records: u32,
     output: &Mutex<W>,
+    chunk_index: &Mutex<ChunkIndexBuilder>,
     codec: ChunkCodec,
     cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
@@ -902,10 +921,18 @@ where
     } else {
         output_buffer.into_inner()
     };
-    output
-        .lock()
-        .map_err(|_| anyhow::anyhow!("collated RAD output mutex was poisoned"))?
-        .write_all(&to_write)?;
+    {
+        // Record this bucket's chunk offsets and append it under the same lock so
+        // the recorded offsets match the file position and stay in file order.
+        let mut w = output
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collated RAD output mutex was poisoned"))?;
+        chunk_index
+            .lock()
+            .map_err(|_| anyhow::anyhow!("chunk index mutex was poisoned"))?
+            .record_bucket(&to_write);
+        w.write_all(&to_write)?;
+    }
     Ok(cell_map.len())
 }
 
@@ -1239,15 +1266,21 @@ mod tests {
             let mut reader = BufReader::new(Cursor::new(input.as_slice()));
             let output = Mutex::new(Vec::new());
             let mut cell_map = crate::schema::U64Map::default();
+            let chunk_index = Mutex::new(ChunkIndexBuilder::default());
             let chunks = collate_multi_barcode_bucket(
                 &mut reader,
                 &context,
                 records.len() as u32,
                 &output,
+                &chunk_index,
                 codec,
                 &mut cell_map,
             )
             .unwrap();
+            // offsets: one per chunk plus a terminal offset == total bytes
+            let offs = chunk_index.into_inner().unwrap().into_offsets();
+            assert_eq!(offs.len(), chunks + 1);
+            assert_eq!(*offs.last().unwrap(), output.lock().unwrap().len() as u64);
             assert_eq!(chunks, 2);
 
             // Per-chunk codec: each chunk's payload is decompressed independently

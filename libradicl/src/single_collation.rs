@@ -9,7 +9,7 @@
 
 //! Parallel collation engine for single-barcode RAD records.
 
-use crate::codec::ChunkCodec;
+use crate::codec::{ChunkCodec, ChunkIndexBuilder};
 use crate::collation::normalize_collation_resources;
 use crate::collation_spool::{BucketSpoolSet, BucketSpoolWriter};
 use crate::rad_types::{MappedFragmentOrientation, RadIntId};
@@ -134,6 +134,10 @@ pub struct SingleBarcodeCollationStats {
     pub spool_flush_limit: usize,
     pub scatter_duration: Duration,
     pub gather_duration: Duration,
+    /// Gather-relative chunk offsets in file order: `output_chunks + 1` entries,
+    /// the last equal to the total gathered byte length. Add the caller's header
+    /// length for absolute offsets. See [`crate::codec::ChunkIndexBuilder`].
+    pub chunk_offsets: Vec<u64>,
 }
 
 struct ScatterResult {
@@ -355,11 +359,13 @@ where
         .max(1);
     let (bucket_tx, bucket_rx) = bounded::<usize>((2 * num_gather_workers).max(2));
     let mut gather_handles = Vec::with_capacity(num_gather_workers);
+    let chunk_index = Arc::new(Mutex::new(ChunkIndexBuilder::default()));
     for _ in 0..num_gather_workers {
         let bucket_rx = bucket_rx.clone();
         let spools = spools.clone();
         let context = record_context.clone();
         let output = output.clone();
+        let chunk_index = chunk_index.clone();
         gather_handles.push(thread::spawn(move || -> anyhow::Result<u64> {
             let mut cell_map = crate::schema::U64Map::<TempCellInfo>::default();
             let mut chunks = 0_u64;
@@ -380,6 +386,7 @@ where
                     &context,
                     num_records,
                     &output,
+                    &chunk_index,
                     options.chunk_codec,
                     &mut cell_map,
                 )? as u64;
@@ -404,9 +411,16 @@ where
     let gather_duration = gather_started.elapsed();
     drop(spools);
 
+    let chunk_offsets = Arc::try_unwrap(chunk_index)
+        .map_err(|_| anyhow::anyhow!("chunk index still shared after gather"))?
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("chunk index mutex was poisoned"))?
+        .into_offsets();
+
     Ok(SingleBarcodeCollationStats {
         records_scattered,
         output_chunks,
+        chunk_offsets,
         num_buckets: plan.num_buckets(),
         num_scatter_workers,
         num_gather_workers,
@@ -478,6 +492,7 @@ fn collate_single_barcode_bucket<T, W>(
     context: &AlevinFryRecordContext,
     num_records: u32,
     output: &Mutex<W>,
+    chunk_index: &Mutex<ChunkIndexBuilder>,
     codec: ChunkCodec,
     cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
@@ -570,10 +585,16 @@ where
     } else {
         output_buffer.into_inner()
     };
-    output
-        .lock()
-        .map_err(|_| anyhow::anyhow!("collated RAD output mutex was poisoned"))?
-        .write_all(&to_write)?;
+    {
+        let mut w = output
+            .lock()
+            .map_err(|_| anyhow::anyhow!("collated RAD output mutex was poisoned"))?;
+        chunk_index
+            .lock()
+            .map_err(|_| anyhow::anyhow!("chunk index mutex was poisoned"))?
+            .record_bucket(&to_write);
+        w.write_all(&to_write)?;
+    }
     Ok(cell_map.len())
 }
 

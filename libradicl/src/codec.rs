@@ -137,6 +137,44 @@ pub fn decompress_payload(codec: ChunkCodec, data: &[u8]) -> anyhow::Result<Vec<
     }
 }
 
+/// Accumulates chunk start offsets in file order as a collation's gather workers
+/// append per-bucket chunk buffers, so the collated RAD's chunk index can be
+/// written without a second pass over the output. `record_bucket` is called
+/// inside the same critical section as the output write, so `next_off` tracks the
+/// write position and offsets accumulate in file order. Offsets are
+/// gather-relative (0 == the first chunk, i.e. immediately after the header the
+/// caller wrote); the caller adds any header length. [`Self::into_offsets`]
+/// returns `num_chunks + 1` offsets, the last equal to the total gather byte
+/// length (so the caller gets the standard `[off_0 .. off_n]` layout with
+/// `off_n` == end of the last chunk).
+#[derive(Default)]
+pub struct ChunkIndexBuilder {
+    next_off: u64,
+    offsets: Vec<u64>,
+}
+
+impl ChunkIndexBuilder {
+    /// Record every chunk in `bucket` (verbatim RAD chunks, each
+    /// `[nbytes:u32][..]` where `nbytes` counts the 8-byte header) as starting at
+    /// the running offset, advancing it past the bucket. Call under the output
+    /// write lock so offsets stay in file order.
+    pub fn record_bucket(&mut self, bucket: &[u8]) {
+        let mut pos = 0usize;
+        while pos + 4 <= bucket.len() {
+            self.offsets.push(self.next_off);
+            let nbytes = u32::from_le_bytes(bucket[pos..pos + 4].try_into().unwrap()) as u64;
+            self.next_off += nbytes;
+            pos += nbytes as usize;
+        }
+    }
+
+    /// Consume the builder, appending the terminal offset (total gather bytes).
+    pub fn into_offsets(mut self) -> Vec<u64> {
+        self.offsets.push(self.next_off);
+        self.offsets
+    }
+}
+
 /// Re-emit a buffer of verbatim RAD chunks (`[nbytes:u32][nrec:u32][records]`,
 /// where `nbytes` counts the 8-byte header) with each chunk's record payload
 /// compressed independently by `codec`. The per-chunk `nrec` is preserved and
