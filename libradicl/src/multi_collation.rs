@@ -10,6 +10,7 @@
 //! Parallel collation engine for two-level multi-barcode RAD records.
 
 use crate::BarcodeLookupMap;
+use crate::codec::ChunkCodec;
 use crate::collation::BarcodeRole;
 use crate::collation::normalize_collation_resources;
 use crate::collation_spool::{BucketSpoolSet, BucketSpoolWriter};
@@ -431,8 +432,12 @@ pub struct MultiBarcodeCollationOptions {
     /// This does not include the caller-owned correction plan, the operating
     /// system's page cache, allocator overhead, or the output writer.
     pub memory_budget_bytes: u64,
-    /// Whether gathered output chunks should be Snappy-framed.
-    pub compress_output: bool,
+    /// Per-chunk codec applied to gathered output chunks. [`ChunkCodec::None`]
+    /// (the default) writes chunks verbatim; [`ChunkCodec::Lz4`]/[`ChunkCodec::Zstd`]
+    /// compress each chunk's payload independently, preserving random/parallel
+    /// access. The caller is responsible for recording the matching
+    /// [`crate::codec::CHUNK_CODEC_TAG`] in the output file header.
+    pub chunk_codec: ChunkCodec,
 }
 
 impl Default for MultiBarcodeCollationOptions {
@@ -440,7 +445,7 @@ impl Default for MultiBarcodeCollationOptions {
         Self {
             num_threads: 8,
             memory_budget_bytes: 2 * 1024 * 1024 * 1024,
-            compress_output: false,
+            chunk_codec: ChunkCodec::None,
         }
     }
 }
@@ -691,7 +696,11 @@ where
     // Bound concurrency so low-memory configurations trade parallelism for a
     // stable working set instead of merely changing spool buffer sizes.
     let per_gather_worker = largest_bucket_bytes
-        .saturating_mul(if options.compress_output { 3 } else { 2 })
+        .saturating_mul(if options.chunk_codec != ChunkCodec::None {
+            3
+        } else {
+            2
+        })
         .max(4 * 1024 * 1024);
     let gather_budget = tuning_budget.saturating_mul(3) / 4;
     let budgeted_gather_workers = (gather_budget / per_gather_worker).max(1) as usize;
@@ -728,7 +737,7 @@ where
                         &context,
                         num_records,
                         &output,
-                        options.compress_output,
+                        options.chunk_codec,
                         &mut cell_map,
                     )? as u64;
                     Ok(chunks)
@@ -806,7 +815,7 @@ fn collate_multi_barcode_bucket<T, W>(
     context: &MultiBarcodeRecordContext,
     num_records: u32,
     output: &Mutex<W>,
-    compress: bool,
+    codec: ChunkCodec,
     cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
 where
@@ -820,7 +829,7 @@ where
             _,
             MultiBarcodeReadRecord,
         >(
-            reader, context, num_records, output, compress, cell_map
+            reader, context, num_records, output, codec, cell_map
         ));
     }
 
@@ -888,17 +897,15 @@ where
         cell_info.offset = output_buffer.position();
     }
 
-    output_buffer.set_position(0);
-    if compress {
-        let mut compressed =
-            snap::write::FrameEncoder::new(Cursor::new(Vec::with_capacity(total_bytes)));
-        compressed.write_all(output_buffer.get_ref())?;
-        output_buffer = compressed.into_inner()?;
-    }
+    let to_write: Vec<u8> = if codec != ChunkCodec::None {
+        crate::codec::recompress_bucket_per_chunk(output_buffer.get_ref(), codec)?
+    } else {
+        output_buffer.into_inner()
+    };
     output
         .lock()
         .map_err(|_| anyhow::anyhow!("collated RAD output mutex was poisoned"))?
-        .write_all(output_buffer.get_ref())?;
+        .write_all(&to_write)?;
     Ok(cell_map.len())
 }
 
@@ -1228,7 +1235,7 @@ mod tests {
             input.extend_from_slice(&(0x8000_0009_u32).to_le_bytes());
         }
 
-        for compress in [false, true] {
+        for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
             let mut reader = BufReader::new(Cursor::new(input.as_slice()));
             let output = Mutex::new(Vec::new());
             let mut cell_map = crate::schema::U64Map::default();
@@ -1237,34 +1244,30 @@ mod tests {
                 &context,
                 records.len() as u32,
                 &output,
-                compress,
+                codec,
                 &mut cell_map,
             )
             .unwrap();
             assert_eq!(chunks, 2);
 
+            // Per-chunk codec: each chunk's payload is decompressed independently
+            // (records after the 8-byte [nbytes][nrec] header), leaving the
+            // header intact — the standard/parallel readers consume it the same way.
             let encoded = output.into_inner().unwrap();
-            let bytes = if compress {
-                let mut decoded = Vec::new();
-                snap::read::FrameDecoder::new(encoded.as_slice())
-                    .read_to_end(&mut decoded)
-                    .unwrap();
-                decoded
-            } else {
-                encoded
-            };
-            let mut collated = Cursor::new(bytes);
             let mut observed = BTreeMap::<(u64, u64), u32>::new();
-            while (collated.position() as usize) < collated.get_ref().len() {
-                let mut chunk_header = [0_u8; 8];
-                collated.read_exact(&mut chunk_header).unwrap();
-                let chunk_bytes = chunk_header.pread::<u32>(0).unwrap() as u64;
-                let num_records = chunk_header.pread::<u32>(4).unwrap();
-                let chunk_start = collated.position() - 8;
+            let mut pos = 0usize;
+            while pos < encoded.len() {
+                let chunk_bytes =
+                    u32::from_le_bytes(encoded[pos..pos + 4].try_into().unwrap()) as usize;
+                let num_records = u32::from_le_bytes(encoded[pos + 4..pos + 8].try_into().unwrap());
+                let payload =
+                    crate::codec::decompress_payload(codec, &encoded[pos + 8..pos + chunk_bytes])
+                        .unwrap();
+                let mut chunk_cursor = Cursor::new(payload.as_slice());
                 let first =
-                    MultiBarcodeReadRecord::from_bytes_with_context(&mut collated, &context);
+                    MultiBarcodeReadRecord::from_bytes_with_context(&mut chunk_cursor, &context);
                 observed.insert((first.barcodes[0], first.barcodes[1]), num_records);
-                collated.set_position(chunk_start + chunk_bytes);
+                pos += chunk_bytes;
             }
             assert_eq!(observed, BTreeMap::from([((0, 5), 1), ((1, 7), 2)]));
         }

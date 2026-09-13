@@ -60,9 +60,9 @@
 //! See `examples/read_chunk_single_cell_parallel.rs` for a complete program.
 
 use crate::libradicl::chunk::Chunk;
-use crate::libradicl::codec::{CHUNK_CODEC_TAG, ChunkCodec, decompress_payload};
+use crate::libradicl::codec::{ChunkCodec, decompress_payload};
 use crate::libradicl::header::RadPrelude;
-use crate::libradicl::rad_types::{TagMap, TagValue};
+use crate::libradicl::rad_types::TagMap;
 use crate::libradicl::record::{MappedRecord, RecordContext};
 use crate::libradicl::utils;
 use anyhow::Context;
@@ -79,16 +79,7 @@ use std::sync::{
 /// [ParallelRadReader] functions.  Use this when you want the callback to be a no-op.
 pub const EMPTY_METACHUNK_CALLBACK: Option<Box<dyn FnMut(u64, u64)>> = None;
 
-/// Determine the chunk compression codec advertised by a file-tag map.
-/// An absent [`CHUNK_CODEC_TAG`] means [`ChunkCodec::None`] (every RAD file
-/// written before chunk compression existed reads unchanged).
-fn codec_from_tag_map(file_tag_map: &TagMap) -> anyhow::Result<ChunkCodec> {
-    match file_tag_map.get(CHUNK_CODEC_TAG) {
-        None => Ok(ChunkCodec::None),
-        Some(TagValue::U8(v)) => ChunkCodec::from_u8(*v),
-        Some(_) => anyhow::bail!("'{CHUNK_CODEC_TAG}' file tag must be a U8"),
-    }
-}
+use crate::libradicl::codec::chunk_codec_from_tag_map as codec_from_tag_map;
 
 /// Sets the done-flag when dropped, whatever the reason for the drop.
 ///
@@ -1150,10 +1141,20 @@ impl<'a, R: MappedRecord> ParallelChunkReader<'a, R> {
             meta_chunk_queue: Arc::new(ArrayQueue::<MetaChunk<R>>::new(num_consumers.get() * 4)),
             done_var: Arc::new(AtomicBool::new(false)),
             // This constructor has no file-tag map, so it assumes no chunk
-            // compression. Use [ParallelRadReader] (which parses the file tags)
-            // to read compressed RAD files.
+            // compression. Use [ParallelRadReader] (which parses the file tags),
+            // or [`Self::with_chunk_codec`], to read compressed RAD files.
             codec: ChunkCodec::None,
         }
+    }
+
+    /// Set the per-chunk codec this reader decompresses with. Use when
+    /// constructing via [`Self::new`] (which has no file-tag map): derive the
+    /// codec from the file's tags with
+    /// [`crate::codec::chunk_codec_from_tag_map`] and pass it here so compressed
+    /// chunks are decompressed transparently.
+    pub fn with_chunk_codec(mut self, codec: ChunkCodec) -> Self {
+        self.codec = codec;
+        self
     }
 
     /// Get an [std::sync::Arc] holding the underlying [ArrayQueue] associated with this reader.

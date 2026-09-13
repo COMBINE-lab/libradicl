@@ -26,6 +26,7 @@
 //! `zstd` (codec id 2) requires the crate's `zstd` feature; without it a reader
 //! errors clearly on a zstd chunk rather than producing garbage.
 
+use crate::rad_types::{TagMap, TagValue};
 use anyhow::bail;
 
 /// Well-known file-tag name advertising the chunk compression codec (a `u8`).
@@ -71,6 +72,26 @@ impl ChunkCodec {
             ChunkCodec::Zstd => 2,
         }
     }
+
+    /// A lowercase human-readable name (e.g. for metadata/logging).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChunkCodec::None => "none",
+            ChunkCodec::Lz4 => "lz4",
+            ChunkCodec::Zstd => "zstd",
+        }
+    }
+}
+
+/// Determine the chunk compression codec advertised by a file-tag map. An
+/// absent [`CHUNK_CODEC_TAG`] means [`ChunkCodec::None`] (every RAD file written
+/// before chunk compression existed reads unchanged).
+pub fn chunk_codec_from_tag_map(file_tag_map: &TagMap) -> anyhow::Result<ChunkCodec> {
+    match file_tag_map.get(CHUNK_CODEC_TAG) {
+        None => Ok(ChunkCodec::None),
+        Some(TagValue::U8(v)) => ChunkCodec::from_u8(*v),
+        Some(_) => bail!("'{CHUNK_CODEC_TAG}' file tag must be a U8"),
+    }
 }
 
 /// Compress a chunk *payload* (the record bytes, excluding the 8-byte header)
@@ -114,6 +135,34 @@ pub fn decompress_payload(codec: ChunkCodec, data: &[u8]) -> anyhow::Result<Vec<
             }
         }
     }
+}
+
+/// Re-emit a buffer of verbatim RAD chunks (`[nbytes:u32][nrec:u32][records]`,
+/// where `nbytes` counts the 8-byte header) with each chunk's record payload
+/// compressed independently by `codec`. The per-chunk `nrec` is preserved and
+/// `nbytes` is rewritten to the compressed size; this matches
+/// [`crate::chunk::Chunk::into_bytes_with_codec`], so the collated RAD is
+/// readable by the standard and parallel chunk readers once the file header
+/// records the matching [`CHUNK_CODEC_TAG`]. Callers pass a non-`None` codec.
+pub(crate) fn recompress_bucket_per_chunk(
+    uncompressed: &[u8],
+    codec: ChunkCodec,
+) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(uncompressed.len());
+    let mut pos = 0usize;
+    while pos < uncompressed.len() {
+        let nbytes = u32::from_le_bytes(uncompressed[pos..pos + 4].try_into().unwrap()) as usize;
+        debug_assert!(nbytes >= 8 && pos + nbytes <= uncompressed.len());
+        let nrec = &uncompressed[pos + 4..pos + 8];
+        let payload = &uncompressed[pos + 8..pos + nbytes];
+        let comp = compress_payload(codec, payload)?;
+        let new_nbytes = (comp.len() as u32) + 8;
+        out.extend_from_slice(&new_nbytes.to_le_bytes());
+        out.extend_from_slice(nrec);
+        out.extend_from_slice(&comp);
+        pos += nbytes;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

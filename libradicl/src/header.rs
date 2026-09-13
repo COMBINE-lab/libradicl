@@ -14,7 +14,10 @@
 
 use crate::{self as libradicl, constants};
 use anyhow::{self, Context};
-use libradicl::rad_types::{TagSection, TagSectionLabel};
+use libradicl::codec::{CHUNK_CODEC_TAG, ChunkCodec};
+use libradicl::rad_types::{
+    RadIntId, RadType, TagDesc, TagMap, TagSection, TagSectionLabel, TagValue,
+};
 use libradicl::record::RecordContext;
 use noodles::sam;
 use scroll::Pread;
@@ -262,6 +265,65 @@ impl RadPrelude {
         self.aln_tags
             .write(writer)
             .context("could not write the file-level tags of the prelude")?;
+        Ok(())
+    }
+
+    /// Write a collated-output header derived from this prelude: the header
+    /// with `num_chunks` patched to the collated chunk count and, when
+    /// `codec != `[`ChunkCodec::None`], an added [`CHUNK_CODEC_TAG`] file-tag
+    /// descriptor. It is followed by `original_file_tag_values` (the file-tag
+    /// value bytes copied verbatim from the source RAD, i.e. the bytes that
+    /// immediately follow the source prelude) and, for a non-`None` codec, the
+    /// codec tag's `u8` value appended last so it aligns with the appended
+    /// descriptor. The `original_file_tag_values` slice is obtained by the
+    /// caller as `source_header[self.write(..).len()..]`.
+    ///
+    /// This lets a collation writer record which per-chunk codec was applied to
+    /// the gathered chunks; readers recover it via the same file tag (see
+    /// [`crate::codec`]). An absent tag means [`ChunkCodec::None`], so an
+    /// uncompressed collated header need not be rebuilt through this path.
+    pub fn write_with_chunk_codec<W: Write>(
+        &self,
+        writer: &mut W,
+        original_file_tag_values: &[u8],
+        num_chunks: u64,
+        codec: ChunkCodec,
+    ) -> anyhow::Result<()> {
+        // Header with num_chunks (the final u64 of the header) patched.
+        let mut hdr_bytes = Vec::new();
+        self.hdr
+            .write(&mut hdr_bytes)
+            .context("could not serialize the collated header")?;
+        let nc_off = hdr_bytes.len() - std::mem::size_of::<u64>();
+        hdr_bytes[nc_off..].copy_from_slice(&num_chunks.to_le_bytes());
+        writer.write_all(&hdr_bytes)?;
+
+        // File-tag section descriptors, adding the codec tag when compressing.
+        if codec == ChunkCodec::None {
+            self.file_tags.write(writer)?;
+        } else {
+            let mut file_tags = self.file_tags.clone();
+            file_tags.add_tag_desc(TagDesc {
+                name: CHUNK_CODEC_TAG.to_string(),
+                typeid: RadType::Int(RadIntId::U8),
+            });
+            file_tags.write(writer)?;
+        }
+        self.read_tags.write(writer)?;
+        self.aln_tags.write(writer)?;
+
+        // The source file-tag values (unchanged), then the codec value last so
+        // it lines up with the descriptor appended above.
+        writer.write_all(original_file_tag_values)?;
+        if codec != ChunkCodec::None {
+            let codec_desc = TagDesc {
+                name: CHUNK_CODEC_TAG.to_string(),
+                typeid: RadType::Int(RadIntId::U8),
+            };
+            let mut values = TagMap::with_keyset(std::slice::from_ref(&codec_desc));
+            values.add(TagValue::U8(codec.as_u8()));
+            values.write_values(writer)?;
+        }
         Ok(())
     }
 

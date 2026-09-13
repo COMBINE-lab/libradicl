@@ -9,6 +9,7 @@
 
 //! Parallel collation engine for single-barcode RAD records.
 
+use crate::codec::ChunkCodec;
 use crate::collation::normalize_collation_resources;
 use crate::collation_spool::{BucketSpoolSet, BucketSpoolWriter};
 use crate::rad_types::{MappedFragmentOrientation, RadIntId};
@@ -106,7 +107,11 @@ pub struct SingleBarcodeCollationOptions {
     /// Working-memory budget for queues, spool buffers, and gather workers.
     /// Values below 256 MiB produce a warning and are raised to 256 MiB.
     pub memory_budget_bytes: u64,
-    pub compress_output: bool,
+    /// Per-chunk codec applied to gathered output chunks. [`ChunkCodec::None`]
+    /// writes chunks verbatim; otherwise each chunk's payload is compressed
+    /// independently. The caller records the matching
+    /// [`crate::codec::CHUNK_CODEC_TAG`] in the output header.
+    pub chunk_codec: ChunkCodec,
 }
 
 impl Default for SingleBarcodeCollationOptions {
@@ -114,7 +119,7 @@ impl Default for SingleBarcodeCollationOptions {
         Self {
             num_threads: 8,
             memory_budget_bytes: 2 * 1024 * 1024 * 1024,
-            compress_output: false,
+            chunk_codec: ChunkCodec::None,
         }
     }
 }
@@ -336,7 +341,11 @@ where
         .max()
         .unwrap_or(0);
     let per_gather_worker = largest_bucket_bytes
-        .saturating_mul(if options.compress_output { 3 } else { 2 })
+        .saturating_mul(if options.chunk_codec != ChunkCodec::None {
+            3
+        } else {
+            2
+        })
         .max(4 * 1024 * 1024);
     let gather_budget = tuning_budget.saturating_mul(3) / 4;
     let budgeted_gather_workers = (gather_budget / per_gather_worker).max(1) as usize;
@@ -371,7 +380,7 @@ where
                     &context,
                     num_records,
                     &output,
-                    options.compress_output,
+                    options.chunk_codec,
                     &mut cell_map,
                 )? as u64;
             }
@@ -469,7 +478,7 @@ fn collate_single_barcode_bucket<T, W>(
     context: &AlevinFryRecordContext,
     num_records: u32,
     output: &Mutex<W>,
-    compress: bool,
+    codec: ChunkCodec,
     cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
 where
@@ -483,7 +492,7 @@ where
             _,
             AlevinFryReadRecordT<u64>,
         >(
-            reader, context, num_records, output, compress, cell_map
+            reader, context, num_records, output, codec, cell_map
         ));
     };
 
@@ -556,17 +565,15 @@ where
         cell_info.offset = output_buffer.position();
     }
 
-    output_buffer.set_position(0);
-    if compress {
-        let mut compressed =
-            snap::write::FrameEncoder::new(Cursor::new(Vec::with_capacity(total_bytes)));
-        compressed.write_all(output_buffer.get_ref())?;
-        output_buffer = compressed.into_inner()?;
-    }
+    let to_write: Vec<u8> = if codec != ChunkCodec::None {
+        crate::codec::recompress_bucket_per_chunk(output_buffer.get_ref(), codec)?
+    } else {
+        output_buffer.into_inner()
+    };
     output
         .lock()
         .map_err(|_| anyhow::anyhow!("collated RAD output mutex was poisoned"))?
-        .write_all(output_buffer.get_ref())?;
+        .write_all(&to_write)?;
     Ok(cell_map.len())
 }
 
@@ -702,7 +709,8 @@ mod tests {
             chunk.pwrite::<u32>(chunk_bytes, 0).unwrap();
             chunk.pwrite::<u32>(3, 4).unwrap();
 
-            for compress_output in [false, true] {
+            for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
+                let compress_output = codec != ChunkCodec::None;
                 let exercise_resource_clamping = context.bct == RadIntId::U16 && compress_output;
                 let plan = Arc::new(
                     SingleBarcodeCollationPlan::new(correction.clone(), buckets.clone(), 1)
@@ -725,7 +733,7 @@ mod tests {
                         } else {
                             256 * 1024 * 1024
                         },
-                        compress_output,
+                        chunk_codec: codec,
                     },
                 )
                 .unwrap();
@@ -734,19 +742,12 @@ mod tests {
                 assert_eq!(stats.num_scatter_workers, 1);
 
                 let encoded = Arc::try_unwrap(output).unwrap().into_inner().unwrap();
-                let bytes = if compress_output {
-                    let mut decoded = Vec::new();
-                    snap::read::FrameDecoder::new(encoded.as_slice())
-                        .read_to_end(&mut decoded)
-                        .unwrap();
-                    decoded
-                } else {
-                    encoded
-                };
-                let mut reader = Cursor::new(bytes);
-                let mut chunk_header = [0_u8; 8];
-                reader.read_exact(&mut chunk_header).unwrap();
-                assert_eq!(chunk_header.pread::<u32>(4).unwrap(), 2);
+                // Single output chunk: [nbytes][nrec][payload]; decompress the
+                // payload independently for the per-chunk codec.
+                let nbytes = u32::from_le_bytes(encoded[0..4].try_into().unwrap()) as usize;
+                assert_eq!(u32::from_le_bytes(encoded[4..8].try_into().unwrap()), 2);
+                let payload = crate::codec::decompress_payload(codec, &encoded[8..nbytes]).unwrap();
+                let mut reader = Cursor::new(payload.as_slice());
                 for expected_umi in [3_u64, 4] {
                     let record =
                         AlevinFryReadRecord::from_bytes_with_context(&mut reader, &context);
