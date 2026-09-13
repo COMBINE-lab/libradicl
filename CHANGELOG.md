@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.19.1](https://github.com/COMBINE-lab/libradicl/compare/v0.19.0...v0.19.1) (2026-09-13)
+
+
+### Features
+
+* Record chunk offsets during gather (chunk index without a re-scan) ([2c512b8](https://github.com/COMBINE-lab/libradicl/commit/2c512b8f5ca38f752225a7fe658510188edaf916))
+
 ## [0.19.0](https://github.com/COMBINE-lab/libradicl/compare/v0.18.1...v0.19.0) (2026-09-13)
 
 
