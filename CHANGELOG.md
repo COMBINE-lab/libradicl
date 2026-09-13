@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.19.0](https://github.com/COMBINE-lab/libradicl/compare/v0.18.1...v0.19.0) (2026-09-13)
+
+
+### Features
+
+* Per-chunk chunk codecs for collated RAD (lz4 default, zstd opt-in) ([7c55979](https://github.com/COMBINE-lab/libradicl/commit/7c55979d5c2c77fdbe31e052800763b54780acb8))
+
 ## [0.18.1](https://github.com/COMBINE-lab/libradicl/compare/v0.18.0...v0.18.1) (2026-08-31)
 
 
