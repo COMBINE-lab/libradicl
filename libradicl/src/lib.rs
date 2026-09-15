@@ -55,6 +55,7 @@ use std::vec::Vec;
 
 pub mod chunk;
 pub mod codec;
+pub mod collate_generic;
 pub mod collation;
 pub(crate) mod collation_spool;
 pub mod constants;
