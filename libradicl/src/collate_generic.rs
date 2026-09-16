@@ -29,9 +29,163 @@
 //! (under its output-write lock, so offsets stay in file order).
 
 use crate::codec::ChunkCodec;
+use crate::rad_types::{RadIntId, RadType, TagSection};
 use crate::schema::U128Map;
 use std::collections::hash_map::Entry;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
+
+/// One barcode level that contributes to a composite collation key: where its
+/// bytes sit within a record (offset from the record start) and how wide it is.
+#[derive(Clone, Debug)]
+struct KeyPart {
+    offset: usize,
+    int: RadIntId,
+    bits: u32,
+}
+
+/// Runtime description of how to read a record's collation key from its
+/// read-level header — the tag-driven analogue of what the fast concrete records
+/// bake in at compile time (see [`scan_fixed_bc_umi`] and the multi-barcode
+/// composite in [`crate::record::MultiBarcodeReadRecordHeader`]).
+///
+/// Collatability is a property of a *layout*, not of a type: constructing a spec
+/// from a read-level [`TagSection`] **fails** when no key field is identified, so
+/// a non-collatable RAD is rejected at the collate entry point rather than deep in
+/// the gather. Because [`CollationScan::scan`] for the generic record requires a
+/// [`GenericCollateCtx`] (which embeds a spec), and the only way to obtain one is
+/// this fallible constructor, the type system + the constructor together enforce
+/// "you cannot gather a layout you have not proven collatable."
+#[derive(Clone, Debug)]
+pub struct CollationKeySpec {
+    /// Key parts, outer→inner (e.g. `[sample, cell]`); a single-barcode key has one.
+    parts: Vec<KeyPart>,
+    /// Total bytes of the read-level header (`na` + all read-level tags), i.e. the
+    /// offset of the first alignment within a record.
+    read_header_bytes: usize,
+}
+
+impl CollationKeySpec {
+    /// Build a spec from the read-level tag section, naming the barcode-level tags
+    /// (outer→inner order, e.g. `["b0","b1"]` for sample+cell, or `["b"]` for a
+    /// single barcode). Fails if a named tag is missing/non-integer, if a
+    /// read-level tag is variable-width (so the header offset isn't fixed), if no
+    /// key tags are named (not collatable), or if the composite exceeds 128 bits.
+    pub fn from_read_tags(read_tags: &TagSection, key_tag_names: &[&str]) -> anyhow::Result<Self> {
+        if key_tag_names.is_empty() {
+            anyhow::bail!("no collation key tags specified: records are not collatable");
+        }
+        // offset of each read tag = 4 (na) + sum of preceding read-tag widths.
+        let mut offsets: Vec<(String, usize, RadIntId)> = Vec::with_capacity(read_tags.tags.len());
+        let mut off = std::mem::size_of::<u32>(); // past `na`
+        for td in &read_tags.tags {
+            let RadType::Int(int) = td.typeid else {
+                anyhow::bail!(
+                    "read-level tag `{}` is not a fixed-width integer; the generic collation key \
+                     requires a fixed read header",
+                    td.name
+                );
+            };
+            offsets.push((td.name.clone(), off, int));
+            off += int.bytes_for_type();
+        }
+        let read_header_bytes = off;
+
+        let mut parts = Vec::with_capacity(key_tag_names.len());
+        let mut total_bits = 0u32;
+        for name in key_tag_names {
+            let (_, offset, int) = offsets.iter().find(|(n, _, _)| n == name).ok_or_else(|| {
+                anyhow::anyhow!("collation key tag `{name}` not found in read tags")
+            })?;
+            let bits = (int.bytes_for_type() * 8) as u32;
+            total_bits += bits;
+            parts.push(KeyPart {
+                offset: *offset,
+                int: *int,
+                bits,
+            });
+        }
+        if total_bits > 128 {
+            anyhow::bail!(
+                "composite collation key needs {total_bits} bits, exceeding the 128-bit key"
+            );
+        }
+        Ok(Self {
+            parts,
+            read_header_bytes,
+        })
+    }
+
+    /// Extract the composite key from a record's read-level header bytes (at least
+    /// [`Self::read_header_bytes`] long). Parts fold outer→inner: each shifts the
+    /// accumulator by its bit width, so `[sample, cell]` yields
+    /// `(sample << cell_bits) | cell` — matching the concrete multi-barcode rule.
+    fn extract(&self, header: &[u8]) -> u128 {
+        let mut key: u128 = 0;
+        for p in &self.parts {
+            let mut c = Cursor::new(&header[p.offset..]);
+            let v = p.int.read_value_into_u128(&mut c);
+            let mask = if p.bits >= 128 {
+                u128::MAX
+            } else {
+                (1u128 << p.bits) - 1
+            };
+            key = (key << p.bits) | (v & mask);
+        }
+        key
+    }
+}
+
+/// Collation context for the generic, tag-driven record: a validated key spec plus
+/// the fixed per-alignment stride. Obtainable only via [`Self::new`], which is
+/// where a layout's collatability is decided.
+#[derive(Clone, Debug)]
+pub struct GenericCollateCtx {
+    key: CollationKeySpec,
+    aln_stride: usize,
+}
+
+impl GenericCollateCtx {
+    /// Build the collation context from the read/alignment tag sections and the
+    /// barcode-level key tag names. Fails if the key spec can't be built (see
+    /// [`CollationKeySpec::from_read_tags`]) or if any alignment tag is
+    /// variable-width (the fixed-stride gather can't skip it; such layouts need a
+    /// parse-based scan instead).
+    pub fn new(
+        read_tags: &TagSection,
+        aln_tags: &TagSection,
+        key_tag_names: &[&str],
+    ) -> anyhow::Result<Self> {
+        let key = CollationKeySpec::from_read_tags(read_tags, key_tag_names)?;
+        let mut aln_stride = 0usize;
+        for td in &aln_tags.tags {
+            let RadType::Int(int) = td.typeid else {
+                anyhow::bail!(
+                    "alignment tag `{}` is not fixed-width; the fixed-stride generic gather \
+                     cannot skip it",
+                    td.name
+                );
+            };
+            aln_stride += int.bytes_for_type();
+        }
+        Ok(Self { key, aln_stride })
+    }
+}
+
+impl CollationScan for crate::record::GenericReadRecord {
+    type Ctx = GenericCollateCtx;
+    fn scan<R: Read + Seek>(r: &mut R, ctx: &GenericCollateCtx) -> anyhow::Result<(u128, usize)> {
+        // Read the fixed read-level header (na + read tags), extract the key, then
+        // skip the fixed-stride alignment block.
+        let hb = ctx.key.read_header_bytes;
+        let mut header = vec![0u8; hb];
+        r.read_exact(&mut header)?;
+        let na = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+        let key = ctx.key.extract(&header);
+        let skip = na * ctx.aln_stride;
+        r.seek_relative(skip as i64)?;
+        Ok((key, hb + skip))
+    }
+}
 
 /// A record type the collation gather can group. Implementors read exactly one
 /// on-disk record from `r` (positioned at its start), advance `r` to the next
@@ -539,6 +693,109 @@ mod tests {
             v.extend_from_slice(&r.to_le_bytes());
         }
         v
+    }
+
+    // --- generic, tag-driven record collation (CollationKeySpec) ---
+
+    use crate::rad_types::{RadType, TagDesc, TagSection, TagSectionLabel};
+
+    fn tag_section(label: TagSectionLabel, tags: &[(&str, RadIntId)]) -> TagSection {
+        TagSection {
+            label,
+            tags: tags
+                .iter()
+                .map(|(n, i)| TagDesc {
+                    name: (*n).to_string(),
+                    typeid: RadType::Int(*i),
+                })
+                .collect(),
+        }
+    }
+
+    /// On-disk generic record: `na(u32)`, read tags `b0,b1,u` (u32 each), then
+    /// `na ×` aln tags `refid,as` (u32 each).
+    fn gen_rec(b0: u32, b1: u32, umi: u32, alns: &[(u32, u32)]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(alns.len() as u32).to_le_bytes());
+        v.extend_from_slice(&b0.to_le_bytes());
+        v.extend_from_slice(&b1.to_le_bytes());
+        v.extend_from_slice(&umi.to_le_bytes());
+        for &(r, a) in alns {
+            v.extend_from_slice(&r.to_le_bytes());
+            v.extend_from_slice(&a.to_le_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn generic_record_composite_key_collates() {
+        use crate::record::GenericReadRecord;
+        let read_tags = tag_section(
+            TagSectionLabel::ReadTags,
+            &[
+                ("b0", RadIntId::U32),
+                ("b1", RadIntId::U32),
+                ("u", RadIntId::U32),
+            ],
+        );
+        let aln_tags = tag_section(
+            TagSectionLabel::AlignmentTags,
+            &[("refid", RadIntId::U32), ("as", RadIntId::U32)],
+        );
+        // key = composite (sample=b0, cell=b1): (b0 << 32) | b1
+        let ctx = GenericCollateCtx::new(&read_tags, &aln_tags, &["b0", "b1"]).unwrap();
+        assert_eq!(ctx.aln_stride, 8);
+        assert_eq!(ctx.key.read_header_bytes, 16);
+
+        let recs = [
+            gen_rec(1, 7, 100, &[(10, 1), (11, 2)]), // key (1<<32)|7
+            gen_rec(2, 7, 101, &[(12, 3)]),          // key (2<<32)|7  — distinct sample
+            gen_rec(1, 7, 102, &[(13, 4)]),          // key (1<<32)|7  — same as first
+            gen_rec(1, 9, 103, &[]),                 // key (1<<32)|9
+        ];
+        let n = recs.len();
+        let input = recs.concat();
+        for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
+            let mut out = Vec::new();
+            let mut cur = Cursor::new(input.as_slice());
+            let nchunks =
+                collate_bucket::<GenericReadRecord, _>(&mut cur, n, &ctx, codec, &mut out).unwrap();
+            let (chunks, total) = read_back::<GenericReadRecord>(&out, codec, &ctx);
+            assert_eq!(total, n);
+            assert_eq!(nchunks, 3, "three distinct (sample,cell) groups");
+            let m: std::collections::HashMap<u128, u32> = chunks.into_iter().collect();
+            assert_eq!(m[&((1u128 << 32) | 7)], 2);
+            assert_eq!(m[&((2u128 << 32) | 7)], 1);
+            assert_eq!(m[&((1u128 << 32) | 9)], 1);
+        }
+    }
+
+    #[test]
+    fn collation_key_spec_rejects_non_collatable_layouts() {
+        let read_tags = tag_section(
+            TagSectionLabel::ReadTags,
+            &[("b", RadIntId::U32), ("u", RadIntId::U32)],
+        );
+        // no key tags named → not collatable
+        assert!(CollationKeySpec::from_read_tags(&read_tags, &[]).is_err());
+        // named key tag absent
+        assert!(CollationKeySpec::from_read_tags(&read_tags, &["nope"]).is_err());
+        // composite exceeds 128 bits (two u128 barcodes)
+        let wide = tag_section(
+            TagSectionLabel::ReadTags,
+            &[("b0", RadIntId::U128), ("b1", RadIntId::U128)],
+        );
+        assert!(CollationKeySpec::from_read_tags(&wide, &["b0", "b1"]).is_err());
+        // variable-width alignment tag → fixed-stride gather can't skip it
+        let read_ok = tag_section(TagSectionLabel::ReadTags, &[("b", RadIntId::U32)]);
+        let mut var_aln = tag_section(TagSectionLabel::AlignmentTags, &[("refid", RadIntId::U32)]);
+        var_aln.tags.push(TagDesc {
+            name: "cigar".to_string(),
+            typeid: RadType::String,
+        });
+        assert!(GenericCollateCtx::new(&read_ok, &var_aln, &["b"]).is_err());
+        // single-barcode key works
+        assert!(CollationKeySpec::from_read_tags(&read_ok, &["b"]).is_ok());
     }
 
     #[test]
