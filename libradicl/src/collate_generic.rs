@@ -50,6 +50,40 @@ pub trait ScatterProbe {
     fn probe(cursor: &mut Cursor<&[u8]>, ctx: &Self::Ctx) -> anyhow::Result<u64>;
 }
 
+// --- `ScatterProbe` for the built-in single-barcode-family records ---
+//
+// These are the parse-based (correctness-baseline) probes: read the record via
+// its `MappedRecord` impl (the cursor advances by exactly the record's on-disk
+// length) and return its collation key. A faster raw-read + arithmetic-skip
+// override for the fixed-stride layouts is a later step (#62); these establish
+// that every built-in record collates through the generic core, at any barcode
+// width, without a `KnownSize` bound on the engine.
+macro_rules! parse_scatter_probe {
+    ($rec:ident, $ctx:path) => {
+        impl<B> ScatterProbe for crate::record::$rec<B>
+        where
+            B: crate::record::ConvertiblePrimitiveInteger,
+            u64: From<B>,
+            crate::record::$rec<B>: crate::record::MappedRecord<ParsingContext = $ctx>
+                + crate::record::CollatableMappedRecord<B>,
+        {
+            type Ctx = $ctx;
+            fn probe(cursor: &mut Cursor<&[u8]>, ctx: &$ctx) -> anyhow::Result<u64> {
+                use crate::record::{CollatableMappedRecord, MappedRecord};
+                let rec = <crate::record::$rec<B>>::from_bytes_with_context(cursor, ctx);
+                Ok(u64::from(rec.collate_key()))
+            }
+        }
+    };
+}
+
+parse_scatter_probe!(AlevinFryReadRecordT, crate::record::AlevinFryRecordContext);
+parse_scatter_probe!(
+    AlevinFryReadRecordWithPositionT,
+    crate::record::AlevinFryRecordContext
+);
+parse_scatter_probe!(ScLongReadRecordT, crate::record::ScLongReadRecordContext);
+
 /// Collate one bucket of records: group by [`ScatterProbe`] key and append one
 /// per-cell chunk per key to `out`, each `[nbytes: u32][nrec: u32][payload]`
 /// where `nbytes` counts the 8-byte header and `payload` is `codec`-compressed
@@ -293,6 +327,57 @@ mod tests {
         let n = recs.len();
         let input: Vec<u8> = recs.concat();
         run_case::<VarRec>(input, n);
+    }
+
+    /// On-disk `AlevinFryReadRecordT<u64>`: `[na:u32][bc:u64][umi:u64][na×u32]`.
+    fn af_u64(bc: u64, umi: u64, refs: &[u32]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(refs.len() as u32).to_le_bytes());
+        v.extend_from_slice(&bc.to_le_bytes());
+        v.extend_from_slice(&umi.to_le_bytes());
+        for &r in refs {
+            v.extend_from_slice(&r.to_le_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn builtin_alevin_fry_record_collates_via_core() {
+        // A real built-in record type collates through the generic core via its
+        // `ScatterProbe` impl (proving the wiring, not just synthetic records).
+        use crate::rad_types::RadIntId;
+        use crate::record::{AlevinFryReadRecordT, AlevinFryRecordContext};
+        let ctx = AlevinFryRecordContext {
+            bct: RadIntId::U64,
+            umit: RadIntId::U64,
+        };
+        let recs = [
+            af_u64(7, 100, &[1, 2, 3]),
+            af_u64(3, 101, &[4]),
+            af_u64(7, 102, &[5, 6]),
+            af_u64(3, 103, &[]),
+            af_u64(9, 104, &[7]),
+        ];
+        let n = recs.len();
+        let input: Vec<u8> = recs.concat();
+        for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
+            let mut index = ChunkIndexBuilder::default();
+            let mut out = Vec::new();
+            let nchunks = collate_bucket::<AlevinFryReadRecordT<u64>>(
+                &input, n, &ctx, codec, &mut index, &mut out,
+            )
+            .unwrap();
+            let (chunks, total) = read_back::<AlevinFryReadRecordT<u64>>(&out, codec, &ctx);
+            assert_eq!(total, n);
+            assert_eq!(nchunks, 3, "barcodes 7,3,9 -> 3 cells");
+            let m: std::collections::HashMap<u64, u32> = chunks.into_iter().collect();
+            assert_eq!(m[&7], 2);
+            assert_eq!(m[&3], 2);
+            assert_eq!(m[&9], 1);
+            let offs = index.into_offsets();
+            assert_eq!(offs.len(), nchunks + 1);
+            assert_eq!(*offs.last().unwrap(), out.len() as u64);
+        }
     }
 
     #[test]
