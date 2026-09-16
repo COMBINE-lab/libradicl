@@ -31,7 +31,7 @@
 use crate::codec::ChunkCodec;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// A record type the collation gather can group. Implementors read exactly one
 /// on-disk record from `r` (positioned at its start), advance `r` to the next
@@ -144,7 +144,7 @@ where
 /// (fixed records seek past alignments; others parse) and sizes the per-cell
 /// chunks; pass two rewinds and relocates each record's raw bytes into its cell's
 /// slot. Peak memory is the output buffer (≈ one uncompressed bucket) plus a
-/// small per-record `(key, len)` table — never the whole input at once.
+/// small per-record length table (4 bytes/record) — never the whole input at once.
 ///
 /// The caller records the appended region's offsets via
 /// [`ChunkIndexBuilder::record_bucket`](crate::codec::ChunkIndexBuilder::record_bucket).
@@ -163,72 +163,83 @@ where
     let base = reader.stream_position()?;
 
     // Pass 1: scan for keys + lengths; size per-cell chunks (first-seen order).
+    // Store only each record's length (u32); the key is re-derived cheaply from
+    // the record's own bytes in pass 2, so per-record state stays 4 bytes.
     let mut order: Vec<u128> = Vec::new();
     let mut cells: HashMap<u128, CellSize> = HashMap::new();
-    let mut recs: Vec<(u128, u32)> = Vec::with_capacity(num_records);
+    let mut lens: Vec<u32> = Vec::with_capacity(num_records);
     for i in 0..num_records {
         let (key, len) = S::scan(reader, ctx)?;
+        let len =
+            u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?;
         match cells.entry(key) {
             Entry::Vacant(e) => {
                 order.push(key);
                 e.insert(CellSize {
-                    payload_bytes: len,
+                    payload_bytes: len as usize,
                     nrec: 1,
                 });
             }
             Entry::Occupied(mut e) => {
                 let c = e.get_mut();
-                c.payload_bytes += len;
+                c.payload_bytes += len as usize;
                 c.nrec += 1;
             }
         }
-        recs.push((
-            key,
-            u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?,
-        ));
+        lens.push(len);
     }
 
-    // Lay out the uncompressed output: one chunk per cell, in first-seen order.
+    // Lay out the uncompressed chunks (one per cell, first-seen order): compute
+    // each cell's chunk offset and payload write cursor.
     let mut total = 0usize;
-    let mut write_cursor: HashMap<u128, usize> = HashMap::with_capacity(order.len());
+    let mut cursor: HashMap<u128, usize> = HashMap::with_capacity(order.len());
     for &key in &order {
         let c = &cells[&key];
-        let chunk_off = total;
-        write_cursor.insert(key, chunk_off + CHUNK_HEADER);
+        cursor.insert(key, total + CHUNK_HEADER);
         total += CHUNK_HEADER + c.payload_bytes;
     }
-    let mut buf = vec![0u8; total];
+
+    // Build the uncompressed chunks directly into `out` when there is no codec
+    // (no second full-bucket buffer); otherwise into a temporary buffer that is
+    // then compressed per chunk. Either way peak memory is ~one bucket.
+    let out_start = out.len();
+    let mut tmp;
+    let dst: &mut [u8] = if codec == ChunkCodec::None {
+        out.resize(out_start + total, 0);
+        &mut out[out_start..]
+    } else {
+        tmp = vec![0u8; total];
+        &mut tmp[..]
+    };
+
     // chunk headers
     let mut off = 0usize;
     for &key in &order {
         let c = &cells[&key];
         let nbytes = (CHUNK_HEADER + c.payload_bytes) as u32;
-        buf[off..off + 4].copy_from_slice(&nbytes.to_le_bytes());
-        buf[off + 4..off + 8].copy_from_slice(&c.nrec.to_le_bytes());
+        dst[off..off + 4].copy_from_slice(&nbytes.to_le_bytes());
+        dst[off + 4..off + 8].copy_from_slice(&c.nrec.to_le_bytes());
         off += CHUNK_HEADER + c.payload_bytes;
     }
 
-    // Pass 2: rewind and relocate each record's raw bytes into its cell's slot.
+    // Pass 2: rewind; read each record's raw bytes, re-derive its key from those
+    // bytes, and place them into its cell's slot.
     reader.seek(SeekFrom::Start(base))?;
     let mut scratch = vec![0u8; 64 * 1024];
-    for &(key, len) in &recs {
+    for &len in &lens {
         let len = len as usize;
         if scratch.len() < len {
             scratch.resize(len, 0);
         }
         reader.read_exact(&mut scratch[..len])?;
-        let w = write_cursor
-            .get_mut(&key)
-            .expect("cell present from pass 1");
-        buf[*w..*w + len].copy_from_slice(&scratch[..len]);
+        let (key, _) = S::scan(&mut Cursor::new(&scratch[..len]), ctx)?;
+        let w = cursor.get_mut(&key).expect("cell present from pass 1");
+        dst[*w..*w + len].copy_from_slice(&scratch[..len]);
         *w += len;
     }
 
-    // Apply the per-chunk codec (verbatim for None) and append.
-    if codec == ChunkCodec::None {
-        out.extend_from_slice(&buf);
-    } else {
-        let compressed = crate::codec::recompress_bucket_per_chunk(&buf, codec)?;
+    if codec != ChunkCodec::None {
+        let compressed = crate::codec::recompress_bucket_per_chunk(dst, codec)?;
         out.extend_from_slice(&compressed);
     }
     Ok(order.len())
@@ -244,17 +255,6 @@ mod tests {
     use super::*;
     use crate::codec::{ChunkIndexBuilder, decompress_payload};
     use std::io::Cursor;
-
-    fn ru32(c: &mut Cursor<&[u8]>) -> anyhow::Result<u32> {
-        let mut b = [0u8; 4];
-        c.read_exact(&mut b)?;
-        Ok(u32::from_le_bytes(b))
-    }
-    fn ru16(c: &mut Cursor<&[u8]>) -> anyhow::Result<u16> {
-        let mut b = [0u8; 2];
-        c.read_exact(&mut b)?;
-        Ok(u16::from_le_bytes(b))
-    }
 
     // --- Two custom record types implementing only `CollationScan` (standing in
     // for an external consumer's record): one fixed-stride, one variable-length. ---
