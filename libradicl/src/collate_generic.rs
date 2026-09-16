@@ -133,6 +133,74 @@ where
     }
 }
 
+/// `CollationScan` for the multi-barcode (Flex) record. Unlike the single-barcode
+/// family, the collation key is the composite *group* key (sample + cell), not the
+/// innermost barcode alone — so `scan_by_parse` (which keys on `collate_key`)
+/// would wrongly merge samples. This reads the barcode fields directly and forms
+/// the composite exactly as
+/// [`MultiBarcodeReadRecordHeader::collation_group_key`](crate::record::CollatableRecordHeader::collation_group_key)
+/// (first barcode = sample, last = cell), for any barcode/umi widths — covering
+/// both the fast `u32`/`u32` layout and every other in one arithmetic path.
+impl<B> CollationScan for crate::record::MultiBarcodeReadRecordT<B>
+where
+    B: crate::record::ConvertiblePrimitiveInteger,
+    crate::record::MultiBarcodeReadRecordT<B>: crate::record::MappedRecord<ParsingContext = crate::record::MultiBarcodeRecordContext>
+        + crate::record::KnownSize,
+{
+    type Ctx = crate::record::MultiBarcodeRecordContext;
+    fn scan<R: Read + Seek>(
+        r: &mut R,
+        ctx: &crate::record::MultiBarcodeRecordContext,
+    ) -> anyhow::Result<(u128, usize)> {
+        let mut na_buf = [0u8; 4];
+        r.read_exact(&mut na_buf)?;
+        let na = u32::from_le_bytes(na_buf) as usize;
+
+        // Read every barcode field (consuming it), keeping the first (sample) and
+        // last (cell) values; widths come from the context.
+        let mut first: u64 = 0;
+        let mut last: u64 = 0;
+        let nbc = ctx.bc_types.len();
+        for (i, bct) in ctx.bc_types.iter().enumerate() {
+            let v = bct.read_value_into_u128(r) as u64;
+            if i == 0 {
+                first = v;
+            }
+            if i + 1 == nbc {
+                last = v;
+            }
+        }
+
+        // Composite group key — mirrors `collation_group_key`: single barcode ⇒
+        // that barcode; otherwise sample in the high bits above the cell field.
+        let key: u64 = if nbc < 2 {
+            last
+        } else {
+            let cell_bits = (ctx
+                .bc_types
+                .last()
+                .expect("multi-barcode context has ≥1 barcode")
+                .bytes_for_type()
+                * 8) as u32;
+            if cell_bits >= 64 {
+                last
+            } else {
+                (first << cell_bits) | (last & ((1u64 << cell_bits) - 1))
+            }
+        };
+
+        // Skip the umi and the fixed-stride alignment block.
+        let stride =
+            <crate::record::MultiBarcodeReadRecordT<B> as crate::record::KnownSize>::nbytes_aln(
+                ctx,
+            );
+        let skip = ctx.umit.bytes_for_type() + na * stride;
+        r.seek_relative(skip as i64)?;
+        let len = 4 + ctx.total_bc_bytes() + skip;
+        Ok((u128::from(key), len))
+    }
+}
+
 /// Collate one temp bucket: group its `num_records` records (a seekable stream
 /// positioned at the bucket start) by [`CollationScan`] key and append one
 /// per-cell chunk per key to `out` — each `[nbytes:u32][nrec:u32][payload]`,
@@ -142,9 +210,9 @@ where
 ///
 /// Two-pass and bounded-memory: pass one scans each record for `(key, len)`
 /// (fixed records seek past alignments; others parse) and sizes the per-cell
-/// chunks; pass two rewinds and relocates each record's raw bytes into its cell's
-/// slot. Peak memory is the output buffer (≈ one uncompressed bucket) plus a
-/// small per-record `(cell_index, len)` table — never the whole input at once.
+/// chunks; pass two rewinds, re-scans, and relocates each record's raw bytes into
+/// its cell's slot. Peak memory is the output buffer (≈ one uncompressed bucket)
+/// plus a per-cell (not per-record) index — never a copy of the whole input.
 ///
 /// The caller records the appended region's offsets via
 /// [`ChunkIndexBuilder::record_bucket`](crate::codec::ChunkIndexBuilder::record_bucket).
@@ -164,17 +232,16 @@ where
 
     // Pass 1: scan for keys + lengths; size per-cell chunks (first-seen order).
     // `cells` holds one entry per cell in first-seen order; `index` maps a key to
-    // its cell's position in `cells` (the only hashing, once per record). Each
-    // record keeps just `(cell_index, len)` — 8 bytes — so pass 2 relocates its
-    // bytes straight into its slot with no re-scan and no per-record hashing.
+    // its cell's position in `cells`. Nothing is stored per record — pass 2
+    // re-scans (cheap for fixed-layout records: a header read + arithmetic skip)
+    // so peak memory stays at ~one bucket with no O(records) side table.
     let mut cells: Vec<CellSize> = Vec::new();
     let mut index: U128Map<u32> = U128Map::default();
-    let mut recs: Vec<(u32, u32)> = Vec::with_capacity(num_records);
     for i in 0..num_records {
         let (key, len) = S::scan(reader, ctx)?;
         let len =
             u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?;
-        let ci = match index.entry(key) {
+        match index.entry(key) {
             Entry::Vacant(e) => {
                 let ci = u32::try_from(cells.len())
                     .map_err(|_| anyhow::anyhow!("bucket exceeds u32 cells"))?;
@@ -183,17 +250,13 @@ where
                     nrec: 1,
                 });
                 e.insert(ci);
-                ci
             }
             Entry::Occupied(e) => {
-                let ci = *e.get();
-                let c = &mut cells[ci as usize];
+                let c = &mut cells[*e.get() as usize];
                 c.payload_bytes += len as usize;
                 c.nrec += 1;
-                ci
             }
-        };
-        recs.push((ci, len));
+        }
     }
 
     // Lay out the uncompressed chunks (one per cell, first-seen order): compute
@@ -212,17 +275,28 @@ where
     if codec == ChunkCodec::None {
         let out_start = out.len();
         out.resize(out_start + total, 0);
-        fill_bucket(
+        fill_bucket::<S, R>(
             reader,
             base,
+            num_records,
+            ctx,
             &cells,
-            &recs,
+            &index,
             &mut cursor,
             &mut out[out_start..],
         )?;
     } else {
         let mut tmp = vec![0u8; total];
-        fill_bucket(reader, base, &cells, &recs, &mut cursor, &mut tmp)?;
+        fill_bucket::<S, R>(
+            reader,
+            base,
+            num_records,
+            ctx,
+            &cells,
+            &index,
+            &mut cursor,
+            &mut tmp,
+        )?;
         // Reserve the compressed output up front (compressed ≤ uncompressed), so
         // appending never triggers a doubling realloc that transiently holds two
         // copies of the growing buffer (a large-bucket RSS spike). Matches the
@@ -235,18 +309,25 @@ where
     Ok(cells.len())
 }
 
-/// Write the per-cell chunk headers into `dst` and (pass two) rewind `reader` to
-/// `base` and relocate each record's raw bytes into its cell's slot. `cursor[ci]`
-/// starts at cell `ci`'s payload offset and is advanced as records are placed.
-fn fill_bucket<R>(
+/// Write the per-cell chunk headers into `dst`, then (pass two) rewind `reader`
+/// to `base` and relocate each record's raw bytes into its cell's slot. Each
+/// record is re-scanned for `(key, len)`, then read straight into the slot
+/// `index[key]` points at (`cursor[ci]`, advanced as records land). Re-scanning
+/// (rather than a stored per-record table) keeps peak memory at ~one bucket; for
+/// fixed-layout records the scan is a cheap header read + arithmetic skip.
+#[allow(clippy::too_many_arguments)]
+fn fill_bucket<S, R>(
     reader: &mut R,
     base: u64,
+    num_records: usize,
+    ctx: &S::Ctx,
     cells: &[CellSize],
-    recs: &[(u32, u32)],
+    index: &U128Map<u32>,
     cursor: &mut [usize],
     dst: &mut [u8],
 ) -> anyhow::Result<()>
 where
+    S: CollationScan,
     R: Read + Seek,
 {
     const CHUNK_HEADER: usize = 8;
@@ -258,12 +339,16 @@ where
         off += CHUNK_HEADER + c.payload_bytes;
     }
 
-    // Pass 2: records for a cell land consecutively; cells occupy disjoint chunks.
-    // Routing is a plain `Vec` index — no hashing on the per-record hot path.
+    // Pass 2: re-scan each record for (key, len), seek back over it, and read its
+    // raw bytes into its cell's slot. Records for a cell land consecutively; cells
+    // occupy disjoint chunks. The backward seek stays within the reader's buffer
+    // for typical record sizes, so this is buffer-local, not extra device I/O.
     reader.seek(SeekFrom::Start(base))?;
-    for &(ci, len) in recs {
-        let len = len as usize;
-        let w = &mut cursor[ci as usize];
+    for _ in 0..num_records {
+        let (key, len) = S::scan(reader, ctx)?;
+        reader.seek_relative(-(len as i64))?;
+        let ci = *index.get(&key).expect("cell present from pass 1") as usize;
+        let w = &mut cursor[ci];
         reader.read_exact(&mut dst[*w..*w + len])?;
         *w += len;
     }
