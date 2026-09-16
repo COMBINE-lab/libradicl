@@ -31,7 +31,7 @@
 use crate::codec::ChunkCodec;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 
 /// A record type the collation gather can group. Implementors read exactly one
 /// on-disk record from `r` (positioned at its start), advance `r` to the next
@@ -144,7 +144,7 @@ where
 /// (fixed records seek past alignments; others parse) and sizes the per-cell
 /// chunks; pass two rewinds and relocates each record's raw bytes into its cell's
 /// slot. Peak memory is the output buffer (≈ one uncompressed bucket) plus a
-/// small per-record length table (4 bytes/record) — never the whole input at once.
+/// small per-record (key, len) table — never the whole input at once.
 ///
 /// The caller records the appended region's offsets via
 /// [`ChunkIndexBuilder::record_bucket`](crate::codec::ChunkIndexBuilder::record_bucket).
@@ -163,11 +163,11 @@ where
     let base = reader.stream_position()?;
 
     // Pass 1: scan for keys + lengths; size per-cell chunks (first-seen order).
-    // Store only each record's length (u32); the key is re-derived cheaply from
-    // the record's own bytes in pass 2, so per-record state stays 4 bytes.
+    // Keep each record's (key, len) so pass 2 reads it straight into its slot
+    // (no scratch, no re-scan) — matching the historical two-pass's throughput.
     let mut order: Vec<u128> = Vec::new();
     let mut cells: HashMap<u128, CellSize> = HashMap::new();
-    let mut lens: Vec<u32> = Vec::with_capacity(num_records);
+    let mut recs: Vec<(u128, u32)> = Vec::with_capacity(num_records);
     for i in 0..num_records {
         let (key, len) = S::scan(reader, ctx)?;
         let len =
@@ -186,7 +186,7 @@ where
                 c.nrec += 1;
             }
         }
-        lens.push(len);
+        recs.push((key, len));
     }
 
     // Lay out the uncompressed chunks (one per cell, first-seen order): compute
@@ -222,19 +222,13 @@ where
         off += CHUNK_HEADER + c.payload_bytes;
     }
 
-    // Pass 2: rewind; read each record's raw bytes, re-derive its key from those
-    // bytes, and place them into its cell's slot.
+    // Pass 2: rewind and read each record's raw bytes straight into its cell's
+    // slot (records for a cell land consecutively; cells occupy disjoint chunks).
     reader.seek(SeekFrom::Start(base))?;
-    let mut scratch = vec![0u8; 64 * 1024];
-    for &len in &lens {
+    for &(key, len) in &recs {
         let len = len as usize;
-        if scratch.len() < len {
-            scratch.resize(len, 0);
-        }
-        reader.read_exact(&mut scratch[..len])?;
-        let (key, _) = S::scan(&mut Cursor::new(&scratch[..len]), ctx)?;
         let w = cursor.get_mut(&key).expect("cell present from pass 1");
-        dst[*w..*w + len].copy_from_slice(&scratch[..len]);
+        reader.read_exact(&mut dst[*w..*w + len])?;
         *w += len;
     }
 
