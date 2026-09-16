@@ -212,6 +212,19 @@ pub trait CollationScan {
     /// into the output). `None` (the default) ⇒ variable layout; pass 2 falls back
     /// to `scan` + seek-back. When `Some`, [`Self::key_from_header`] must extract
     /// the key from the header bytes.
+    ///
+    /// This is the opt-in that decides whether a record type uses the pass-1
+    /// `(cell index)` side table (fast pass 2, small per-bucket memory) or the
+    /// re-scan fallback (no side table). It is worth overriding only when
+    /// recomputing the key in pass 2 is expensive relative to a plain read — i.e.
+    /// composite/multi-field keys over many small records (multi-barcode). For
+    /// cheap single-field keys (the alevin-fry / long-read family) the re-scan is
+    /// effectively free, so they leave this `None` and pay no side-table memory.
+    /// The choice is per record *type* (key cost), not per file *size*: a
+    /// size-based switch would be backwards, since it is precisely the large
+    /// many-record case where the re-scan of an expensive key costs the most. If a
+    /// future cheap-key record ever has enormous record counts where even the
+    /// cheap re-scan adds up, overriding this is the (size-heuristic-free) lever.
     fn fixed_header_stride(_ctx: &Self::Ctx) -> Option<(usize, usize)> {
         None
     }
@@ -449,6 +462,13 @@ where
     // pass 2 relocates it without recomputing/rehashing the key: it reads `na`,
     // derives the length arithmetically, and routes by the stored index. For
     // variable records nothing is stored (pass 2 falls back to scan + seek-back).
+    //
+    // Invariant: the stored value is a *cell* index, not a record counter, and it
+    // fits `u32`. A bucket holds at most `u32::MAX` records (every caller passes a
+    // `u32` `num_records`; buckets are memory-bounded fractions, far below that),
+    // so its distinct-cell count is also `<= u32::MAX` — enforced by the
+    // `u32::try_from(cells.len())` check in `accumulate_cell`, which errors rather
+    // than wrapping if that ever failed to hold.
     let fixed = S::fixed_header_stride(ctx);
     let mut recs: Vec<u32> = Vec::new();
     if let Some((hdr_bytes, stride)) = fixed {
@@ -603,6 +623,12 @@ struct CellSize {
 /// Record one record of `len` bytes against its cell (keyed by `key`, first-seen
 /// order): grow the cell's payload/nrec, creating the cell on first sight. Returns
 /// the record's cell index.
+///
+/// The returned index is what pass 2's `recs` table stores; the
+/// `u32::try_from(cells.len())` below is the sole guard that keeps it in `u32`
+/// range (it errors, never wraps). A bucket cannot legitimately reach this limit
+/// — record counts per bucket are `u32` and memory-bounded — but the check makes
+/// the invariant total rather than assumed.
 #[inline]
 fn accumulate_cell(
     cells: &mut Vec<CellSize>,
