@@ -203,6 +203,25 @@ pub trait CollationScan {
     /// Read the next record's collation key and advance past it; return
     /// `(key, on_disk_len_bytes)`.
     fn scan<R: Read + Seek>(r: &mut R, ctx: &Self::Ctx) -> anyhow::Result<(u128, usize)>;
+
+    /// If this record has a fixed on-disk layout, return `(read_header_bytes,
+    /// aln_stride)` — the byte length of the fixed header (`na` + read-level
+    /// fields, up to the first alignment) and the fixed per-alignment stride. This
+    /// lets the gather's pass 2 relocate a record forward with no backward seek
+    /// (read the header, derive the key + length, read the alignment block straight
+    /// into the output). `None` (the default) ⇒ variable layout; pass 2 falls back
+    /// to `scan` + seek-back. When `Some`, [`Self::key_from_header`] must extract
+    /// the key from the header bytes.
+    fn fixed_header_stride(_ctx: &Self::Ctx) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Extract the collation key from a record's header bytes (`hdr` is at least
+    /// `read_header_bytes` long). Only called when [`Self::fixed_header_stride`]
+    /// returns `Some`; the default panics to catch a missing override.
+    fn key_from_header(_hdr: &[u8], _ctx: &Self::Ctx) -> u128 {
+        unreachable!("key_from_header called without a fixed_header_stride override")
+    }
 }
 
 /// Parse-based [`CollationScan::scan`] for any [`CollatableMappedRecord`]: parse
@@ -220,6 +239,17 @@ where
     let rec = <T as MappedRecord>::from_bytes_with_context(r, ctx);
     let len = (r.stream_position()? - start) as usize;
     Ok((u128::from(rec.collate_key()), len))
+}
+
+/// Read up to 8 little-endian bytes from `b` as a `u64` (a fixed-width barcode
+/// field lifted out of an already-read header buffer, no reader round-trip).
+#[inline]
+fn le_u64(b: &[u8]) -> u64 {
+    let mut v = 0u64;
+    for (i, &x) in b.iter().enumerate().take(8) {
+        v |= (x as u64) << (8 * i);
+    }
+    v
 }
 
 /// Fast [`CollationScan::scan`] for records with a fixed `[na:u32][bc][umi]`
@@ -295,6 +325,43 @@ where
 /// [`MultiBarcodeReadRecordHeader::collation_group_key`](crate::record::CollatableRecordHeader::collation_group_key)
 /// (first barcode = sample, last = cell), for any barcode/umi widths — covering
 /// both the fast `u32`/`u32` layout and every other in one arithmetic path.
+/// Compose the multi-barcode group key from a record's header bytes (`hdr[0..4]`
+/// is `na`, barcodes follow at offset 4). Mirrors
+/// [`MultiBarcodeReadRecordHeader::collation_group_key`]: single barcode ⇒ that
+/// barcode; otherwise the first (sample) shifted above the last (cell) field.
+fn multi_key_from_header(hdr: &[u8], ctx: &crate::record::MultiBarcodeRecordContext) -> u64 {
+    let nbc = ctx.bc_types.len();
+    let mut first: u64 = 0;
+    let mut last: u64 = 0;
+    let mut off = 4usize;
+    for (i, bct) in ctx.bc_types.iter().enumerate() {
+        let w = bct.bytes_for_type();
+        let v = le_u64(&hdr[off..off + w]);
+        if i == 0 {
+            first = v;
+        }
+        if i + 1 == nbc {
+            last = v;
+        }
+        off += w;
+    }
+    if nbc < 2 {
+        last
+    } else {
+        let cell_bits = (ctx
+            .bc_types
+            .last()
+            .expect("multi-barcode context has ≥1 barcode")
+            .bytes_for_type()
+            * 8) as u32;
+        if cell_bits >= 64 {
+            last
+        } else {
+            (first << cell_bits) | (last & ((1u64 << cell_bits) - 1))
+        }
+    }
+}
+
 impl<B> CollationScan for crate::record::MultiBarcodeReadRecordT<B>
 where
     B: crate::record::ConvertiblePrimitiveInteger,
@@ -306,52 +373,35 @@ where
         r: &mut R,
         ctx: &crate::record::MultiBarcodeRecordContext,
     ) -> anyhow::Result<(u128, usize)> {
-        let mut na_buf = [0u8; 4];
-        r.read_exact(&mut na_buf)?;
-        let na = u32::from_le_bytes(na_buf) as usize;
-
-        // Read every barcode field (consuming it), keeping the first (sample) and
-        // last (cell) values; widths come from the context.
-        let mut first: u64 = 0;
-        let mut last: u64 = 0;
-        let nbc = ctx.bc_types.len();
-        for (i, bct) in ctx.bc_types.iter().enumerate() {
-            let v = bct.read_value_into_u128(r) as u64;
-            if i == 0 {
-                first = v;
-            }
-            if i + 1 == nbc {
-                last = v;
-            }
+        // Read `na` + the whole barcode block in one `read_exact` (read headers are
+        // small), extract the composite key by offset (no reader round-trip per
+        // barcode), then skip the umi + fixed-stride alignment block.
+        let hdr = 4 + ctx.total_bc_bytes();
+        let mut buf = [0u8; 64];
+        if hdr > buf.len() {
+            anyhow::bail!("multi-barcode read header ({hdr} bytes) exceeds the scan buffer");
         }
+        r.read_exact(&mut buf[..hdr])?;
+        let na = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        let key = multi_key_from_header(&buf, ctx);
 
-        // Composite group key — mirrors `collation_group_key`: single barcode ⇒
-        // that barcode; otherwise sample in the high bits above the cell field.
-        let key: u64 = if nbc < 2 {
-            last
-        } else {
-            let cell_bits = (ctx
-                .bc_types
-                .last()
-                .expect("multi-barcode context has ≥1 barcode")
-                .bytes_for_type()
-                * 8) as u32;
-            if cell_bits >= 64 {
-                last
-            } else {
-                (first << cell_bits) | (last & ((1u64 << cell_bits) - 1))
-            }
-        };
+        let (_hdr, stride) = Self::fixed_header_stride(ctx).expect("multi has a fixed layout");
+        let skip = ctx.umit.bytes_for_type() + na * stride;
+        r.seek_relative(skip as i64)?;
+        Ok((u128::from(key), hdr + skip))
+    }
 
-        // Skip the umi and the fixed-stride alignment block.
+    fn fixed_header_stride(ctx: &Self::Ctx) -> Option<(usize, usize)> {
+        let hdr = 4 + ctx.total_bc_bytes() + ctx.umit.bytes_for_type();
         let stride =
             <crate::record::MultiBarcodeReadRecordT<B> as crate::record::KnownSize>::nbytes_aln(
                 ctx,
             );
-        let skip = ctx.umit.bytes_for_type() + na * stride;
-        r.seek_relative(skip as i64)?;
-        let len = 4 + ctx.total_bc_bytes() + skip;
-        Ok((u128::from(key), len))
+        Some((hdr, stride))
+    }
+
+    fn key_from_header(hdr: &[u8], ctx: &Self::Ctx) -> u128 {
+        u128::from(multi_key_from_header(hdr, ctx))
     }
 }
 
@@ -363,10 +413,12 @@ where
 /// written.
 ///
 /// Two-pass and bounded-memory: pass one scans each record for `(key, len)`
-/// (fixed records seek past alignments; others parse) and sizes the per-cell
-/// chunks; pass two rewinds, re-scans, and relocates each record's raw bytes into
-/// its cell's slot. Peak memory is the output buffer (≈ one uncompressed bucket)
-/// plus a per-cell (not per-record) index — never a copy of the whole input.
+/// (fixed records seek past alignments; others parse), sizes the per-cell chunks,
+/// and records each record's `(cell_index, len)`; pass two rewinds and relocates
+/// each record's raw bytes into its cell's slot with one sequential read (no
+/// re-scan, no per-record hashing). Peak memory is the output buffer (≈ one
+/// uncompressed bucket) plus an 8-byte/record side table — never a copy of the
+/// whole input.
 ///
 /// The caller records the appended region's offsets via
 /// [`ChunkIndexBuilder::record_bucket`](crate::codec::ChunkIndexBuilder::record_bucket).
@@ -384,32 +436,40 @@ where
     const CHUNK_HEADER: usize = 8; // [nbytes: u32][nrec: u32]
     let base = reader.stream_position()?;
 
-    // Pass 1: scan for keys + lengths; size per-cell chunks (first-seen order).
-    // `cells` holds one entry per cell in first-seen order; `index` maps a key to
-    // its cell's position in `cells`. Nothing is stored per record — pass 2
-    // re-scans (cheap for fixed-layout records: a header read + arithmetic skip)
-    // so peak memory stays at ~one bucket with no O(records) side table.
+    // Pass 1: determine each record's `(key, len)` and size the per-cell chunks
+    // (first-seen order). `index` maps a key to its cell; nothing is stored per
+    // record — pass 2 relocates records with a single forward pass (see
+    // [`fill_bucket`]), so peak memory stays at ~one bucket with no O(records)
+    // side table. For fixed-layout records the layout constants are hoisted out of
+    // the per-record loop (they'd otherwise be re-summed from the tag sections on
+    // every one of potentially 10^8 records).
     let mut cells: Vec<CellSize> = Vec::new();
     let mut index: U128Map<u32> = U128Map::default();
-    for i in 0..num_records {
-        let (key, len) = S::scan(reader, ctx)?;
-        let len =
-            u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?;
-        match index.entry(key) {
-            Entry::Vacant(e) => {
-                let ci = u32::try_from(cells.len())
-                    .map_err(|_| anyhow::anyhow!("bucket exceeds u32 cells"))?;
-                cells.push(CellSize {
-                    payload_bytes: len as usize,
-                    nrec: 1,
-                });
-                e.insert(ci);
-            }
-            Entry::Occupied(e) => {
-                let c = &mut cells[*e.get() as usize];
-                c.payload_bytes += len as usize;
-                c.nrec += 1;
-            }
+    // For fixed-layout records we record each record's cell index (4 bytes) so
+    // pass 2 relocates it without recomputing/rehashing the key: it reads `na`,
+    // derives the length arithmetically, and routes by the stored index. For
+    // variable records nothing is stored (pass 2 falls back to scan + seek-back).
+    let fixed = S::fixed_header_stride(ctx);
+    let mut recs: Vec<u32> = Vec::new();
+    if let Some((hdr_bytes, stride)) = fixed {
+        recs.reserve(num_records);
+        let mut scratch = vec![0u8; hdr_bytes];
+        for i in 0..num_records {
+            reader.read_exact(&mut scratch)?;
+            let na = u32::from_le_bytes(scratch[0..4].try_into().unwrap()) as usize;
+            let key = S::key_from_header(&scratch, ctx);
+            let len = hdr_bytes + na * stride;
+            reader.seek_relative((len - hdr_bytes) as i64)?;
+            let len =
+                u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?;
+            recs.push(accumulate_cell(&mut cells, &mut index, key, len)?);
+        }
+    } else {
+        for i in 0..num_records {
+            let (key, len) = S::scan(reader, ctx)?;
+            let len =
+                u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?;
+            accumulate_cell(&mut cells, &mut index, key, len)?;
         }
     }
 
@@ -434,6 +494,8 @@ where
             base,
             num_records,
             ctx,
+            fixed,
+            &recs,
             &cells,
             &index,
             &mut cursor,
@@ -446,6 +508,8 @@ where
             base,
             num_records,
             ctx,
+            fixed,
+            &recs,
             &cells,
             &index,
             &mut cursor,
@@ -463,18 +527,28 @@ where
     Ok(cells.len())
 }
 
-/// Write the per-cell chunk headers into `dst`, then (pass two) rewind `reader`
-/// to `base` and relocate each record's raw bytes into its cell's slot. Each
-/// record is re-scanned for `(key, len)`, then read straight into the slot
-/// `index[key]` points at (`cursor[ci]`, advanced as records land). Re-scanning
-/// (rather than a stored per-record table) keeps peak memory at ~one bucket; for
-/// fixed-layout records the scan is a cheap header read + arithmetic skip.
+/// Write the per-cell chunk headers into `dst`, then (pass two) rewind `reader` to
+/// `base` and relocate each record's raw bytes into its cell's slot. `cursor[ci]`
+/// starts at cell `ci`'s payload offset and advances as records land. No
+/// per-record side table: routing keys come from a re-read of the header.
+///
+/// Two pass-2 strategies, both forward-only where it matters:
+/// - **fixed layout** (record implements [`CollationScan::fixed_header_stride`]):
+///   read the fixed header into a small reusable scratch, derive the key + length,
+///   copy the header into the slot, and read the alignment block *straight into the
+///   slot* — a single forward pass with no backward seek (matches the historical
+///   engine; the win for records with many small entries, e.g. multi-barcode).
+/// - **fallback**: `scan` the record (which may skip alignments via `seek`), then
+///   seek back and read it into the slot. Correct for any record, including
+///   variable-length ones, at the cost of re-reading the record's bytes.
 #[allow(clippy::too_many_arguments)]
 fn fill_bucket<S, R>(
     reader: &mut R,
     base: u64,
     num_records: usize,
     ctx: &S::Ctx,
+    fixed: Option<(usize, usize)>,
+    recs: &[u32],
     cells: &[CellSize],
     index: &U128Map<u32>,
     cursor: &mut [usize],
@@ -493,18 +567,30 @@ where
         off += CHUNK_HEADER + c.payload_bytes;
     }
 
-    // Pass 2: re-scan each record for (key, len), seek back over it, and read its
-    // raw bytes into its cell's slot. Records for a cell land consecutively; cells
-    // occupy disjoint chunks. The backward seek stays within the reader's buffer
-    // for typical record sizes, so this is buffer-local, not extra device I/O.
     reader.seek(SeekFrom::Start(base))?;
-    for _ in 0..num_records {
-        let (key, len) = S::scan(reader, ctx)?;
-        reader.seek_relative(-(len as i64))?;
-        let ci = *index.get(&key).expect("cell present from pass 1") as usize;
-        let w = &mut cursor[ci];
-        reader.read_exact(&mut dst[*w..*w + len])?;
-        *w += len;
+    if let Some((hdr_bytes, stride)) = fixed {
+        // Fixed-layout fast path: route by the pass-1 cell index (no key recompute,
+        // no hashing), read each record forward straight into its slot. Length is
+        // `hdr_bytes + na * stride`, with `na` read as the record's first field.
+        for &ci in recs {
+            let w = &mut cursor[ci as usize];
+            reader.read_exact(&mut dst[*w..*w + 4])?;
+            let na = u32::from_le_bytes(dst[*w..*w + 4].try_into().unwrap()) as usize;
+            let len = hdr_bytes + na * stride;
+            reader.read_exact(&mut dst[*w + 4..*w + len])?;
+            *w += len;
+        }
+    } else {
+        // Fallback for variable-layout records: scan (possibly seeking past
+        // alignments), seek back, and read the record into its cell's slot.
+        for _ in 0..num_records {
+            let (key, len) = S::scan(reader, ctx)?;
+            reader.seek_relative(-(len as i64))?;
+            let ci = *index.get(&key).expect("cell present from pass 1") as usize;
+            let w = &mut cursor[ci];
+            reader.read_exact(&mut dst[*w..*w + len])?;
+            *w += len;
+        }
     }
     Ok(())
 }
@@ -512,6 +598,38 @@ where
 struct CellSize {
     payload_bytes: usize,
     nrec: u32,
+}
+
+/// Record one record of `len` bytes against its cell (keyed by `key`, first-seen
+/// order): grow the cell's payload/nrec, creating the cell on first sight. Returns
+/// the record's cell index.
+#[inline]
+fn accumulate_cell(
+    cells: &mut Vec<CellSize>,
+    index: &mut U128Map<u32>,
+    key: u128,
+    len: u32,
+) -> anyhow::Result<u32> {
+    let ci = match index.entry(key) {
+        Entry::Vacant(e) => {
+            let ci = u32::try_from(cells.len())
+                .map_err(|_| anyhow::anyhow!("bucket exceeds u32 cells"))?;
+            cells.push(CellSize {
+                payload_bytes: len as usize,
+                nrec: 1,
+            });
+            e.insert(ci);
+            ci
+        }
+        Entry::Occupied(e) => {
+            let ci = *e.get();
+            let c = &mut cells[ci as usize];
+            c.payload_bytes += len as usize;
+            c.nrec += 1;
+            ci
+        }
+    };
+    Ok(ci)
 }
 
 #[cfg(test)]
