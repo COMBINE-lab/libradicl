@@ -13,8 +13,8 @@
 //! This is the record-type-agnostic heart of collation: given a bucket's
 //! records and a way to read one record's *collation key* and *on-disk length*,
 //! it groups records by key and emits one per-cell [`crate::chunk`]-format chunk
-//! each, applying a per-chunk [`ChunkCodec`] and recording chunk offsets in a
-//! [`ChunkIndexBuilder`]. It is generic over the record type through the lean
+//! each, applying a per-chunk [`ChunkCodec`]; the caller records the emitted
+//! chunks' offsets in a [`ChunkIndexBuilder`]. It is generic over the record type through the lean
 //! [`ScatterProbe`] trait and imposes **no** `KnownSize` bound, so it works for
 //! any record — fixed- or variable-length — including custom record types
 //! defined by external consumers of libradicl.
@@ -24,7 +24,7 @@
 //! `collate_temporary_bucket_twopass_generic`) are later steps of #62; this
 //! module establishes and tests the generic, extensible baseline.
 
-use crate::codec::{ChunkCodec, ChunkIndexBuilder, compress_payload};
+use crate::codec::{ChunkCodec, compress_payload};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::io::Cursor;
@@ -88,9 +88,14 @@ parse_scatter_probe!(ScLongReadRecordT, crate::record::ScLongReadRecordContext);
 /// per-cell chunk per key to `out`, each `[nbytes: u32][nrec: u32][payload]`
 /// where `nbytes` counts the 8-byte header and `payload` is `codec`-compressed
 /// (verbatim for [`ChunkCodec::None`]) — the same on-disk shape the standard and
-/// parallel readers consume. Chunk offsets for the appended region are recorded
-/// in `index`. Keys are emitted in first-seen order (deterministic for a given
-/// input). Returns the number of chunks (distinct keys) written.
+/// parallel readers consume. Keys are emitted in first-seen order (deterministic
+/// for a given input). Returns the number of chunks (distinct keys) written.
+///
+/// This only emits chunk bytes; recording their offsets in a
+/// [`ChunkIndexBuilder`] is the caller's job (call
+/// [`ChunkIndexBuilder::record_bucket`] on the appended region), so a parallel
+/// caller can serialize index recording with the output write under one lock and
+/// keep offsets in file order.
 ///
 /// `input` holds `num_records` records in their on-disk encoding; the engine
 /// copies each record's raw bytes verbatim, so no `KnownSize`/re-serialization is
@@ -100,7 +105,6 @@ pub fn collate_bucket<P: ScatterProbe>(
     num_records: usize,
     ctx: &P::Ctx,
     codec: ChunkCodec,
-    index: &mut ChunkIndexBuilder,
     out: &mut Vec<u8>,
 ) -> anyhow::Result<usize> {
     // First pass: parse each record for its key and byte span, preserving
@@ -127,8 +131,7 @@ pub fn collate_bucket<P: ScatterProbe>(
         }
     }
 
-    // Second pass: one chunk per key, codec-compressed, offsets recorded.
-    let bucket_start = out.len();
+    // Second pass: one chunk per key, codec-compressed.
     for key in &order {
         let recs = &spans[key];
         let nrec = recs.len() as u32;
@@ -142,14 +145,13 @@ pub fn collate_bucket<P: ScatterProbe>(
         out.extend_from_slice(&nrec.to_le_bytes());
         out.extend_from_slice(&comp);
     }
-    index.record_bucket(&out[bucket_start..]);
     Ok(order.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::decompress_payload;
+    use crate::codec::{ChunkIndexBuilder, decompress_payload};
     use std::io::Read;
 
     fn ru32(c: &mut Cursor<&[u8]>) -> anyhow::Result<u32> {
@@ -260,10 +262,8 @@ mod tests {
     fn run_case<P: ScatterProbe<Ctx = ()>>(input: Vec<u8>, num_records: usize) {
         // Barcodes present (first-seen order) and their record counts.
         for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
-            let mut index = ChunkIndexBuilder::default();
             let mut out = Vec::new();
-            let n_chunks =
-                collate_bucket::<P>(&input, num_records, &(), codec, &mut index, &mut out).unwrap();
+            let n_chunks = collate_bucket::<P>(&input, num_records, &(), codec, &mut out).unwrap();
 
             let (chunks, total) = read_back::<P>(&out, codec, &());
             assert_eq!(total, num_records, "all records survive collation");
@@ -285,6 +285,8 @@ mod tests {
 
             // chunk index: n_chunks + 1 offsets, last == collated byte length,
             // offsets strictly increasing and landing on chunk boundaries.
+            let mut index = ChunkIndexBuilder::default();
+            index.record_bucket(&out);
             let offsets = index.into_offsets();
             assert_eq!(offsets.len(), n_chunks + 1);
             assert_eq!(*offsets.last().unwrap(), out.len() as u64);
@@ -361,12 +363,10 @@ mod tests {
         let n = recs.len();
         let input: Vec<u8> = recs.concat();
         for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
-            let mut index = ChunkIndexBuilder::default();
             let mut out = Vec::new();
-            let nchunks = collate_bucket::<AlevinFryReadRecordT<u64>>(
-                &input, n, &ctx, codec, &mut index, &mut out,
-            )
-            .unwrap();
+            let nchunks =
+                collate_bucket::<AlevinFryReadRecordT<u64>>(&input, n, &ctx, codec, &mut out)
+                    .unwrap();
             let (chunks, total) = read_back::<AlevinFryReadRecordT<u64>>(&out, codec, &ctx);
             assert_eq!(total, n);
             assert_eq!(nchunks, 3, "barcodes 7,3,9 -> 3 cells");
@@ -374,6 +374,8 @@ mod tests {
             assert_eq!(m[&7], 2);
             assert_eq!(m[&3], 2);
             assert_eq!(m[&9], 1);
+            let mut index = ChunkIndexBuilder::default();
+            index.record_bucket(&out);
             let offs = index.into_offsets();
             assert_eq!(offs.len(), nchunks + 1);
             assert_eq!(*offs.last().unwrap(), out.len() as u64);
