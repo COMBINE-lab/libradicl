@@ -308,6 +308,10 @@ pub struct GenericReadRecord {
     pub naln_tags: u32,
     pub rtags: Vec<TagValue>,
     pub atags: Vec<TagValue>,
+    /// Index into `rtags` of the collation barcode key (from the context, when
+    /// collating; `0` and unused otherwise). Lets the ctx-free `set_collate_key`
+    /// rewrite the corrected barcode in place.
+    pub key_tag_idx: usize,
 }
 
 impl GenericReadRecord {
@@ -350,6 +354,45 @@ impl GenericReadRecord {
 pub struct GenericReadRecordContext {
     pub read_tags: TagSection,
     pub aln_tags: TagSection,
+    /// Index (into `read_tags`) of the read-level tag that is the collation
+    /// barcode key, when this record is being *collated*. `None` for plain reading
+    /// — a RAD need not be collatable to be read. Set at the collate entry point.
+    pub key_tag_idx: Option<usize>,
+}
+
+/// Fixed on-disk byte width of an integer tag type. Panics on a non-integer
+/// (variable-width) tag — the generic collation path validates all tags are
+/// fixed-width integers before building a record (see `GenericCollateCtx::new`).
+fn int_tag_bytes(t: &RadType) -> usize {
+    match t {
+        RadType::Int(i) => i.bytes_for_type(),
+        other => panic!("generic collation tag {other:?} is not a fixed-width integer"),
+    }
+}
+
+/// Read a fixed-width integer [`TagValue`] as a `u64` (barcodes/umis). Panics on a
+/// non-integer or oversized (u128) value — the collation key must be a fixed
+/// integer that fits `u64` (validated when the collation spec is built).
+fn tag_value_as_u64(v: &TagValue) -> u64 {
+    match v {
+        TagValue::U8(x) => *x as u64,
+        TagValue::U16(x) => *x as u64,
+        TagValue::U32(x) => *x as u64,
+        TagValue::U64(x) => *x,
+        other => panic!("collation key tag value {other:?} is not a u64-compatible integer"),
+    }
+}
+
+/// Overwrite a fixed-width integer [`TagValue`] with `k`, preserving its integer
+/// width (writing a corrected barcode back into a generic record in place).
+fn set_tag_value_u64(slot: &mut TagValue, k: u64) {
+    match slot {
+        TagValue::U8(x) => *x = k as u8,
+        TagValue::U16(x) => *x = k as u16,
+        TagValue::U32(x) => *x = k as u32,
+        TagValue::U64(x) => *x = k,
+        other => panic!("collation key tag value {other:?} is not a u64-compatible integer"),
+    }
 }
 
 // ### Known size trait
@@ -654,6 +697,8 @@ impl RecordContext for GenericReadRecordContext {
         Ok(Self {
             read_tags: rt.clone(),
             aln_tags: at.clone(),
+            // reading is collation-agnostic; the collate entry point sets this.
+            key_tag_idx: None,
         })
     }
 }
@@ -1251,6 +1296,7 @@ impl MappedRecord for GenericReadRecord {
             naln_tags: *naln_tags as u32,
             rtags,
             atags,
+            key_tag_idx: ctx.key_tag_idx.unwrap_or(0),
         }
     }
 
@@ -1284,6 +1330,7 @@ impl MappedRecord for GenericReadRecord {
             naln_tags: *naln_tags as u32,
             rtags,
             atags,
+            key_tag_idx: ctx.key_tag_idx.unwrap_or(0),
         }
     }
     */
@@ -1296,8 +1343,148 @@ impl MappedRecord for GenericReadRecord {
     }
 
     #[inline]
-    fn write<W: Write>(&self, _writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
-        unimplemented!("Currently there is no implementation for write for the GenericReadRecord");
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        // na, then read-level tag values (with any corrected barcode already in
+        // `rtags`), then `na ×` alignment-level tag values — the exact inverse of
+        // `from_bytes_with_context`.
+        RadIntId::U32
+            .write_to(self.naln, writer)
+            .context("couldn't write number of alignments for generic record")?;
+        for (td, tv) in ctx.read_tags.iter_desc().zip(self.rtags.iter()) {
+            tv.write_with_type(&td.typeid, writer)
+                .context("couldn't write read-level tag for generic record")?;
+        }
+        for chunk in self.atags.chunks_exact(self.naln_tags as usize) {
+            for (td, tv) in ctx.aln_tags.iter_desc().zip(chunk.iter()) {
+                tv.write_with_type(&td.typeid, writer)
+                    .context("couldn't write alignment-level tag for generic record")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// === generic record: collatable header + collation trait impls ===
+
+/// Collatable header for the generic record: the alignment count, the barcode
+/// collation key, and the (raw) read-level tag values so the full record can be
+/// reconstructed after the header is peeked during scatter.
+pub struct GenericCollatableHeader {
+    pub naln: u32,
+    pub key: u64,
+    pub rtags: Vec<TagValue>,
+    pub key_tag_idx: usize,
+}
+
+impl RecordHeader for GenericCollatableHeader {
+    type RecordType = GenericReadRecord;
+    fn naln(&self) -> u32 {
+        self.naln
+    }
+}
+
+impl CollatableRecordHeader<u64> for GenericCollatableHeader {
+    fn collate_key(&self) -> u64 {
+        self.key
+    }
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        ctx: &GenericReadRecordContext,
+    ) -> anyhow::Result<()> {
+        RadIntId::U32
+            .write_to(self.naln, writer)
+            .context("couldn't write number of alignments for generic record")?;
+        for (td, tv) in ctx.read_tags.iter_desc().zip(self.rtags.iter()) {
+            tv.write_with_type(&td.typeid, writer)
+                .context("couldn't write read-level tag for generic record header")?;
+        }
+        Ok(())
+    }
+}
+
+impl KnownSize for GenericReadRecord {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        let read_bytes: usize = ctx
+            .read_tags
+            .iter_desc()
+            .map(|td| int_tag_bytes(&td.typeid))
+            .sum();
+        std::mem::size_of::<u32>() + read_bytes + (na as usize * Self::nbytes_aln(ctx))
+    }
+    fn nbytes_aln(ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        ctx.aln_tags
+            .iter_desc()
+            .map(|td| int_tag_bytes(&td.typeid))
+            .sum()
+    }
+}
+
+impl CollatableMappedRecord<u64> for GenericReadRecord {
+    type CollatableRecordHeader = GenericCollatableHeader;
+
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let key_tag_idx = ctx
+            .key_tag_idx
+            .context("generic record collated without a key_tag_idx in its context")?;
+        let mut nb = [0u8; 4];
+        reader.read_exact(&mut nb)?;
+        let naln = u32::from_le_bytes(nb);
+        let rtags: Vec<TagValue> = ctx
+            .read_tags
+            .iter_desc()
+            .map(|td| td.value_from_bytes(reader))
+            .collect();
+        let key = tag_value_as_u64(&rtags[key_tag_idx]);
+        Ok(GenericCollatableHeader {
+            naln,
+            key,
+            rtags,
+            key_tag_idx,
+        })
+    }
+
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        ctx: &<Self as MappedRecord>::ParsingContext,
+        _expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
+        // NOTE: orientation filtering is not yet applied for the generic record —
+        // all alignments are retained. The collate dispatch gates the generic path
+        // to non-orientation-filtering runs; see COMBINE-lab/libradicl#64/#66.
+        let naln_tags = ctx.aln_tags.iter_desc().len();
+        let mut atags = Vec::with_capacity(hdr.naln as usize * naln_tags);
+        for _ in 0..(hdr.naln as usize) {
+            for td in ctx.aln_tags.iter_desc() {
+                atags.push(td.value_from_bytes(reader));
+            }
+        }
+        Self {
+            naln: hdr.naln,
+            naln_tags: naln_tags as u32,
+            rtags: std::mem::take(&mut hdr.rtags),
+            atags,
+            key_tag_idx: hdr.key_tag_idx,
+        }
+    }
+
+    fn set_collate_key(&mut self, k: u64) {
+        set_tag_value_u64(&mut self.rtags[self.key_tag_idx], k);
+    }
+
+    fn collate_key(&self) -> u64 {
+        tag_value_as_u64(&self.rtags[self.key_tag_idx])
+    }
+
+    fn peek_collatable_header(
+        _reader: &[u8],
+        _context: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
+        unimplemented!("peek_collatable_header is not needed for the generic collation path")
     }
 }
 
