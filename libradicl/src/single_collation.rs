@@ -507,7 +507,13 @@ where
             _,
             AlevinFryReadRecordT<u64>,
         >(
-            reader, context, num_records, output, codec, cell_map
+            reader,
+            context,
+            num_records,
+            output,
+            chunk_index,
+            codec,
+            cell_map,
         ));
     };
 

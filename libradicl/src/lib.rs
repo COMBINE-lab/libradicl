@@ -317,6 +317,7 @@ pub fn collate_temporary_bucket_twopass_generic<
     rec_context: &<R as MappedRecord>::ParsingContext,
     nrec: u32,
     owriter: &Mutex<U>,
+    chunk_index: &Mutex<crate::codec::ChunkIndexBuilder>,
     codec: crate::codec::ChunkCodec,
     cb_byte_map: &mut HashMap<u64, TempCellInfo, impl std::hash::BuildHasher>,
 ) -> usize
@@ -436,7 +437,13 @@ where
         output_buffer.into_inner()
     };
 
-    owriter.lock().unwrap().write_all(&to_write).unwrap();
+    // Record this bucket's chunk offsets and append it under the same lock so the
+    // recorded offsets match the file position and stay in file order.
+    {
+        let mut w = owriter.lock().unwrap();
+        chunk_index.lock().unwrap().record_bucket(&to_write);
+        w.write_all(&to_write).unwrap();
+    }
 
     cb_byte_map.len()
 }

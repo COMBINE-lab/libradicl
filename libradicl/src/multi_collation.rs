@@ -848,7 +848,13 @@ where
             _,
             MultiBarcodeReadRecord,
         >(
-            reader, context, num_records, output, codec, cell_map
+            reader,
+            context,
+            num_records,
+            output,
+            chunk_index,
+            codec,
+            cell_map,
         ));
     }
 
