@@ -7,152 +7,243 @@
  * License: 3-clause BSD, see https://opensource.org/licenses/BSD-3-Clause
  */
 
-//! Parse-based generic collation core (step 1 of the collation-engine
-//! unification, see COMBINE-lab/libradicl#62).
+//! Generic, bounded-memory collation gather (see COMBINE-lab/libradicl#62).
 //!
-//! This is the record-type-agnostic heart of collation: given a bucket's
-//! records and a way to read one record's *collation key* and *on-disk length*,
-//! it groups records by key and emits one per-cell [`crate::chunk`]-format chunk
-//! each, applying a per-chunk [`ChunkCodec`]; the caller records the emitted
-//! chunks' offsets in a [`ChunkIndexBuilder`]. It is generic over the record type through the lean
-//! [`ScatterProbe`] trait and imposes **no** `KnownSize` bound, so it works for
-//! any record — fixed- or variable-length — including custom record types
-//! defined by external consumers of libradicl.
+//! [`collate_bucket`] is the one record-type-agnostic bucket gather all
+//! collation engines share. Given a temp bucket's records (already routed and
+//! corrected by scatter) as a seekable stream, it groups them by collation key
+//! and emits one per-cell [`crate::chunk`]-format chunk each, applying a per-chunk
+//! [`ChunkCodec`]. It streams the bucket in two passes and holds only the output
+//! (≈ one uncompressed bucket), never the whole input — so peak memory matches
+//! the historical two-pass rather than an in-memory copy.
 //!
-//! The parallel scatter/spill machinery and barcode-correction plan that wrap
-//! this core (retiring `single_collation` / `multi_collation` /
-//! `collate_temporary_bucket_twopass_generic`) are later steps of #62; this
-//! module establishes and tests the generic, extensible baseline.
+//! It is generic over the record type through [`CollationScan`], whose one method
+//! reads a record's collation key and on-disk length while advancing past it.
+//! Fixed-layout records override it with a raw key-read + arithmetic skip
+//! (optimal, no per-record parsing or `KnownSize`-free cost); any other record —
+//! including variable-length or custom types from external consumers — gets a
+//! parse-based scan via [`scan_by_parse`], with no `KnownSize` bound on the
+//! engine.
+//!
+//! The caller records the emitted chunks' offsets in a [`ChunkIndexBuilder`]
+//! (under its output-write lock, so offsets stay in file order).
 
-use crate::codec::{ChunkCodec, compress_payload};
+use crate::codec::ChunkCodec;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::io::Cursor;
+use std::io::{Read, Seek, SeekFrom};
 
-/// The contract a record type satisfies to be collatable by the generic engine.
+/// A record type the collation gather can group. Implementors read exactly one
+/// on-disk record from `r` (positioned at its start), advance `r` to the next
+/// record, and return the record's collation key and its on-disk byte length.
 ///
-/// A `ScatterProbe` reads exactly one on-disk record starting at the cursor,
-/// advances the cursor past it, and returns the record's collation key (e.g. the
-/// corrected barcode as a `u64`). The cursor advance is what lets the engine
-/// relocate the record's *raw bytes* without re-serializing, so the record's
-/// on-disk length need not be known ahead of time.
-///
-/// The default obligation is a full parse — which works for any record,
-/// including variable-length ones (their parse reads the variable fields and the
-/// cursor advance yields the exact length). A record whose layout permits it may
-/// implement `probe` as a cheaper key-read plus arithmetic skip; that
-/// optimization lives entirely in the impl and is invisible to the engine.
-pub trait ScatterProbe {
+/// The length lets the gather relocate the record's raw bytes without
+/// re-serializing. Fixed-layout records should implement `scan` as a raw key-read
+/// plus an arithmetic `seek` over the alignment block (see [`scan_fixed_bc_umi`]);
+/// records that can't (variable-length, or any [`CollatableMappedRecord`] a
+/// consumer would rather not hand-optimize) can defer to [`scan_by_parse`].
+pub trait CollationScan {
     /// Parsing context (RAD tags etc.); `()` when none is needed.
     type Ctx;
 
-    /// Advance `cursor` past exactly one record and return its collation key.
-    fn probe(cursor: &mut Cursor<&[u8]>, ctx: &Self::Ctx) -> anyhow::Result<u64>;
+    /// Read the next record's collation key and advance past it; return
+    /// `(key, on_disk_len_bytes)`.
+    fn scan<R: Read + Seek>(r: &mut R, ctx: &Self::Ctx) -> anyhow::Result<(u128, usize)>;
 }
 
-// --- `ScatterProbe` for the built-in single-barcode-family records ---
-//
-// These are the parse-based (correctness-baseline) probes: read the record via
-// its `MappedRecord` impl (the cursor advances by exactly the record's on-disk
-// length) and return its collation key. A faster raw-read + arithmetic-skip
-// override for the fixed-stride layouts is a later step (#62); these establish
-// that every built-in record collates through the generic core, at any barcode
-// width, without a `KnownSize` bound on the engine.
-macro_rules! parse_scatter_probe {
-    ($rec:ident, $ctx:path) => {
-        impl<B> ScatterProbe for crate::record::$rec<B>
+/// Parse-based [`CollationScan::scan`] for any [`CollatableMappedRecord`]: parse
+/// one record (advancing `r`) and measure its length from the stream position.
+/// Works for fixed- and variable-length records alike; needs no `KnownSize`.
+pub fn scan_by_parse<T, B, R>(r: &mut R, ctx: &T::ParsingContext) -> anyhow::Result<(u128, usize)>
+where
+    B: crate::record::ConvertiblePrimitiveInteger,
+    u128: From<B>,
+    T: crate::record::CollatableMappedRecord<B>,
+    R: Read + Seek,
+{
+    use crate::record::MappedRecord;
+    let start = r.stream_position()?;
+    let rec = <T as MappedRecord>::from_bytes_with_context(r, ctx);
+    let len = (r.stream_position()? - start) as usize;
+    Ok((u128::from(rec.collate_key()), len))
+}
+
+/// Fast [`CollationScan::scan`] for records with a fixed `[na:u32][bc][umi]`
+/// header followed by `na` fixed-`stride` alignments (the alevin-fry
+/// single-barcode family). Reads `na` and the barcode (the key), then seeks over
+/// the umi and alignment block — no per-alignment parsing. `bct`/`umit` are the
+/// barcode/umi integer widths and `stride` is the per-alignment byte size
+/// (`KnownSize::nbytes_aln`).
+pub fn scan_fixed_bc_umi<R: Read + Seek>(
+    r: &mut R,
+    bct: crate::rad_types::RadIntId,
+    umit: crate::rad_types::RadIntId,
+    stride: usize,
+) -> anyhow::Result<(u128, usize)> {
+    let mut na_buf = [0u8; 4];
+    r.read_exact(&mut na_buf)?;
+    let na = u32::from_le_bytes(na_buf) as usize;
+    let key = bct.read_value_into_u128(r);
+    let skip = umit.bytes_for_type() + na * stride;
+    r.seek_relative(skip as i64)?;
+    let len = 4 + bct.bytes_for_type() + skip;
+    Ok((key, len))
+}
+
+// --- `CollationScan` for the built-in single-barcode-family records (fast) ---
+macro_rules! fixed_bc_umi_scan {
+    ($rec:ident) => {
+        impl<B> CollationScan for crate::record::$rec<B>
         where
             B: crate::record::ConvertiblePrimitiveInteger,
-            u64: From<B>,
-            crate::record::$rec<B>: crate::record::MappedRecord<ParsingContext = $ctx>
-                + crate::record::CollatableMappedRecord<B>,
+            crate::record::$rec<B>: crate::record::MappedRecord<
+                    ParsingContext = crate::record::AlevinFryRecordContext,
+                > + crate::record::KnownSize,
         {
-            type Ctx = $ctx;
-            fn probe(cursor: &mut Cursor<&[u8]>, ctx: &$ctx) -> anyhow::Result<u64> {
-                use crate::record::{CollatableMappedRecord, MappedRecord};
-                let rec = <crate::record::$rec<B>>::from_bytes_with_context(cursor, ctx);
-                Ok(u64::from(rec.collate_key()))
+            type Ctx = crate::record::AlevinFryRecordContext;
+            fn scan<R: Read + Seek>(
+                r: &mut R,
+                ctx: &crate::record::AlevinFryRecordContext,
+            ) -> anyhow::Result<(u128, usize)> {
+                let stride = <crate::record::$rec<B> as crate::record::KnownSize>::nbytes_aln(ctx);
+                scan_fixed_bc_umi(r, ctx.bct, ctx.umit, stride)
             }
         }
     };
 }
+fixed_bc_umi_scan!(AlevinFryReadRecordT);
+fixed_bc_umi_scan!(AlevinFryReadRecordWithPositionT);
 
-parse_scatter_probe!(AlevinFryReadRecordT, crate::record::AlevinFryRecordContext);
-parse_scatter_probe!(
-    AlevinFryReadRecordWithPositionT,
-    crate::record::AlevinFryRecordContext
-);
-parse_scatter_probe!(ScLongReadRecordT, crate::record::ScLongReadRecordContext);
+// ScLong shares the `[na][bc][umi]` header + fixed per-alignment stride, but a
+// distinct context type.
+impl<B> CollationScan for crate::record::ScLongReadRecordT<B>
+where
+    B: crate::record::ConvertiblePrimitiveInteger,
+    crate::record::ScLongReadRecordT<B>: crate::record::MappedRecord<ParsingContext = crate::record::ScLongReadRecordContext>
+        + crate::record::KnownSize,
+{
+    type Ctx = crate::record::ScLongReadRecordContext;
+    fn scan<R: Read + Seek>(
+        r: &mut R,
+        ctx: &crate::record::ScLongReadRecordContext,
+    ) -> anyhow::Result<(u128, usize)> {
+        let stride =
+            <crate::record::ScLongReadRecordT<B> as crate::record::KnownSize>::nbytes_aln(ctx);
+        scan_fixed_bc_umi(r, ctx.bct, ctx.umit, stride)
+    }
+}
 
-/// Collate one bucket of records: group by [`ScatterProbe`] key and append one
-/// per-cell chunk per key to `out`, each `[nbytes: u32][nrec: u32][payload]`
-/// where `nbytes` counts the 8-byte header and `payload` is `codec`-compressed
-/// (verbatim for [`ChunkCodec::None`]) — the same on-disk shape the standard and
-/// parallel readers consume. Keys are emitted in first-seen order (deterministic
-/// for a given input). Returns the number of chunks (distinct keys) written.
+/// Collate one temp bucket: group its `num_records` records (a seekable stream
+/// positioned at the bucket start) by [`CollationScan`] key and append one
+/// per-cell chunk per key to `out` — each `[nbytes:u32][nrec:u32][payload]`,
+/// `payload` `codec`-compressed (verbatim for [`ChunkCodec::None`]). Keys are
+/// emitted in first-seen order (deterministic). Returns the number of chunks
+/// written.
 ///
-/// This only emits chunk bytes; recording their offsets in a
-/// [`ChunkIndexBuilder`] is the caller's job (call
-/// [`ChunkIndexBuilder::record_bucket`] on the appended region), so a parallel
-/// caller can serialize index recording with the output write under one lock and
-/// keep offsets in file order.
+/// Two-pass and bounded-memory: pass one scans each record for `(key, len)`
+/// (fixed records seek past alignments; others parse) and sizes the per-cell
+/// chunks; pass two rewinds and relocates each record's raw bytes into its cell's
+/// slot. Peak memory is the output buffer (≈ one uncompressed bucket) plus a
+/// small per-record `(key, len)` table — never the whole input at once.
 ///
-/// `input` holds `num_records` records in their on-disk encoding; the engine
-/// copies each record's raw bytes verbatim, so no `KnownSize`/re-serialization is
-/// required and variable-length records are handled transparently.
-pub fn collate_bucket<P: ScatterProbe>(
-    input: &[u8],
+/// The caller records the appended region's offsets via
+/// [`ChunkIndexBuilder::record_bucket`](crate::codec::ChunkIndexBuilder::record_bucket).
+pub fn collate_bucket<S, R>(
+    reader: &mut R,
     num_records: usize,
-    ctx: &P::Ctx,
+    ctx: &S::Ctx,
     codec: ChunkCodec,
     out: &mut Vec<u8>,
-) -> anyhow::Result<usize> {
-    // First pass: parse each record for its key and byte span, preserving
-    // first-seen key order for a deterministic chunk layout.
-    let mut cursor = Cursor::new(input);
-    let mut order: Vec<u64> = Vec::new();
-    let mut spans: HashMap<u64, Vec<(usize, usize)>> = HashMap::new();
-    for r in 0..num_records {
-        let start = cursor.position() as usize;
-        let key = P::probe(&mut cursor, ctx)?;
-        let end = cursor.position() as usize;
-        if end <= start || end > input.len() {
-            anyhow::bail!(
-                "record {r} probe advanced {start}->{end} outside the bucket (len {})",
-                input.len()
-            );
-        }
-        match spans.entry(key) {
+) -> anyhow::Result<usize>
+where
+    S: CollationScan,
+    R: Read + Seek,
+{
+    const CHUNK_HEADER: usize = 8; // [nbytes: u32][nrec: u32]
+    let base = reader.stream_position()?;
+
+    // Pass 1: scan for keys + lengths; size per-cell chunks (first-seen order).
+    let mut order: Vec<u128> = Vec::new();
+    let mut cells: HashMap<u128, CellSize> = HashMap::new();
+    let mut recs: Vec<(u128, u32)> = Vec::with_capacity(num_records);
+    for i in 0..num_records {
+        let (key, len) = S::scan(reader, ctx)?;
+        match cells.entry(key) {
             Entry::Vacant(e) => {
                 order.push(key);
-                e.insert(vec![(start, end - start)]);
+                e.insert(CellSize {
+                    payload_bytes: len,
+                    nrec: 1,
+                });
             }
-            Entry::Occupied(mut e) => e.get_mut().push((start, end - start)),
+            Entry::Occupied(mut e) => {
+                let c = e.get_mut();
+                c.payload_bytes += len;
+                c.nrec += 1;
+            }
         }
+        recs.push((
+            key,
+            u32::try_from(len).map_err(|_| anyhow::anyhow!("record {i} exceeds u32 bytes"))?,
+        ));
     }
 
-    // Second pass: one chunk per key, codec-compressed.
-    for key in &order {
-        let recs = &spans[key];
-        let nrec = recs.len() as u32;
-        let mut payload = Vec::new();
-        for &(s, l) in recs {
-            payload.extend_from_slice(&input[s..s + l]);
+    // Lay out the uncompressed output: one chunk per cell, in first-seen order.
+    let mut total = 0usize;
+    let mut write_cursor: HashMap<u128, usize> = HashMap::with_capacity(order.len());
+    for &key in &order {
+        let c = &cells[&key];
+        let chunk_off = total;
+        write_cursor.insert(key, chunk_off + CHUNK_HEADER);
+        total += CHUNK_HEADER + c.payload_bytes;
+    }
+    let mut buf = vec![0u8; total];
+    // chunk headers
+    let mut off = 0usize;
+    for &key in &order {
+        let c = &cells[&key];
+        let nbytes = (CHUNK_HEADER + c.payload_bytes) as u32;
+        buf[off..off + 4].copy_from_slice(&nbytes.to_le_bytes());
+        buf[off + 4..off + 8].copy_from_slice(&c.nrec.to_le_bytes());
+        off += CHUNK_HEADER + c.payload_bytes;
+    }
+
+    // Pass 2: rewind and relocate each record's raw bytes into its cell's slot.
+    reader.seek(SeekFrom::Start(base))?;
+    let mut scratch = vec![0u8; 64 * 1024];
+    for &(key, len) in &recs {
+        let len = len as usize;
+        if scratch.len() < len {
+            scratch.resize(len, 0);
         }
-        let comp = compress_payload(codec, &payload)?;
-        let nbytes = (comp.len() as u32) + 8;
-        out.extend_from_slice(&nbytes.to_le_bytes());
-        out.extend_from_slice(&nrec.to_le_bytes());
-        out.extend_from_slice(&comp);
+        reader.read_exact(&mut scratch[..len])?;
+        let w = write_cursor
+            .get_mut(&key)
+            .expect("cell present from pass 1");
+        buf[*w..*w + len].copy_from_slice(&scratch[..len]);
+        *w += len;
+    }
+
+    // Apply the per-chunk codec (verbatim for None) and append.
+    if codec == ChunkCodec::None {
+        out.extend_from_slice(&buf);
+    } else {
+        let compressed = crate::codec::recompress_bucket_per_chunk(&buf, codec)?;
+        out.extend_from_slice(&compressed);
     }
     Ok(order.len())
+}
+
+struct CellSize {
+    payload_bytes: usize,
+    nrec: u32,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec::{ChunkIndexBuilder, decompress_payload};
-    use std::io::Read;
+    use std::io::Cursor;
 
     fn ru32(c: &mut Cursor<&[u8]>) -> anyhow::Result<u32> {
         let mut b = [0u8; 4];
@@ -165,38 +256,45 @@ mod tests {
         Ok(u16::from_le_bytes(b))
     }
 
-    // --- Two custom record types that implement only `ScatterProbe` (not the
-    // full `CollatableMappedRecord`), standing in for an external consumer's
-    // record. One is fixed-stride, one is genuinely variable-length. ---
+    // --- Two custom record types implementing only `CollationScan` (standing in
+    // for an external consumer's record): one fixed-stride, one variable-length. ---
 
-    /// Fixed-stride: `[na:u32][bc:u32][umi:u32][na × u32 alignment]`.
+    /// Fixed-stride: `[na:u32][bc:u32][umi:u32][na × u32]`.
     struct FixedRec;
-    impl ScatterProbe for FixedRec {
+    impl CollationScan for FixedRec {
         type Ctx = ();
-        fn probe(cursor: &mut Cursor<&[u8]>, _ctx: &()) -> anyhow::Result<u64> {
-            let na = ru32(cursor)?;
-            let bc = ru32(cursor)?;
-            let _umi = ru32(cursor)?;
-            cursor.set_position(cursor.position() + (na as u64) * 4); // skip alignments
-            Ok(bc as u64)
+        fn scan<R: Read + Seek>(r: &mut R, _ctx: &()) -> anyhow::Result<(u128, usize)> {
+            let mut b = [0u8; 4];
+            r.read_exact(&mut b)?;
+            let na = u32::from_le_bytes(b) as usize;
+            r.read_exact(&mut b)?;
+            let bc = u32::from_le_bytes(b) as u128;
+            let skip = 4 + na * 4; // umi + alignments
+            r.seek_relative(skip as i64)?;
+            Ok((bc, 8 + skip))
         }
     }
 
-    /// Variable-length: `[na:u32][bc:u32]` then `na` alignments, each a
-    /// length-prefixed blob `[len:u16][len bytes]` (a stand-in for a
-    /// CIGAR-carrying record whose per-alignment size is data-dependent and so
-    /// cannot implement `KnownSize`).
+    /// Variable-length: `[na:u32][bc:u32]` then `na` × `[len:u16][len bytes]`
+    /// (data-dependent per-alignment size; cannot implement `KnownSize`).
     struct VarRec;
-    impl ScatterProbe for VarRec {
+    impl CollationScan for VarRec {
         type Ctx = ();
-        fn probe(cursor: &mut Cursor<&[u8]>, _ctx: &()) -> anyhow::Result<u64> {
-            let na = ru32(cursor)?;
-            let bc = ru32(cursor)?;
+        fn scan<R: Read + Seek>(r: &mut R, _ctx: &()) -> anyhow::Result<(u128, usize)> {
+            let mut b4 = [0u8; 4];
+            r.read_exact(&mut b4)?;
+            let na = u32::from_le_bytes(b4) as usize;
+            r.read_exact(&mut b4)?;
+            let bc = u32::from_le_bytes(b4) as u128;
+            let mut len = 8usize;
+            let mut b2 = [0u8; 2];
             for _ in 0..na {
-                let len = ru16(cursor)? as u64;
-                cursor.set_position(cursor.position() + len); // skip the variable blob
+                r.read_exact(&mut b2)?;
+                let l = u16::from_le_bytes(b2) as usize;
+                r.seek_relative(l as i64)?;
+                len += 2 + l;
             }
-            Ok(bc as u64)
+            Ok((bc, len))
         }
     }
 
@@ -222,15 +320,13 @@ mod tests {
         v
     }
 
-    /// Walk the collated `out` chunks; for each, decompress the payload and
-    /// return `(bc, per_record_bytes)` by re-probing, verifying every record in
-    /// a chunk shares the chunk's barcode. Returns `Vec<(bc, nrec)>` in file
-    /// order plus the total record count seen.
-    fn read_back<P: ScatterProbe>(
+    /// Walk the collated `out`; decompress each chunk and re-scan its records,
+    /// asserting one barcode per chunk. Returns `(bc, nrec)` per chunk + total.
+    fn read_back<S: CollationScan>(
         out: &[u8],
         codec: ChunkCodec,
-        ctx: &P::Ctx,
-    ) -> (Vec<(u64, u32)>, usize) {
+        ctx: &S::Ctx,
+    ) -> (Vec<(u128, u32)>, usize) {
         let mut chunks = Vec::new();
         let mut total = 0usize;
         let mut pos = 0usize;
@@ -238,13 +334,12 @@ mod tests {
             let nbytes = u32::from_le_bytes(out[pos..pos + 4].try_into().unwrap()) as usize;
             let nrec = u32::from_le_bytes(out[pos + 4..pos + 8].try_into().unwrap());
             let payload = decompress_payload(codec, &out[pos + 8..pos + nbytes]).unwrap();
-            // re-probe every record in the (decompressed) payload
             let mut cur = Cursor::new(payload.as_slice());
-            let mut chunk_bc: Option<u64> = None;
+            let mut bc = None;
             for _ in 0..nrec {
-                let bc = P::probe(&mut cur, ctx).unwrap();
-                assert!(chunk_bc.is_none_or(|c| c == bc), "chunk mixed barcodes");
-                chunk_bc = Some(bc);
+                let (k, _len) = S::scan(&mut cur, ctx).unwrap();
+                assert!(bc.is_none_or(|c| c == k), "chunk mixed barcodes");
+                bc = Some(k);
                 total += 1;
             }
             assert_eq!(
@@ -252,39 +347,31 @@ mod tests {
                 payload.len(),
                 "trailing bytes in chunk"
             );
-            chunks.push((chunk_bc.unwrap(), nrec));
+            chunks.push((bc.unwrap(), nrec));
             pos += nbytes;
         }
         assert_eq!(pos, out.len());
         (chunks, total)
     }
 
-    fn run_case<P: ScatterProbe<Ctx = ()>>(input: Vec<u8>, num_records: usize) {
-        // Barcodes present (first-seen order) and their record counts.
+    fn run_case<S: CollationScan<Ctx = ()>>(input: Vec<u8>, num_records: usize) {
         for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
             let mut out = Vec::new();
-            let n_chunks = collate_bucket::<P>(&input, num_records, &(), codec, &mut out).unwrap();
+            let mut cur = Cursor::new(input.as_slice());
+            let n_chunks =
+                collate_bucket::<S, _>(&mut cur, num_records, &(), codec, &mut out).unwrap();
 
-            let (chunks, total) = read_back::<P>(&out, codec, &());
-            assert_eq!(total, num_records, "all records survive collation");
-            assert_eq!(chunks.len(), n_chunks, "one chunk per distinct barcode");
-            // barcodes are unique per chunk (grouping is complete)
-            let mut bcs: Vec<u64> = chunks.iter().map(|c| c.0).collect();
+            let (chunks, total) = read_back::<S>(&out, codec, &());
+            assert_eq!(total, num_records);
+            assert_eq!(chunks.len(), n_chunks);
             let unique = {
-                let mut b = bcs.clone();
+                let mut b: Vec<u128> = chunks.iter().map(|c| c.0).collect();
                 b.sort_unstable();
                 b.dedup();
                 b.len()
             };
-            assert_eq!(
-                unique,
-                chunks.len(),
-                "each barcode appears in exactly one chunk"
-            );
-            bcs.sort_unstable();
+            assert_eq!(unique, chunks.len(), "each barcode in exactly one chunk");
 
-            // chunk index: n_chunks + 1 offsets, last == collated byte length,
-            // offsets strictly increasing and landing on chunk boundaries.
             let mut index = ChunkIndexBuilder::default();
             index.record_bucket(&out);
             let offsets = index.into_offsets();
@@ -302,7 +389,6 @@ mod tests {
 
     #[test]
     fn fixed_record_collates_and_groups() {
-        // barcodes 7,3,7,3,9 -> 3 cells (7:2, 3:2, 9:1), variable #alignments.
         let recs = [
             fixed_rec_bytes(7, 100, &[1, 2, 3]),
             fixed_rec_bytes(3, 101, &[4]),
@@ -311,14 +397,11 @@ mod tests {
             fixed_rec_bytes(9, 104, &[7, 8, 9, 10]),
         ];
         let n = recs.len();
-        let input: Vec<u8> = recs.concat();
-        run_case::<FixedRec>(input, n);
+        run_case::<FixedRec>(recs.concat(), n);
     }
 
     #[test]
     fn variable_length_record_collates_and_groups() {
-        // A record type that cannot implement KnownSize (data-dependent
-        // per-alignment size) still collates end-to-end via the parse default.
         let recs = [
             var_rec_bytes(42, &[b"MMMM", b"II"]),
             var_rec_bytes(5, &[b"S"]),
@@ -327,8 +410,13 @@ mod tests {
             var_rec_bytes(42, &[]),
         ];
         let n = recs.len();
-        let input: Vec<u8> = recs.concat();
-        run_case::<VarRec>(input, n);
+        run_case::<VarRec>(recs.concat(), n);
+    }
+
+    #[test]
+    fn single_barcode_single_chunk() {
+        let recs = [fixed_rec_bytes(1, 0, &[1]), fixed_rec_bytes(1, 1, &[2, 3])];
+        run_case::<FixedRec>(recs.concat(), 2);
     }
 
     /// On-disk `AlevinFryReadRecordT<u64>`: `[na:u32][bc:u64][umi:u64][na×u32]`.
@@ -344,9 +432,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_alevin_fry_record_collates_via_core() {
-        // A real built-in record type collates through the generic core via its
-        // `ScatterProbe` impl (proving the wiring, not just synthetic records).
+    fn builtin_alevin_fry_record_collates_via_fast_scan() {
+        // A real built-in record collates through the generic gather via its fast
+        // `CollationScan` override (raw key-read + arithmetic skip).
         use crate::rad_types::RadIntId;
         use crate::record::{AlevinFryReadRecordT, AlevinFryRecordContext};
         let ctx = AlevinFryRecordContext {
@@ -361,31 +449,20 @@ mod tests {
             af_u64(9, 104, &[7]),
         ];
         let n = recs.len();
-        let input: Vec<u8> = recs.concat();
+        let input = recs.concat();
         for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
             let mut out = Vec::new();
+            let mut cur = Cursor::new(input.as_slice());
             let nchunks =
-                collate_bucket::<AlevinFryReadRecordT<u64>>(&input, n, &ctx, codec, &mut out)
+                collate_bucket::<AlevinFryReadRecordT<u64>, _>(&mut cur, n, &ctx, codec, &mut out)
                     .unwrap();
             let (chunks, total) = read_back::<AlevinFryReadRecordT<u64>>(&out, codec, &ctx);
             assert_eq!(total, n);
-            assert_eq!(nchunks, 3, "barcodes 7,3,9 -> 3 cells");
-            let m: std::collections::HashMap<u64, u32> = chunks.into_iter().collect();
+            assert_eq!(nchunks, 3);
+            let m: std::collections::HashMap<u128, u32> = chunks.into_iter().collect();
             assert_eq!(m[&7], 2);
             assert_eq!(m[&3], 2);
             assert_eq!(m[&9], 1);
-            let mut index = ChunkIndexBuilder::default();
-            index.record_bucket(&out);
-            let offs = index.into_offsets();
-            assert_eq!(offs.len(), nchunks + 1);
-            assert_eq!(*offs.last().unwrap(), out.len() as u64);
         }
-    }
-
-    #[test]
-    fn single_barcode_single_chunk() {
-        let recs = [fixed_rec_bytes(1, 0, &[1]), fixed_rec_bytes(1, 1, &[2, 3])];
-        let input: Vec<u8> = recs.concat();
-        run_case::<FixedRec>(input, 2);
     }
 }
