@@ -18,12 +18,11 @@ use crate::record::{
     CollatableMappedRecord, CollatableRecordHeader, KnownSize, RecordHeader,
     SingleBarcodeRecordScratch,
 };
-use crate::schema::TempCellInfo;
 use ahash::AHashMap;
 use anyhow::{Context, bail};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use scroll::Pread;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -367,10 +366,8 @@ where
         let output = output.clone();
         let chunk_index = chunk_index.clone();
         gather_handles.push(thread::spawn(move || -> anyhow::Result<u64> {
-            let mut cell_map = crate::schema::U64Map::<TempCellInfo>::default();
             let mut chunks = 0_u64;
             for bucket_id in bucket_rx {
-                cell_map.clear();
                 let stats = spools
                     .bucket_stats(bucket_id)
                     .context("missing spool bucket statistics")?;
@@ -388,7 +385,6 @@ where
                     &output,
                     &chunk_index,
                     options.chunk_codec,
-                    &mut cell_map,
                 )? as u64;
             }
             Ok(chunks)
@@ -494,103 +490,23 @@ fn collate_single_barcode_bucket<T, W>(
     output: &Mutex<W>,
     chunk_index: &Mutex<ChunkIndexBuilder>,
     codec: ChunkCodec,
-    cell_map: &mut crate::schema::U64Map<TempCellInfo>,
 ) -> anyhow::Result<usize>
 where
     T: Read + Seek,
     W: Write,
 {
-    let Some(fixed_layout) = fixed_record_layout(context) else {
-        return Ok(crate::collate_temporary_bucket_twopass_generic::<
-            u64,
-            _,
-            _,
-            AlevinFryReadRecordT<u64>,
-        >(
-            reader,
-            context,
-            num_records,
-            output,
-            chunk_index,
-            codec,
-            cell_map,
-        ));
-    };
-
-    const CHUNK_HEADER_BYTES: usize = 8;
-    const ALIGNMENT_BYTES: usize = 4;
-    let record_header_bytes = match fixed_layout {
-        FixedRecordLayout::U32Pair => 12,
-        FixedRecordLayout::U64Pair => 20,
-    };
-    let mut header = vec![0_u8; record_header_bytes];
-    let mut alignment_buffer = vec![0_u8; 64 * 1024];
-    let mut total_bytes = 0_usize;
-
-    for _ in 0..num_records {
-        reader.read_exact(&mut header)?;
-        let num_alignments = header.pread::<u32>(0)? as usize;
-        let barcode = match fixed_layout {
-            FixedRecordLayout::U32Pair => u64::from(header.pread::<u32>(4)?),
-            FixedRecordLayout::U64Pair => header.pread::<u64>(4)?,
-        };
-        let record_bytes = record_header_bytes + ALIGNMENT_BYTES * num_alignments;
-        let cell_info = cell_map.entry(barcode).or_insert(TempCellInfo {
-            offset: CHUNK_HEADER_BYTES as u64,
-            nbytes: CHUNK_HEADER_BYTES as u32,
-            nrec: 0,
-        });
-        cell_info.offset += record_bytes as u64;
-        cell_info.nbytes += record_bytes as u32;
-        cell_info.nrec += 1;
-        total_bytes += record_bytes;
-
-        let alignment_bytes = ALIGNMENT_BYTES * num_alignments;
-        if alignment_buffer.len() < alignment_bytes {
-            alignment_buffer.resize(alignment_bytes, 0);
-        }
-        reader.read_exact(&mut alignment_buffer[..alignment_bytes])?;
-    }
-
-    total_bytes += cell_map.len() * CHUNK_HEADER_BYTES;
-    let mut output_buffer = Cursor::new(vec![0_u8; total_bytes]);
-    let mut next_offset = 0_u64;
-    for cell_info in cell_map.values_mut() {
-        output_buffer.set_position(next_offset);
-        output_buffer.write_all(&cell_info.nbytes.to_le_bytes())?;
-        output_buffer.write_all(&cell_info.nrec.to_le_bytes())?;
-        cell_info.offset = output_buffer.position();
-        next_offset += u64::from(cell_info.nbytes);
-    }
-
-    reader.seek(SeekFrom::Start(0))?;
-    for _ in 0..num_records {
-        reader.read_exact(&mut header)?;
-        let num_alignments = header.pread::<u32>(0)? as usize;
-        let barcode = match fixed_layout {
-            FixedRecordLayout::U32Pair => u64::from(header.pread::<u32>(4)?),
-            FixedRecordLayout::U64Pair => header.pread::<u64>(4)?,
-        };
-        let cell_info = cell_map
-            .get_mut(&barcode)
-            .context("cell disappeared between collation passes")?;
-        output_buffer.set_position(cell_info.offset);
-        output_buffer.write_all(&header)?;
-
-        let alignment_bytes = ALIGNMENT_BYTES * num_alignments;
-        if alignment_buffer.len() < alignment_bytes {
-            alignment_buffer.resize(alignment_bytes, 0);
-        }
-        reader.read_exact(&mut alignment_buffer[..alignment_bytes])?;
-        output_buffer.write_all(&alignment_buffer[..alignment_bytes])?;
-        cell_info.offset = output_buffer.position();
-    }
-
-    let to_write: Vec<u8> = if codec != ChunkCodec::None {
-        crate::codec::recompress_bucket_per_chunk(output_buffer.get_ref(), codec)?
-    } else {
-        output_buffer.into_inner()
-    };
+    // Collate this bucket through the unified streaming gather (bounded memory,
+    // per-chunk codec), then record its chunk offsets and append it under one
+    // lock so the index stays in file order. The gather's fast `CollationScan`
+    // handles any barcode/umi width, so no fixed-layout special-case is needed.
+    let mut out = Vec::new();
+    let chunks = crate::collate_generic::collate_bucket::<AlevinFryReadRecordT<u64>, _>(
+        reader,
+        num_records as usize,
+        context,
+        codec,
+        &mut out,
+    )?;
     {
         let mut w = output
             .lock()
@@ -598,10 +514,10 @@ where
         chunk_index
             .lock()
             .map_err(|_| anyhow::anyhow!("chunk index mutex was poisoned"))?
-            .record_bucket(&to_write);
-        w.write_all(&to_write)?;
+            .record_bucket(&out);
+        w.write_all(&out)?;
     }
-    Ok(cell_map.len())
+    Ok(chunks)
 }
 
 #[inline]
