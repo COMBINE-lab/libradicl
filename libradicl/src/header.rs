@@ -476,6 +476,58 @@ mod tests {
         assert_eq!(vb.len() - lb.len(), crate::constants::RAD_MAGIC.len() + 2);
     }
 
+    /// A writer can produce a versioned prelude *from scratch* (magic + version +
+    /// per-tag roles) that reads back intact — not just by copying a v2 source.
+    #[test]
+    fn prelude_v2_with_roles_roundtrips() {
+        use crate::rad_types::{RadIntId, RadType, TagDesc, TagRole};
+        let int = |n: &str, i: RadIntId, role: TagRole| TagDesc {
+            name: n.to_string(),
+            typeid: RadType::Int(i),
+            role,
+        };
+        let hdr = RadHeader {
+            major_version: crate::constants::RAD_SPEC_MAJOR,
+            minor_version: crate::constants::RAD_SPEC_MINOR,
+            is_paired: 0,
+            ref_count: 1,
+            ref_names: vec!["r0".to_string()],
+            num_chunks: 3,
+        };
+        let file_tags = TagSection {
+            label: TagSectionLabel::FileTags,
+            tags: vec![int("cblen", RadIntId::U16, TagRole::None)],
+        };
+        let read_tags = TagSection {
+            label: TagSectionLabel::ReadTags,
+            tags: vec![
+                int("b", RadIntId::U32, TagRole::Barcode { level: 0 }),
+                int("u", RadIntId::U32, TagRole::Umi),
+            ],
+        };
+        let aln_tags = TagSection {
+            label: TagSectionLabel::AlignmentTags,
+            tags: vec![int("cor", RadIntId::U32, TagRole::Orientation)],
+        };
+        let prelude = RadPrelude::from_header_and_tag_sections(hdr, file_tags, read_tags, aln_tags);
+
+        let mut buf = Vec::new();
+        prelude.write(&mut buf).unwrap();
+        assert_eq!(
+            &buf[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+
+        let rp = RadPrelude::from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(rp.hdr.major_version, crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(rp.hdr.minor_version, crate::constants::RAD_SPEC_MINOR);
+        assert_eq!(rp.hdr.ref_names, vec!["r0".to_string()]);
+        assert_eq!(rp.read_tags.tags[0].role, TagRole::Barcode { level: 0 });
+        assert_eq!(rp.read_tags.tags[1].role, TagRole::Umi);
+        assert_eq!(rp.aln_tags.tags[0].role, TagRole::Orientation);
+        assert_eq!(rp.file_tags.tags[0].role, TagRole::None);
+    }
+
     /// A file whose major version exceeds what this build supports must be
     /// refused (not silently misparsed); a higher minor within the supported
     /// major is accepted.
