@@ -12,10 +12,86 @@
 
 use crate::{self as libradicl};
 use anyhow::{self, Context};
+use libradicl::rad_types::{RadType, TagSection};
 use libradicl::record::MappedRecord;
 use scroll::Pread;
 use std::io::{Cursor, Read};
 use std::io::{Seek, SeekFrom, Write};
+
+/// Best-effort field-completeness self-check on the next chunk: verify its
+/// `nrec` records exactly fill the chunk payload under the layout *declared by the
+/// tag sections* (each record = `na:u32` + read-level tags + `na ×` alignment-level
+/// tags). `reader` must be positioned at a chunk header (`[nbytes:u32][nrec:u32]`).
+///
+/// This catches on-disk records that are larger (or smaller) than their tags
+/// describe — e.g. an undeclared per-record field — at first read, with a clear
+/// error, rather than as a truncated-buffer panic deep in a pipeline (the failure
+/// mode that made a divergent long-read RAD unreadable, COMBINE-lab/libradicl#64).
+///
+/// It is arithmetic and cheap, but only applies when every read/alignment tag is a
+/// fixed-width integer; if any tag is variable-width (e.g. a `String`/`Array`) the
+/// per-record size can't be computed this way and the check is skipped (`Ok`).
+/// An empty reader (no chunk) is also `Ok`.
+pub fn validate_first_chunk_layout<T: Read>(
+    reader: &mut T,
+    read_tags: &TagSection,
+    aln_tags: &TagSection,
+) -> anyhow::Result<()> {
+    // Fixed read-header (na + read tags) and per-alignment stride from the tags;
+    // bail out to `Ok` (skip) if any field is variable-width.
+    let mut read_bytes = 0usize;
+    for td in &read_tags.tags {
+        match td.typeid {
+            RadType::Int(i) => read_bytes += i.bytes_for_type(),
+            _ => return Ok(()),
+        }
+    }
+    let mut aln_stride = 0usize;
+    for td in &aln_tags.tags {
+        match td.typeid {
+            RadType::Int(i) => aln_stride += i.bytes_for_type(),
+            _ => return Ok(()),
+        }
+    }
+    let rec_hdr = std::mem::size_of::<u32>() + read_bytes; // na + read tags
+
+    let mut hb = [0u8; 8];
+    if reader.read_exact(&mut hb).is_err() {
+        return Ok(()); // no chunk to check
+    }
+    let nbytes = u32::from_le_bytes(hb[0..4].try_into().unwrap()) as usize;
+    let nrec = u32::from_le_bytes(hb[4..8].try_into().unwrap()) as usize;
+    anyhow::ensure!(nbytes >= 8, "chunk header claims nbytes={nbytes} (< 8)");
+    let payload = nbytes - 8;
+    let mut buf = vec![0u8; payload];
+    reader
+        .read_exact(&mut buf)
+        .context("first chunk is truncated relative to its declared nbytes")?;
+
+    let mut off = 0usize;
+    for i in 0..nrec {
+        anyhow::ensure!(
+            off + rec_hdr <= payload,
+            "record {i} header overruns the chunk payload; on-disk records do not match \
+             the declared tag layout (undeclared field?)"
+        );
+        let na = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
+        let rec = rec_hdr + na * aln_stride;
+        anyhow::ensure!(
+            off + rec <= payload,
+            "record {i} ({rec} B) overruns the chunk payload; on-disk records are larger \
+             than the declared tags describe (undeclared field?)"
+        );
+        off += rec;
+    }
+    anyhow::ensure!(
+        off == payload,
+        "the first chunk has {} byte(s) beyond its {nrec} declared records; on-disk records \
+         do not match the declared tag layout (undeclared field?)",
+        payload - off
+    );
+    Ok(())
+}
 
 /// Represents a chunk of recrords in a RAD file. The record chunks constitute the
 /// bulk of the RAD file, and each has an associated number of bytes and number of
@@ -336,6 +412,88 @@ mod tests {
 
         assert_eq!(chunk, new_chunk);
         assert_eq!(chunk, new_chunk2);
+    }
+
+    // Build read/alignment tag sections describing an AlevinFry-like layout:
+    // read tags b:u32,u:u32 (8 B) and one alignment tag refid:u32 (stride 4).
+    fn af_like_tag_sections() -> (TagSection, TagSection) {
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
+            name: "b".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
+            name: "u".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        let mut at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+        at.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
+            name: "refid".to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        });
+        (rt, at)
+    }
+
+    // One chunk with `na` counts per record: each record is 4 (na) + 8 (read) + na*4.
+    fn make_chunk(nas: &[u32]) -> Vec<u8> {
+        let mut payload: Vec<u8> = Vec::new();
+        for &na in nas {
+            payload.extend_from_slice(&na.to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes()); // b
+            payload.extend_from_slice(&0u32.to_le_bytes()); // u
+            for _ in 0..na {
+                payload.extend_from_slice(&0u32.to_le_bytes()); // refid
+            }
+        }
+        let nbytes = (payload.len() + 8) as u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&nbytes.to_le_bytes());
+        buf.extend_from_slice(&(nas.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&payload);
+        buf
+    }
+
+    #[test]
+    fn field_completeness_accepts_well_formed_chunk() {
+        let (rt, at) = af_like_tag_sections();
+        let buf = make_chunk(&[2, 1, 3]);
+        let mut cur = Cursor::new(buf);
+        crate::chunk::validate_first_chunk_layout(&mut cur, &rt, &at)
+            .expect("well-formed chunk should validate");
+    }
+
+    #[test]
+    fn field_completeness_rejects_undeclared_trailing_field() {
+        let (rt, at) = af_like_tag_sections();
+        // A well-formed chunk, but bump the declared nbytes so the payload has
+        // extra bytes the declared records don't account for (undeclared field).
+        let mut buf = make_chunk(&[2, 1]);
+        let nbytes = u32::from_le_bytes(buf[0..4].try_into().unwrap()) + 4;
+        buf[0..4].copy_from_slice(&nbytes.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // 4 stray trailing bytes
+        let mut cur = Cursor::new(buf);
+        let err = crate::chunk::validate_first_chunk_layout(&mut cur, &rt, &at)
+            .expect_err("trailing undeclared bytes should be rejected");
+        assert!(format!("{err}").contains("undeclared field"));
+    }
+
+    #[test]
+    fn field_completeness_skips_variable_width_layout() {
+        // A String read tag makes per-record size non-arithmetic -> skip (Ok).
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
+            name: "name".to_string(),
+            typeid: RadType::String,
+        });
+        let (_r, at) = af_like_tag_sections();
+        // Even a bogus buffer must be accepted, because the check is skipped.
+        let mut cur = Cursor::new(vec![0u8; 3]);
+        crate::chunk::validate_first_chunk_layout(&mut cur, &rt, &at)
+            .expect("variable-width layout should skip the check");
     }
 
     #[test]
