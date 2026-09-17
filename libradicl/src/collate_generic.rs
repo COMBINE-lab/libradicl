@@ -29,7 +29,7 @@
 //! (under its output-write lock, so offsets stay in file order).
 
 use crate::codec::ChunkCodec;
-use crate::rad_types::{RadIntId, RadType, TagSection};
+use crate::rad_types::{RadIntId, RadType, TagRole, TagSection};
 use crate::schema::U128Map;
 use std::collections::hash_map::Entry;
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -115,6 +115,29 @@ impl CollationKeySpec {
         })
     }
 
+    /// Build a spec from the read-level tags' declared [`TagRole::Barcode`] roles
+    /// (ordered by `level`, outer→inner), i.e. from the RAD describing itself
+    /// rather than a caller naming the key tags. Returns `Ok(None)` when no read
+    /// tag carries a `Barcode` role (an un-annotated / legacy layout) so the caller
+    /// can fall back to the name-based bridge; otherwise defers to
+    /// [`Self::from_read_tags`] for offset/width computation + validation.
+    pub fn from_roles(read_tags: &TagSection) -> anyhow::Result<Option<Self>> {
+        let mut barcodes: Vec<(u8, &str)> = read_tags
+            .tags
+            .iter()
+            .filter_map(|t| match t.role {
+                TagRole::Barcode { level } => Some((level, t.name.as_str())),
+                _ => None,
+            })
+            .collect();
+        if barcodes.is_empty() {
+            return Ok(None);
+        }
+        barcodes.sort_by_key(|(level, _)| *level);
+        let names: Vec<&str> = barcodes.iter().map(|(_, n)| *n).collect();
+        Ok(Some(Self::from_read_tags(read_tags, &names)?))
+    }
+
     /// Extract the composite key from a record's read-level header bytes (at least
     /// [`Self::read_header_bytes`] long). Parts fold outer→inner: each shifts the
     /// accumulator by its bit width, so `[sample, cell]` yields
@@ -156,7 +179,33 @@ impl GenericCollateCtx {
         key_tag_names: &[&str],
     ) -> anyhow::Result<Self> {
         let key = CollationKeySpec::from_read_tags(read_tags, key_tag_names)?;
-        let mut aln_stride = 0usize;
+        Ok(Self {
+            key,
+            aln_stride: Self::aln_stride(aln_tags)?,
+        })
+    }
+
+    /// Like [`Self::new`] but takes the collation key from the read tags' declared
+    /// [`TagRole::Barcode`] roles (see [`CollationKeySpec::from_roles`]). Returns
+    /// `Ok(None)` when the layout declares no barcode role, so the caller can fall
+    /// back to the name-based bridge.
+    pub fn from_roles(
+        read_tags: &TagSection,
+        aln_tags: &TagSection,
+    ) -> anyhow::Result<Option<Self>> {
+        match CollationKeySpec::from_roles(read_tags)? {
+            Some(key) => Ok(Some(Self {
+                key,
+                aln_stride: Self::aln_stride(aln_tags)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Fixed per-alignment stride = sum of the alignment tag widths; errors if any
+    /// alignment tag is variable-width (the fixed-stride gather can't skip it).
+    fn aln_stride(aln_tags: &TagSection) -> anyhow::Result<usize> {
+        let mut stride = 0usize;
         for td in &aln_tags.tags {
             let RadType::Int(int) = td.typeid else {
                 anyhow::bail!(
@@ -165,9 +214,9 @@ impl GenericCollateCtx {
                     td.name
                 );
             };
-            aln_stride += int.bytes_for_type();
+            stride += int.bytes_for_type();
         }
-        Ok(Self { key, aln_stride })
+        Ok(stride)
     }
 }
 
@@ -913,6 +962,68 @@ mod tests {
             assert_eq!(m[&((2u128 << 32) | 7)], 1);
             assert_eq!(m[&((1u128 << 32) | 9)], 1);
         }
+    }
+
+    #[test]
+    fn generic_ctx_from_roles_matches_names_and_none_without_roles() {
+        use crate::record::GenericReadRecord;
+        // read tags b0,b1 (composite key via roles), u; aln refid,as
+        let read_tags = TagSection {
+            label: TagSectionLabel::ReadTags,
+            tags: vec![
+                TagDesc {
+                    name: "b0".to_string(),
+                    typeid: RadType::Int(RadIntId::U32),
+                    role: crate::rad_types::TagRole::Barcode { level: 0 },
+                },
+                TagDesc {
+                    name: "b1".to_string(),
+                    typeid: RadType::Int(RadIntId::U32),
+                    role: crate::rad_types::TagRole::Barcode { level: 1 },
+                },
+                TagDesc {
+                    name: "u".to_string(),
+                    typeid: RadType::Int(RadIntId::U32),
+                    role: crate::rad_types::TagRole::Umi,
+                },
+            ],
+        };
+        let aln_tags = tag_section(
+            TagSectionLabel::AlignmentTags,
+            &[("refid", RadIntId::U32), ("as", RadIntId::U32)],
+        );
+        let ctx = GenericCollateCtx::from_roles(&read_tags, &aln_tags)
+            .unwrap()
+            .expect("barcode roles present");
+
+        // Same records + expected composite grouping as the names-based test.
+        let recs = [
+            gen_rec(1, 7, 100, &[(10, 1)]),
+            gen_rec(2, 7, 101, &[(12, 3)]),
+            gen_rec(1, 7, 102, &[(13, 4)]),
+        ];
+        let n = recs.len();
+        let mut out = Vec::new();
+        let mut cur = Cursor::new(recs.concat());
+        let nchunks =
+            collate_bucket::<GenericReadRecord, _>(&mut cur, n, &ctx, ChunkCodec::None, &mut out)
+                .unwrap();
+        assert_eq!(nchunks, 2, "(1,7) grouped, (2,7) distinct");
+        let (chunks, _) = read_back::<GenericReadRecord>(&out, ChunkCodec::None, &ctx);
+        let m: std::collections::HashMap<u128, u32> = chunks.into_iter().collect();
+        assert_eq!(m[&((1u128 << 32) | 7)], 2);
+        assert_eq!(m[&((2u128 << 32) | 7)], 1);
+
+        // A layout with no Barcode role → None (caller falls back to the bridge).
+        let plain = tag_section(
+            TagSectionLabel::ReadTags,
+            &[("b", RadIntId::U32), ("u", RadIntId::U32)],
+        );
+        assert!(
+            GenericCollateCtx::from_roles(&plain, &aln_tags)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
