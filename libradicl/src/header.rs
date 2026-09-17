@@ -175,6 +175,10 @@ impl RadHeader {
     /// if written to an output stream.
     pub fn get_size(&self) -> usize {
         let mut tot_size = 0usize;
+        // versioned headers (spec >= 2) are prefixed by the magic + u16 version
+        if self.spec_version >= constants::RAD_SPEC_VERSION {
+            tot_size += constants::RAD_MAGIC.len() + std::mem::size_of::<u16>();
+        }
         tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
         // each name takes 2 bytes for the length, plus the actual
         // number of bytes required by the string itself.
