@@ -467,6 +467,38 @@ where
     }
 }
 
+/// `CollationScan` for the scATAC record. Layout is `[na][bc][aln × na]` with a
+/// fixed per-alignment stride (see [`AtacSeqReadRecord::nbytes_aln`]) and **no
+/// UMI**; the collation key is the barcode. Fully fixed, so pass 2 relocates
+/// records forward with no re-scan (`fixed_header_stride`/`key_from_header`).
+impl CollationScan for crate::record::AtacSeqReadRecord {
+    type Ctx = crate::record::AtacSeqRecordContext;
+    fn scan<R: Read + Seek>(r: &mut R, ctx: &Self::Ctx) -> anyhow::Result<(u128, usize)> {
+        let mut na_buf = [0u8; 4];
+        r.read_exact(&mut na_buf)?;
+        let na = u32::from_le_bytes(na_buf) as usize;
+        let key = ctx.bct.read_value_into_u128(r);
+        let stride =
+            <crate::record::AtacSeqReadRecord as crate::record::KnownSize>::nbytes_aln(ctx);
+        let skip = na * stride;
+        r.seek_relative(skip as i64)?;
+        let len = 4 + ctx.bct.bytes_for_type() + skip;
+        Ok((key, len))
+    }
+
+    fn fixed_header_stride(ctx: &Self::Ctx) -> Option<(usize, usize)> {
+        let hdr = 4 + ctx.bct.bytes_for_type();
+        let stride =
+            <crate::record::AtacSeqReadRecord as crate::record::KnownSize>::nbytes_aln(ctx);
+        Some((hdr, stride))
+    }
+
+    fn key_from_header(hdr: &[u8], ctx: &Self::Ctx) -> u128 {
+        // hdr = [na:u32][bc:bct]; the barcode begins at offset 4.
+        u128::from(le_u64(&hdr[4..4 + ctx.bct.bytes_for_type()]))
+    }
+}
+
 /// Collate one temp bucket: group its `num_records` records (a seekable stream
 /// positioned at the bucket start) by [`CollationScan`] key and append one
 /// per-cell chunk per key to `out` — each `[nbytes:u32][nrec:u32][payload]`,
@@ -1087,6 +1119,55 @@ mod tests {
             assert_eq!(m[&7], 2);
             assert_eq!(m[&3], 2);
             assert_eq!(m[&9], 1);
+        }
+    }
+
+    #[test]
+    fn atac_record_collates_and_groups() {
+        // The scATAC record (fixed `[na][bc][aln]`, no UMI) groups correctly
+        // through the unified `collate_bucket` via its `CollationScan` impl, for
+        // both codecs — exercising the fixed-header fast pass 2. This is the
+        // record type whose bespoke gather (`collate_temporary_bucket_twopass_atac`)
+        // the unification retired.
+        use crate::record::{AtacSeqReadRecord, AtacSeqRecordContext};
+
+        // ATAC record on disk: [na:u32][bc:u32][ aln × na ], aln = 11 opaque bytes.
+        fn atac_rec(bc: u32, aln_seeds: &[u8]) -> Vec<u8> {
+            let na = aln_seeds.len() as u32;
+            let mut v = Vec::new();
+            v.extend_from_slice(&na.to_le_bytes());
+            v.extend_from_slice(&bc.to_le_bytes());
+            for &seed in aln_seeds {
+                for k in 0..11u8 {
+                    v.push(seed.wrapping_add(k).wrapping_add(bc as u8));
+                }
+            }
+            v
+        }
+
+        let ctx = AtacSeqRecordContext::from_bct(RadIntId::U32);
+        let recs = [
+            atac_rec(100, &[1, 2, 3]),
+            atac_rec(200, &[9]),
+            atac_rec(100, &[4]),
+            atac_rec(300, &[]), // zero-alignment record (edge case)
+            atac_rec(200, &[5, 6]),
+            atac_rec(100, &[7, 8]),
+        ];
+        let n = recs.len();
+        let input = recs.concat();
+        for codec in [ChunkCodec::None, ChunkCodec::Lz4] {
+            let mut out = Vec::new();
+            let mut cur = Cursor::new(input.as_slice());
+            let nchunks =
+                collate_bucket::<AtacSeqReadRecord, _>(&mut cur, n, &ctx, codec, &mut out).unwrap();
+            let (chunks, total) = read_back::<AtacSeqReadRecord>(&out, codec, &ctx);
+            assert_eq!(total, n);
+            assert_eq!(nchunks, 3);
+            let m: std::collections::HashMap<u128, u32> = chunks.into_iter().collect();
+            assert_eq!(m[&100], 3);
+            assert_eq!(m[&200], 2);
+            assert_eq!(m[&300], 1);
         }
     }
 }
