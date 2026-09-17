@@ -293,10 +293,12 @@ mod tests {
         };
 
         let bc_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "bclen".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };
         let umi_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "umilen".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };
@@ -306,16 +308,19 @@ mod tests {
 
         let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
         read_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "b".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
         read_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "u".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
 
         let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
         aln_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_refid".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
@@ -401,24 +406,29 @@ mod tests {
         };
         let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
         file_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "bclen".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         });
         file_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_length_dist".to_string(),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Float(RadFloatId::F64)),
         });
         let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
         read_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "b".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
         read_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "u".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
         let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
         aln_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_refid".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });

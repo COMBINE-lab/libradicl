@@ -849,6 +849,7 @@ mod tests {
             tags: tags
                 .iter()
                 .map(|(n, i)| TagDesc {
+                    role: crate::rad_types::TagRole::None,
                     name: (*n).to_string(),
                     typeid: RadType::Int(*i),
                 })
@@ -934,6 +935,7 @@ mod tests {
         let read_ok = tag_section(TagSectionLabel::ReadTags, &[("b", RadIntId::U32)]);
         let mut var_aln = tag_section(TagSectionLabel::AlignmentTags, &[("refid", RadIntId::U32)]);
         var_aln.tags.push(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "cigar".to_string(),
             typeid: RadType::String,
         });

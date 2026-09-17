@@ -302,10 +302,12 @@ mod tests {
         let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
         let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
         rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "b".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
         rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "u".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
@@ -350,10 +352,12 @@ mod tests {
 
         // describe the barcode and UMI length tags
         let bc_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "bclen".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };
         let umi_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "umilen".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };
@@ -363,10 +367,12 @@ mod tests {
 
         // per-read barcode and umi encoding
         let rd_bc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "b".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let rd_umi = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "u".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
@@ -376,6 +382,7 @@ mod tests {
 
         // per alignment information
         let aln_ent = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_refid".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };

@@ -298,9 +298,13 @@ impl RadPrelude {
     /// [anyhow::Error] otherwise.
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<Self> {
         let hdr = RadHeader::from_bytes(reader)?;
-        let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
-        let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
-        let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
+        // Tag descriptors carry per-tag roles only in versioned files; the major
+        // version (just parsed) tells the tag reader whether to expect them.
+        let m = hdr.major_version;
+        let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags, m)?;
+        let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags, m)?;
+        let aln_tags =
+            TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags, m)?;
 
         //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
         //println!("file-level tag values: {:?}", file_tag_vals);
@@ -317,17 +321,18 @@ impl RadPrelude {
     /// [anyhow::Result] that records any error that occured during writing or
     /// Ok(()) if successful
     pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        let m = self.hdr.major_version;
         self.hdr
             .write(writer)
             .context("could not write the header of the prelude")?;
         self.file_tags
-            .write(writer)
+            .write(writer, m)
             .context("could not write the file-level tags of the prelude")?;
         self.read_tags
-            .write(writer)
+            .write(writer, m)
             .context("could not write the file-level tags of the prelude")?;
         self.aln_tags
-            .write(writer)
+            .write(writer, m)
             .context("could not write the file-level tags of the prelude")?;
         Ok(())
     }
@@ -363,18 +368,20 @@ impl RadPrelude {
         writer.write_all(&hdr_bytes)?;
 
         // File-tag section descriptors, adding the codec tag when compressing.
+        let m = self.hdr.major_version;
         if codec == ChunkCodec::None {
-            self.file_tags.write(writer)?;
+            self.file_tags.write(writer, m)?;
         } else {
             let mut file_tags = self.file_tags.clone();
             file_tags.add_tag_desc(TagDesc {
                 name: CHUNK_CODEC_TAG.to_string(),
                 typeid: RadType::Int(RadIntId::U8),
+                role: crate::rad_types::TagRole::None,
             });
-            file_tags.write(writer)?;
+            file_tags.write(writer, m)?;
         }
-        self.read_tags.write(writer)?;
-        self.aln_tags.write(writer)?;
+        self.read_tags.write(writer, m)?;
+        self.aln_tags.write(writer, m)?;
 
         // The source file-tag values (unchanged), then the codec value last so
         // it lines up with the descriptor appended above.
@@ -383,6 +390,7 @@ impl RadPrelude {
             let codec_desc = TagDesc {
                 name: CHUNK_CODEC_TAG.to_string(),
                 typeid: RadType::Int(RadIntId::U8),
+                role: crate::rad_types::TagRole::None,
             };
             let mut values = TagMap::with_keyset(std::slice::from_ref(&codec_desc));
             values.add(TagValue::U8(codec.as_u8()));
@@ -544,6 +552,7 @@ mod tests {
         };
 
         let ft_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "ref_lengths".to_string(),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
         };
@@ -551,6 +560,7 @@ mod tests {
         file_tags.add_tag_desc(ft_desc);
 
         let rd_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U8),
         };
@@ -558,14 +568,17 @@ mod tests {
         read_tags.add_tag_desc(rd_desc);
 
         let aln_coi = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_ref".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_mt = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_fl = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_len".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };
@@ -620,6 +633,7 @@ mod tests {
         };
 
         let ft_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "ref_lengths".to_string(),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
         };
@@ -627,6 +641,7 @@ mod tests {
         file_tags.add_tag_desc(ft_desc);
 
         let rd_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U8),
         };
@@ -634,14 +649,17 @@ mod tests {
         read_tags.add_tag_desc(rd_desc);
 
         let aln_coi = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_ref".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_mt = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_fl = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_len".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };

@@ -3336,10 +3336,12 @@ mod tests {
         let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
         let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
         rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "b".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
         rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "u".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });

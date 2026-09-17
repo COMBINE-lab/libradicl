@@ -1502,12 +1502,14 @@ mod tests {
         let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
         for name in ["bclen", "umilen"] {
             file_tags.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: name.to_string(),
                 typeid: RadType::Int(RadIntId::U16),
             });
         }
         if codec_tag.is_some() {
             file_tags.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: crate::codec::CHUNK_CODEC_TAG.to_string(),
                 typeid: RadType::Int(RadIntId::U8),
             });
@@ -1515,12 +1517,14 @@ mod tests {
         let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
         for name in ["b", "u"] {
             read_tags.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: name.to_string(),
                 typeid: RadType::Int(RadIntId::U32),
             });
         }
         let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
         aln_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_refid".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
