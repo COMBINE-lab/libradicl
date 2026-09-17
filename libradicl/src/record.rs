@@ -2681,6 +2681,102 @@ impl MultiBarcodeRecordContext {
         }
         Ok(roles)
     }
+
+    /// Build a multi-barcode context from the read tags' declared roles, mirroring
+    /// [`crate::collate_generic::CollationKeySpec::from_roles`]: the barcode levels
+    /// come from [`TagRole::Barcode`] (ordered outer→inner by `level`) and the UMI
+    /// from [`TagRole::Umi`], with no reliance on the `b0`/`b1`/`u` name bridge.
+    ///
+    /// Returns `Ok(None)` when fewer than two barcode roles are declared (not a
+    /// composite layout — the caller can fall back to the single-barcode path or
+    /// the name bridge). The record reader consumes the read header sequentially as
+    /// `[na][barcodes…][umi]`, so this **fails** (rather than silently misreading)
+    /// unless the roles describe exactly that physical layout: the barcode fields
+    /// must be the first read tags in level order and the UMI must immediately
+    /// follow them, with no other read tags. The outermost level maps to
+    /// [`BarcodeRole::Sample`], the rest to [`BarcodeRole::Cell`], matching
+    /// [`Self::parse_roles_or_default`].
+    pub fn from_roles(read_tags: &TagSection) -> anyhow::Result<Option<Self>> {
+        use crate::rad_types::TagRole;
+        // (physical index, level, int type) for each barcode-role read tag.
+        let mut barcodes: Vec<(usize, u8, RadIntId)> = Vec::new();
+        let mut umi: Option<(usize, RadIntId)> = None;
+        for (idx, td) in read_tags.tags.iter().enumerate() {
+            match td.role {
+                TagRole::Barcode { level } => {
+                    let RadType::Int(int) = td.typeid else {
+                        bail!(
+                            "barcode-role read tag `{}` is not a fixed-width integer",
+                            td.name
+                        );
+                    };
+                    barcodes.push((idx, level, int));
+                }
+                TagRole::Umi => {
+                    if umi.is_some() {
+                        bail!("multiple read tags declare the Umi role");
+                    }
+                    let RadType::Int(int) = td.typeid else {
+                        bail!("umi-role read tag `{}` is not a fixed-width integer", td.name);
+                    };
+                    umi = Some((idx, int));
+                }
+                _ => {}
+            }
+        }
+        if barcodes.len() < 2 {
+            // Not a composite layout by roles; let the caller fall back.
+            return Ok(None);
+        }
+        // Order barcodes outer→inner by level; require levels distinct and the
+        // physical order to match the level order, because the reader consumes
+        // barcodes sequentially from the start of the header.
+        barcodes.sort_by_key(|(_, level, _)| *level);
+        for w in barcodes.windows(2) {
+            if w[0].1 == w[1].1 {
+                bail!("two barcode roles share level {}", w[0].1);
+            }
+            if w[0].0 >= w[1].0 {
+                bail!(
+                    "barcode-role physical order does not match level order; the sequential \
+                     record reader requires barcodes laid out outer→inner"
+                );
+            }
+        }
+        let num_bc = barcodes.len();
+        let (umi_idx, umit) = umi.context("multi-barcode role layout declares no Umi role")?;
+        // Barcodes must be the first `num_bc` read tags, the UMI immediately
+        // after, and nothing else — the reader reads exactly `[na][bc…][umi]`.
+        if barcodes[0].0 != 0 || barcodes[num_bc - 1].0 != num_bc - 1 {
+            bail!("barcode-role tags must be the first read tags for the sequential reader");
+        }
+        if umi_idx != num_bc {
+            bail!("the Umi-role tag must immediately follow the barcode tags");
+        }
+        if read_tags.tags.len() != num_bc + 1 {
+            bail!(
+                "role-driven multi-barcode layout expects exactly {} read tags (barcodes + umi), \
+                 found {}",
+                num_bc + 1,
+                read_tags.tags.len()
+            );
+        }
+        let mut bc_types = SmallVec::new();
+        let mut roles = SmallVec::new();
+        for (i, (_, _, int)) in barcodes.iter().enumerate() {
+            bc_types.push(*int);
+            roles.push(if i == 0 {
+                BarcodeRole::Sample
+            } else {
+                BarcodeRole::Cell
+            });
+        }
+        Ok(Some(Self {
+            bc_types,
+            umit,
+            roles,
+        }))
+    }
 }
 
 /// Header information for a [MultiBarcodeReadRecord].
@@ -3420,6 +3516,69 @@ mod tests {
         let new_rec = MultiBarcodeReadRecord::from_bytes_with_context(&mut cursor, &ctx);
 
         assert_eq!(rec, new_rec);
+    }
+
+    #[test]
+    fn multi_barcode_context_from_roles() {
+        use crate::collation::BarcodeRole;
+        use crate::rad_types::TagRole;
+        use crate::record::MultiBarcodeRecordContext;
+
+        let bc = |name: &str, role: TagRole| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+
+        // Well-formed 2-level layout with non-conventional names: roles drive it.
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(bc("sample_bc", TagRole::Barcode { level: 0 }));
+        rt.add_tag_desc(bc("cell_bc", TagRole::Barcode { level: 1 }));
+        rt.add_tag_desc(bc("umi", TagRole::Umi));
+        let ctx = MultiBarcodeRecordContext::from_roles(&rt)
+            .unwrap()
+            .expect("two barcode roles should yield a composite context");
+        assert_eq!(ctx.bc_types.as_slice(), [RadIntId::U32, RadIntId::U32]);
+        assert_eq!(ctx.umit, RadIntId::U32);
+        assert_eq!(
+            ctx.roles.as_slice(),
+            [BarcodeRole::Sample, BarcodeRole::Cell]
+        );
+
+        // Fewer than two barcode roles -> None (fall back to single/name bridge).
+        let mut single = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        single.add_tag_desc(bc("b", TagRole::Barcode { level: 0 }));
+        single.add_tag_desc(bc("u", TagRole::Umi));
+        assert!(MultiBarcodeRecordContext::from_roles(&single).unwrap().is_none());
+
+        // No declared roles at all -> None.
+        let mut plain = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        plain.add_tag_desc(bc("b0", TagRole::None));
+        plain.add_tag_desc(bc("b1", TagRole::None));
+        plain.add_tag_desc(bc("u", TagRole::None));
+        assert!(MultiBarcodeRecordContext::from_roles(&plain).unwrap().is_none());
+
+        // Barcode physical order not matching level order -> error (the reader is
+        // sequential and cannot honor an interleaved/out-of-order layout).
+        let mut swapped = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        swapped.add_tag_desc(bc("outer", TagRole::Barcode { level: 1 }));
+        swapped.add_tag_desc(bc("inner", TagRole::Barcode { level: 0 }));
+        swapped.add_tag_desc(bc("umi", TagRole::Umi));
+        assert!(MultiBarcodeRecordContext::from_roles(&swapped).is_err());
+
+        // Two barcodes but no UMI role -> error.
+        let mut noumi = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        noumi.add_tag_desc(bc("b0", TagRole::Barcode { level: 0 }));
+        noumi.add_tag_desc(bc("b1", TagRole::Barcode { level: 1 }));
+        assert!(MultiBarcodeRecordContext::from_roles(&noumi).is_err());
+
+        // UMI not immediately after the barcodes -> error.
+        let mut gap = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        gap.add_tag_desc(bc("b0", TagRole::Barcode { level: 0 }));
+        gap.add_tag_desc(bc("b1", TagRole::Barcode { level: 1 }));
+        gap.add_tag_desc(bc("extra", TagRole::None));
+        gap.add_tag_desc(bc("u", TagRole::Umi));
+        assert!(MultiBarcodeRecordContext::from_roles(&gap).is_err());
     }
 
     #[test]
