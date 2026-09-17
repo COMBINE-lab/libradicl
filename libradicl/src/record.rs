@@ -358,6 +358,15 @@ pub struct GenericReadRecordContext {
     /// barcode key, when this record is being *collated*. `None` for plain reading
     /// — a RAD need not be collatable to be read. Set at the collate entry point.
     pub key_tag_idx: Option<usize>,
+    /// Index (into `aln_tags`) of the alignment tag that carries orientation (the
+    /// `compressed_ori_refid`-style word whose top bit is the strand), from a
+    /// declared `Orientation` role. When set, the scatter filters alignments by the
+    /// expected orientation; when `None`, all alignments are retained.
+    pub ori_tag_idx: Option<usize>,
+    /// Index (into `read_tags`) of the UMI tag, from a declared `Umi` role. Not
+    /// used by collation (the UMI rides through as a value); recorded for a future
+    /// generic quant path.
+    pub umi_tag_idx: Option<usize>,
 }
 
 /// Fixed on-disk byte width of an integer tag type. Panics on a non-integer
@@ -697,8 +706,10 @@ impl RecordContext for GenericReadRecordContext {
         Ok(Self {
             read_tags: rt.clone(),
             aln_tags: at.clone(),
-            // reading is collation-agnostic; the collate entry point sets this.
+            // reading is collation-agnostic; the collate entry point sets these.
             key_tag_idx: None,
+            ori_tag_idx: None,
+            umi_tag_idx: None,
         })
     }
 }
@@ -1451,20 +1462,43 @@ impl CollatableMappedRecord<u64> for GenericReadRecord {
         reader: &mut T,
         hdr: &mut Self::CollatableRecordHeader,
         ctx: &<Self as MappedRecord>::ParsingContext,
-        _expected_ori: &MappedFragmentOrientation,
+        expected_ori: &MappedFragmentOrientation,
     ) -> Self {
-        // NOTE: orientation filtering is not yet applied for the generic record —
-        // all alignments are retained. The collate dispatch gates the generic path
-        // to non-orientation-filtering runs; see COMBINE-lab/libradicl#64/#66.
+        // If the layout declares which alignment field carries orientation (a
+        // `compressed_ori_refid`-style word: top bit set ⇒ forward, else reverse),
+        // filter alignments to those matching `expected_ori` — mirroring the fast
+        // records' `keep_ori`. Without that role, or when no orientation is
+        // expected, all alignments are retained.
         let naln_tags = ctx.aln_tags.iter_desc().len();
+        let exp: &Strand = expected_ori.into();
+        let filter = ctx.ori_tag_idx.is_some() && !exp.is_unknown();
+        let ori_idx = ctx.ori_tag_idx.unwrap_or(0);
+
         let mut atags = Vec::with_capacity(hdr.naln as usize * naln_tags);
+        let mut aln: Vec<TagValue> = Vec::with_capacity(naln_tags);
+        let mut kept = 0u32;
         for _ in 0..(hdr.naln as usize) {
+            aln.clear();
             for td in ctx.aln_tags.iter_desc() {
-                atags.push(td.value_from_bytes(reader));
+                aln.push(td.value_from_bytes(reader));
             }
+            if filter {
+                let v = tag_value_as_u64(&aln[ori_idx]) as u32;
+                let strand = if (v & crate::utils::MASK_LOWER_31_U32) > 0 {
+                    Strand::Forward
+                } else {
+                    Strand::Reverse
+                };
+                if !(exp.same(&strand) || exp.is_unknown()) {
+                    continue;
+                }
+            }
+            atags.append(&mut aln);
+            kept += 1;
         }
+        hdr.naln = kept;
         Self {
-            naln: hdr.naln,
+            naln: kept,
             naln_tags: naln_tags as u32,
             rtags: std::mem::take(&mut hdr.rtags),
             atags,
