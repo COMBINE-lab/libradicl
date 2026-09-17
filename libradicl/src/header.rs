@@ -44,9 +44,12 @@ pub struct RadPrelude {
 #[derive(Educe)]
 #[educe(Debug, PartialEq, Eq)]
 pub struct RadHeader {
-    /// RAD spec version: 0 for a legacy (magic-less) prelude, >= 2 for a versioned
-    /// one (see [`constants::RAD_MAGIC`] / [`constants::RAD_SPEC_VERSION`]).
-    pub spec_version: u16,
+    /// RAD spec **major** version: 0 for a legacy (magic-less) prelude, >= 2 for a
+    /// versioned one (see [`constants::RAD_MAGIC`] / [`constants::RAD_SPEC_MAJOR`]).
+    /// Major bumps are breaking; minor bumps are additive.
+    pub major_version: u8,
+    /// RAD spec **minor** version (0 for legacy).
+    pub minor_version: u8,
     pub is_paired: u8,
     pub ref_count: u64,
     pub ref_names: Vec<String>,
@@ -64,10 +67,11 @@ impl RadHeader {
     /// Create a new empty [RadHeader]
     pub fn new() -> Self {
         Self {
-            // Default to legacy so existing construction + write paths are
-            // byte-for-byte unchanged; a writer opts in by setting
-            // `spec_version = constants::RAD_SPEC_VERSION`.
-            spec_version: constants::RAD_LEGACY_VERSION,
+            // Default to legacy (major 0) so existing construction + write paths
+            // are byte-for-byte unchanged; a writer opts in by setting
+            // `major_version = constants::RAD_SPEC_MAJOR`.
+            major_version: 0,
+            minor_version: 0,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -96,19 +100,34 @@ impl RadHeader {
         if magic == constants::RAD_MAGIC {
             let mut vbuf = [0u8; 2];
             reader.read_exact(&mut vbuf)?;
-            let spec_version = u16::from_le_bytes(vbuf);
-            Self::read_fields(reader, spec_version)
+            let (major, minor) = (vbuf[0], vbuf[1]);
+            // Too-new guard: a higher *major* is a breaking layout this build does
+            // not understand, so refuse rather than silently misparse. A higher
+            // *minor* within the supported major is additive and read best-effort.
+            if major > constants::RAD_SPEC_MAJOR {
+                anyhow::bail!(
+                    "RAD spec major version {major} is newer than supported ({}); please update this tool",
+                    constants::RAD_SPEC_MAJOR
+                );
+            }
+            if major < constants::RAD_FIRST_VERSIONED_MAJOR {
+                anyhow::bail!(
+                    "RAD prelude carries the magic but a reserved/legacy major version {major}; file is malformed"
+                );
+            }
+            Self::read_fields(reader, major, minor)
         } else {
             let mut chained = std::io::Cursor::new(magic).chain(reader);
-            Self::read_fields(&mut chained, constants::RAD_LEGACY_VERSION)
+            Self::read_fields(&mut chained, 0, 0)
         }
     }
 
     /// Read the header fields (everything after the optional magic + version) from
-    /// `reader`, tagging the result with `spec_version`.
-    fn read_fields<T: Read>(reader: &mut T, spec_version: u16) -> anyhow::Result<RadHeader> {
+    /// `reader`, tagging the result with the spec `major`/`minor`.
+    fn read_fields<T: Read>(reader: &mut T, major: u8, minor: u8) -> anyhow::Result<RadHeader> {
         let mut rh = RadHeader {
-            spec_version,
+            major_version: major,
+            minor_version: minor,
             ..RadHeader::new()
         };
 
@@ -154,7 +173,8 @@ impl RadHeader {
     /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
     pub fn from_bam_header(header: &sam::Header) -> RadHeader {
         let mut rh = RadHeader {
-            spec_version: constants::RAD_LEGACY_VERSION,
+            major_version: 0,
+            minor_version: 0,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -175,9 +195,10 @@ impl RadHeader {
     /// if written to an output stream.
     pub fn get_size(&self) -> usize {
         let mut tot_size = 0usize;
-        // versioned headers (spec >= 2) are prefixed by the magic + u16 version
-        if self.spec_version >= constants::RAD_SPEC_VERSION {
-            tot_size += constants::RAD_MAGIC.len() + std::mem::size_of::<u16>();
+        // versioned headers (major >= first-versioned) are prefixed by the magic
+        // + [major:u8][minor:u8]
+        if self.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR {
+            tot_size += constants::RAD_MAGIC.len() + 2;
         }
         tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
         // each name takes 2 bytes for the length, plus the actual
@@ -224,11 +245,11 @@ impl RadHeader {
         // header, this information is not meanginful because
         // it's not contained in the SAM header.  Think about if
         // and how to address that.
-        // Versioned files (spec >= 2) get the magic + version prefix; legacy
-        // headers (spec_version 0) write exactly as before.
-        if self.spec_version >= constants::RAD_SPEC_VERSION {
+        // Versioned files (major >= first-versioned) get the magic + [major][minor]
+        // prefix; legacy headers (major 0) write exactly as before.
+        if self.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR {
             w.write_all(&constants::RAD_MAGIC)?;
-            w.write_all(&self.spec_version.to_le_bytes())?;
+            w.write_all(&[self.major_version, self.minor_version])?;
         }
 
         w.write_all(&self.is_paired.to_le_bytes())?;
@@ -404,8 +425,9 @@ mod tests {
     /// still parse as version 0 with the correct fields.
     #[test]
     fn magic_version_roundtrip_and_legacy_backcompat() {
-        let mk = |spec_version: u16| RadHeader {
-            spec_version,
+        let mk = |major: u8, minor: u8| RadHeader {
+            major_version: major,
+            minor_version: minor,
             is_paired: 1,
             ref_count: 2,
             ref_names: vec!["a".to_string(), "bb".to_string()],
@@ -413,7 +435,10 @@ mod tests {
         };
 
         // versioned round-trip
-        let v = mk(crate::constants::RAD_SPEC_VERSION);
+        let v = mk(
+            crate::constants::RAD_SPEC_MAJOR,
+            crate::constants::RAD_SPEC_MINOR,
+        );
         let mut vb: Vec<u8> = Vec::new();
         v.write(&mut vb).unwrap();
         assert_eq!(
@@ -421,12 +446,13 @@ mod tests {
             &crate::constants::RAD_MAGIC
         );
         let vr = RadHeader::from_bytes(&mut std::io::Cursor::new(&vb)).unwrap();
-        assert_eq!(vr.spec_version, crate::constants::RAD_SPEC_VERSION);
+        assert_eq!(vr.major_version, crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(vr.minor_version, crate::constants::RAD_SPEC_MINOR);
         assert_eq!(vr.ref_names, v.ref_names);
         assert_eq!(vr.num_chunks, 5);
 
         // legacy round-trip: no magic prefix, version reads back as 0
-        let l = mk(0);
+        let l = mk(0, 0);
         let mut lb: Vec<u8> = Vec::new();
         l.write(&mut lb).unwrap();
         assert_ne!(
@@ -434,11 +460,36 @@ mod tests {
             &crate::constants::RAD_MAGIC
         );
         let lr = RadHeader::from_bytes(&mut std::io::Cursor::new(&lb)).unwrap();
-        assert_eq!(lr.spec_version, 0);
+        assert_eq!(lr.major_version, 0);
+        assert_eq!(lr.minor_version, 0);
         assert_eq!(lr.ref_names, l.ref_names);
 
         // a versioned file is byte-longer than the legacy one by exactly the prefix
         assert_eq!(vb.len() - lb.len(), crate::constants::RAD_MAGIC.len() + 2);
+    }
+
+    /// A file whose major version exceeds what this build supports must be
+    /// refused (not silently misparsed); a higher minor within the supported
+    /// major is accepted.
+    #[test]
+    fn rejects_too_new_major_accepts_higher_minor() {
+        let mk_bytes = |major: u8, minor: u8| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&crate::constants::RAD_MAGIC);
+            b.extend_from_slice(&[major, minor]);
+            b.push(0); // is_paired
+            b.extend_from_slice(&0u64.to_le_bytes()); // ref_count = 0
+            b.extend_from_slice(&0u64.to_le_bytes()); // num_chunks = 0
+            b
+        };
+        let too_new = mk_bytes(crate::constants::RAD_SPEC_MAJOR + 1, 0);
+        assert!(RadHeader::from_bytes(&mut std::io::Cursor::new(too_new)).is_err());
+
+        let higher_minor = mk_bytes(crate::constants::RAD_SPEC_MAJOR, 200);
+        let h = RadHeader::from_bytes(&mut std::io::Cursor::new(higher_minor))
+            .expect("higher minor within a supported major must be accepted");
+        assert_eq!(h.major_version, crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(h.minor_version, 200);
     }
 
     /// The speculative-reservation cap must not limit real headers. A human
@@ -449,7 +500,8 @@ mod tests {
         const NREFS: usize = 70_000; // > MAX_SPECULATIVE_REFS
         let names: Vec<String> = (0..NREFS).map(|i| format!("tx{i}")).collect();
         let hdr = RadHeader {
-            spec_version: 0,
+            major_version: 0,
+            minor_version: 0,
             is_paired: 0,
             ref_count: NREFS as u64,
             ref_names: names.clone(),
@@ -483,7 +535,8 @@ mod tests {
     #[test]
     fn can_write_prelude() {
         let hdr = RadHeader {
-            spec_version: 0,
+            major_version: 0,
+            minor_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -558,7 +611,8 @@ mod tests {
     #[test]
     fn preludes_equal_with_different_chunks() {
         let hdr = RadHeader {
-            spec_version: 0,
+            major_version: 0,
+            minor_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],

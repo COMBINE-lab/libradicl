@@ -340,7 +340,8 @@ mod tests {
     fn can_write_af_file() {
         // mock the header
         let hdr = RadHeader {
-            spec_version: 0,
+            major_version: 0,
+            minor_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
