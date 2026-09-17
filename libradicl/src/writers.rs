@@ -284,6 +284,7 @@ mod tests {
     /// Build a minimal AlevinFry prelude and matching file-tag values for tests.
     fn make_af_prelude() -> (RadPrelude, TagMap) {
         let hdr = RadHeader {
+            spec_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -390,6 +391,7 @@ mod tests {
         // Prelude with a reserved fixed-length ArrayF64 file tag (placeholder),
         // plus a scalar tag before it to exercise non-zero offsets.
         let hdr = RadHeader {
+            spec_version: 0,
             is_paired: 0,
             ref_count: 2,
             ref_names: vec!["t0".to_string(), "t1".to_string()],

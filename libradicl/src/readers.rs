@@ -1492,6 +1492,7 @@ mod tests {
         use std::io::Cursor;
 
         let hdr = crate::header::RadHeader {
+            spec_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".into(), "tgt2".into(), "tgt3".into()],

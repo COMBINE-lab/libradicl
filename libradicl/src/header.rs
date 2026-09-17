@@ -44,6 +44,9 @@ pub struct RadPrelude {
 #[derive(Educe)]
 #[educe(Debug, PartialEq, Eq)]
 pub struct RadHeader {
+    /// RAD spec version: 0 for a legacy (magic-less) prelude, >= 2 for a versioned
+    /// one (see [`constants::RAD_MAGIC`] / [`constants::RAD_SPEC_VERSION`]).
+    pub spec_version: u16,
     pub is_paired: u8,
     pub ref_count: u64,
     pub ref_names: Vec<String>,
@@ -61,6 +64,10 @@ impl RadHeader {
     /// Create a new empty [RadHeader]
     pub fn new() -> Self {
         Self {
+            // Default to legacy so existing construction + write paths are
+            // byte-for-byte unchanged; a writer opts in by setting
+            // `spec_version = constants::RAD_SPEC_VERSION`.
+            spec_version: constants::RAD_LEGACY_VERSION,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -79,7 +86,31 @@ impl RadHeader {
     /// next, then this function returns [Ok(RadHeader)], otherwise, it returns
     /// an [anyhow::Error] explaining the failure to parse the [RadHeader].
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<RadHeader> {
-        let mut rh = RadHeader::new();
+        // Sniff the optional magic. Its first byte (`b'R'`) can't begin a legacy
+        // prelude (whose first byte is `is_paired` in {0,1}), so this is
+        // unambiguous. On a legacy file the sniffed bytes ARE the start of the
+        // header, so we splice them back in front of the reader via `Read::chain`
+        // (no `Seek` needed -- works for `Cursor` and `BufReader` alike).
+        let mut magic = [0u8; constants::RAD_MAGIC.len()];
+        reader.read_exact(&mut magic)?;
+        if magic == constants::RAD_MAGIC {
+            let mut vbuf = [0u8; 2];
+            reader.read_exact(&mut vbuf)?;
+            let spec_version = u16::from_le_bytes(vbuf);
+            Self::read_fields(reader, spec_version)
+        } else {
+            let mut chained = std::io::Cursor::new(magic).chain(reader);
+            Self::read_fields(&mut chained, constants::RAD_LEGACY_VERSION)
+        }
+    }
+
+    /// Read the header fields (everything after the optional magic + version) from
+    /// `reader`, tagging the result with `spec_version`.
+    fn read_fields<T: Read>(reader: &mut T, spec_version: u16) -> anyhow::Result<RadHeader> {
+        let mut rh = RadHeader {
+            spec_version,
+            ..RadHeader::new()
+        };
 
         // size of the longest allowable string.
         let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
@@ -123,6 +154,7 @@ impl RadHeader {
     /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
     pub fn from_bam_header(header: &sam::Header) -> RadHeader {
         let mut rh = RadHeader {
+            spec_version: constants::RAD_LEGACY_VERSION,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -188,6 +220,13 @@ impl RadHeader {
         // header, this information is not meanginful because
         // it's not contained in the SAM header.  Think about if
         // and how to address that.
+        // Versioned files (spec >= 2) get the magic + version prefix; legacy
+        // headers (spec_version 0) write exactly as before.
+        if self.spec_version >= constants::RAD_SPEC_VERSION {
+            w.write_all(&constants::RAD_MAGIC)?;
+            w.write_all(&self.spec_version.to_le_bytes())?;
+        }
+
         w.write_all(&self.is_paired.to_le_bytes())?;
 
         let ref_count = self.ref_count;
@@ -355,6 +394,49 @@ mod tests {
     use crate::rad_types::{RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue};
     use crate::rad_types::{RadType, TagDesc};
 
+    /// A versioned header (spec >= 2) writes the magic + version prefix and reads
+    /// back with the same version; a legacy header writes no prefix and reads back
+    /// as version 0; and raw legacy bytes (no magic, as produced before versioning)
+    /// still parse as version 0 with the correct fields.
+    #[test]
+    fn magic_version_roundtrip_and_legacy_backcompat() {
+        let mk = |spec_version: u16| RadHeader {
+            spec_version,
+            is_paired: 1,
+            ref_count: 2,
+            ref_names: vec!["a".to_string(), "bb".to_string()],
+            num_chunks: 5,
+        };
+
+        // versioned round-trip
+        let v = mk(crate::constants::RAD_SPEC_VERSION);
+        let mut vb: Vec<u8> = Vec::new();
+        v.write(&mut vb).unwrap();
+        assert_eq!(
+            &vb[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+        let vr = RadHeader::from_bytes(&mut std::io::Cursor::new(&vb)).unwrap();
+        assert_eq!(vr.spec_version, crate::constants::RAD_SPEC_VERSION);
+        assert_eq!(vr.ref_names, v.ref_names);
+        assert_eq!(vr.num_chunks, 5);
+
+        // legacy round-trip: no magic prefix, version reads back as 0
+        let l = mk(0);
+        let mut lb: Vec<u8> = Vec::new();
+        l.write(&mut lb).unwrap();
+        assert_ne!(
+            &lb[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+        let lr = RadHeader::from_bytes(&mut std::io::Cursor::new(&lb)).unwrap();
+        assert_eq!(lr.spec_version, 0);
+        assert_eq!(lr.ref_names, l.ref_names);
+
+        // a versioned file is byte-longer than the legacy one by exactly the prefix
+        assert_eq!(vb.len() - lb.len(), crate::constants::RAD_MAGIC.len() + 2);
+    }
+
     /// The speculative-reservation cap must not limit real headers. A human
     /// transcriptome has a few hundred thousand references, well past the cap,
     /// so the `Vec` has to keep growing past it.
@@ -363,6 +445,7 @@ mod tests {
         const NREFS: usize = 70_000; // > MAX_SPECULATIVE_REFS
         let names: Vec<String> = (0..NREFS).map(|i| format!("tx{i}")).collect();
         let hdr = RadHeader {
+            spec_version: 0,
             is_paired: 0,
             ref_count: NREFS as u64,
             ref_names: names.clone(),
@@ -396,6 +479,7 @@ mod tests {
     #[test]
     fn can_write_prelude() {
         let hdr = RadHeader {
+            spec_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -470,6 +554,7 @@ mod tests {
     #[test]
     fn preludes_equal_with_different_chunks() {
         let hdr = RadHeader {
+            spec_version: 0,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
