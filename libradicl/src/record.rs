@@ -363,10 +363,6 @@ pub struct GenericReadRecordContext {
     /// declared `Orientation` role. When set, the scatter filters alignments by the
     /// expected orientation; when `None`, all alignments are retained.
     pub ori_tag_idx: Option<usize>,
-    /// Index (into `read_tags`) of the UMI tag, from a declared `Umi` role. Not
-    /// used by collation (the UMI rides through as a value); recorded for a future
-    /// generic quant path.
-    pub umi_tag_idx: Option<usize>,
 }
 
 /// Fixed on-disk byte width of an integer tag type. Panics on a non-integer
@@ -726,7 +722,6 @@ impl RecordContext for GenericReadRecordContext {
             // reading is collation-agnostic; the collate entry point sets these.
             key_tag_idx: None,
             ori_tag_idx: None,
-            umi_tag_idx: None,
         })
     }
 }

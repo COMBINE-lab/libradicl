@@ -396,10 +396,10 @@ impl RadPrelude {
             .context("could not write the file-level tags of the prelude")?;
         self.read_tags
             .write(writer, m)
-            .context("could not write the file-level tags of the prelude")?;
+            .context("could not write the read-level tags of the prelude")?;
         self.aln_tags
             .write(writer, m)
-            .context("could not write the file-level tags of the prelude")?;
+            .context("could not write the alignment-level tags of the prelude")?;
         Ok(())
     }
 
