@@ -17,13 +17,25 @@ future changes (starting with per-tag collation roles, #64) can be gated.
 A **versioned** prelude begins with:
 
 ```
-[ magic : 8 bytes = "RAD_FILE" ][ major : u8 ][ minor : u8 ][ ...header... ]
+[ magic : 8 bytes = "RAD_FILE" ][ major : u8 ][ minor : u8 ]
+[ ext_len : u32 ][ ext_len bytes ][ ...header... ]
 ```
 
 followed by the existing header (`is_paired : u8`, `ref_count : u64`, ref names,
-`num_chunks : u64`) and the three tag sections, exactly as before.
+`num_chunks : u64`) and the three tag sections. Tag *descriptors* in a versioned
+prelude additionally carry a role suffix (see **Tag roles** below).
 
-A **legacy** prelude has **no** prefix — it begins directly with `is_paired`.
+A **legacy** prelude has **no** prefix — it begins directly with `is_paired` — and
+its tag descriptors carry no role suffix.
+
+### Prelude extension block
+
+Immediately after `[major][minor]`, a versioned prelude carries a length-prefixed
+extension block: `[ext_len : u32]` followed by `ext_len` opaque bytes. It is
+**empty (`ext_len == 0`) today**. It exists so a future *minor* can add
+file-level metadata that older readers skip wholesale (`ext_len` bytes) rather
+than desyncing — the mechanism that makes "minor is additive" real for the
+prelude itself. A reader reads `ext_len` and discards that many bytes.
 
 ### Detecting versioned vs legacy
 
@@ -60,12 +72,45 @@ Reserved values:
 This build writes/understands **major 2, minor 0**
 (`constants::RAD_SPEC_MAJOR` / `RAD_SPEC_MINOR`).
 
+## Tag roles (per-`TagDesc`)
+
+In a versioned prelude (major ≥ 2) **every** tag descriptor — in all three tag
+sections — carries a semantic role suffix after its existing `[name][type]`
+encoding:
+
+```
+[ role_code : u8 ][ plen : u8 ][ plen payload bytes ]
+```
+
+`plen` is the length of the role's parameter payload, so a reader can skip a role
+code it does not recognize (a newer *minor*'s addition) by `plen` bytes, and can
+read a known role whose payload *grew* in a newer minor by taking the fields it
+knows and advancing to `plen`. Neither desyncs the descriptor stream — this is
+what makes new/extended roles a *minor* (not major) change. A payload cannot
+exceed 255 bytes.
+
+| code | role | payload (`plen`) |
+|-----:|------|------------------|
+| 0 | `None` (unannotated; default) | — (`plen` = 0) |
+| 1 | `Barcode` | `[level : u8][len : u8]` (`plen` = 2) — collation level (0 = outermost/sample) and barcode nucleotide length (`0` = unspecified) |
+| 2 | `Umi` | `[len : u8]` (`plen` = 1) — UMI nucleotide length (`0` = unspecified) |
+| 3 | `Reference` | — (`plen` = 0) |
+| 4 | `Orientation` | — (`plen` = 0) |
+
+An unknown code decodes to `None` (its `plen` bytes skipped). Legacy (major 0)
+preludes carry **no** role bytes and always read/write `None`.
+
+Because `Barcode`/`Umi` carry the barcode/UMI nucleotide lengths, a fully
+role-annotated RAD needs no `cblen`/`ulen`/`bNlen` file tags; readers prefer the
+role length and fall back to those file tags for un-annotated files.
+
 ## Compatibility notes
 
 - **Reading** old files is unchanged: legacy preludes parse exactly as before.
-- **Writing** is unchanged until a producer opts in: `RadHeader::write` emits the
-  prefix only when `major_version >= RAD_FIRST_VERSIONED_MAJOR`; a default
-  (`major_version == 0`) header writes byte-for-byte as a legacy prelude.
+- **Writing** is unchanged until a producer opts in: the header's version is a
+  `SpecVersion` (`Legacy` | `Versioned { major, minor }`), and `RadHeader::write`
+  emits the prefix + extension block + role suffixes only for `Versioned`; a
+  `Legacy` header writes byte-for-byte as a pre-versioning prelude.
 - A **versioned** file is not readable by a pre-magic reader (it would try to read
   the magic as `is_paired`/`ref_count`). Producers (piscem, salmon) and all RAD
   readers must therefore adopt the magic before versioned files are emitted;
@@ -77,5 +122,8 @@ This build writes/understands **major 2, minor 0**
 
 - `constants::RAD_MAGIC`, `RAD_SPEC_MAJOR`, `RAD_SPEC_MINOR`,
   `RAD_FIRST_VERSIONED_MAJOR`
-- `RadHeader::{from_bytes, write, get_size}` (`libradicl/src/header.rs`)
+- `header::SpecVersion`, `RadHeader::{from_bytes, write, get_size}`
+  (`libradicl/src/header.rs`)
+- `rad_types::TagRole` + `TagRole::{write, read}` (the role wire format above),
+  `TagDesc::{new, with_role}` (`libradicl/src/rad_types.rs`)
 - COMBINE-lab/libradicl#64 (roles), #65 (roles design)
