@@ -96,9 +96,21 @@ exceed 255 bytes.
 | 2 | `Umi` | `[len : u8]` (`plen` = 1) — UMI nucleotide length (`0` = unspecified) |
 | 3 | `Reference` | — (`plen` = 0) |
 | 4 | `Orientation` | — (`plen` = 0) |
+| 5 | `MappingPosition` | — (`plen` = 0) — an alignment's mapping start coordinate (e.g. scATAC `start_pos`, long-read `starts`) |
+| 6 | `FragmentLength` | — (`plen` = 0) — the fragment/template length of an alignment (e.g. scATAC `frag_lengths`, long-read `tlens`) |
+| 7 | `MappingType` | — (`plen` = 0) — the mapping-category flag for an alignment (e.g. scATAC `map_type`) |
 
 An unknown code decodes to `None` (its `plen` bytes skipped). Legacy (major 0)
 preludes carry **no** role bytes and always read/write `None`.
+
+Codes 3–7 are **reserved semantic markers**: their integer widths come from the
+`TagDesc`, so they carry no payload, and this build writes/reads them but does not
+yet *consume* them (records are still built by position, not by these roles). They
+exist so a producer can self-describe the alignment fields — notably the scATAC
+`start_pos`/`frag_lengths`/`map_type` — and a future reader can build the record
+layout from roles rather than by convention, without a major bump. New roles are
+always added by allocating the next code (an additive *minor*); a reader that
+predates one skips it by `plen`.
 
 Because `Barcode`/`Umi` carry the barcode/UMI nucleotide lengths, a fully
 role-annotated RAD needs no `cblen`/`ulen`/`bNlen` file tags; readers prefer the

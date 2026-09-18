@@ -76,6 +76,20 @@ pub enum TagRole {
     Reference,
     /// Orientation (or the field packing it, e.g. an ori+ref_id word).
     Orientation,
+    /// An alignment's mapping start coordinate on its reference (e.g. scATAC
+    /// `start_pos`, long-read `starts`). Reserved semantic marker: the integer
+    /// width comes from the [`TagDesc`], so the role carries no payload. Not yet
+    /// consumed — present so a producer can self-describe the position field and a
+    /// future reader can build the record layout from roles instead of by position.
+    MappingPosition,
+    /// The fragment/template length of an alignment (e.g. scATAC `frag_lengths`,
+    /// long-read `tlens`). Reserved semantic marker; no payload (width from the
+    /// [`TagDesc`]). Not yet consumed.
+    FragmentLength,
+    /// The mapping-category flag for an alignment (e.g. the scATAC `map_type`).
+    /// Reserved semantic marker; no payload (width from the [`TagDesc`]). Not yet
+    /// consumed.
+    MappingType,
 }
 
 impl TagRole {
@@ -87,6 +101,9 @@ impl TagRole {
             TagRole::Umi { .. } => 2,
             TagRole::Reference => 3,
             TagRole::Orientation => 4,
+            TagRole::MappingPosition => 5,
+            TagRole::FragmentLength => 6,
+            TagRole::MappingType => 7,
         }
     }
 
@@ -95,7 +112,12 @@ impl TagRole {
         match self {
             TagRole::Barcode { level, len } => vec![*level, *len],
             TagRole::Umi { len } => vec![*len],
-            TagRole::None | TagRole::Reference | TagRole::Orientation => Vec::new(),
+            TagRole::None
+            | TagRole::Reference
+            | TagRole::Orientation
+            | TagRole::MappingPosition
+            | TagRole::FragmentLength
+            | TagRole::MappingType => Vec::new(),
         }
     }
 
@@ -159,6 +181,9 @@ impl TagRole {
             }
             3 => TagRole::Reference,
             4 => TagRole::Orientation,
+            5 => TagRole::MappingPosition,
+            6 => TagRole::FragmentLength,
+            7 => TagRole::MappingType,
             _ => TagRole::None,
         })
     }
@@ -2505,12 +2530,15 @@ mod tests {
     fn tag_role_wire_bytes_are_stable() {
         // Freeze the on-disk role encoding [code][plen][payload] so accidental wire
         // drift is caught. If you change these bytes you are changing the RAD format.
-        let cases: [(TagRole, &[u8]); 5] = [
+        let cases: [(TagRole, &[u8]); 8] = [
             (TagRole::None, &[0, 0]),
             (TagRole::Barcode { level: 1, len: 16 }, &[1, 2, 1, 16]),
             (TagRole::Umi { len: 12 }, &[2, 1, 12]),
             (TagRole::Reference, &[3, 0]),
             (TagRole::Orientation, &[4, 0]),
+            (TagRole::MappingPosition, &[5, 0]),
+            (TagRole::FragmentLength, &[6, 0]),
+            (TagRole::MappingType, &[7, 0]),
         ];
         for (role, bytes) in cases {
             let mut buf = Vec::new();
