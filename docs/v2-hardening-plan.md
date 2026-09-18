@@ -106,6 +106,16 @@ converted once alongside the rename (landing them now churns ~20 sites twice).
 
 ## P2 — release / cleanup
 
+Status: **Phase A (code) + Phase B (docs) DONE.** P1-7 remainder (SpecVersion
+enum + `#[non_exhaustive]` TagDesc), P2-5 (dead `umi_tag_idx` removed, doc strings
+fixed, `Reference` kept), P2-6 (fast-path contexts through `prefer_roles`; atac
+positional read documented), P2-4 (`collate_generic`→`bucket_gather`,
+`Generic*`→`TagDriven*`), P2-3 (dev examples gated behind `dev-tools`), and P2-7
+(rad-prelude-versioning.md normative for roles + ext block; #65 design doc
+updated) are landed. **Remaining: Phase C release mechanics (P2-1, P2-2) — the
+crates.io publish boundary, to be run with the maintainer.**
+
+
 - **P2-1 [FIX] (D18)** libradicl → `0.20.0` + CHANGELOG (removed fns, changed
   TagSection/TagDesc signatures, new role field + v2 prelude/role wire format).
   Publish to crates.io.
