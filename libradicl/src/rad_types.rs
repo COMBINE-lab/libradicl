@@ -161,6 +161,23 @@ impl TagRole {
 }
 
 impl TagDesc {
+    /// Create a tag descriptor with no semantic role (the common case). Prefer
+    /// this (and [`Self::with_role`]) over a struct literal so adding fields later
+    /// doesn't break call sites.
+    pub fn new(name: impl Into<String>, typeid: RadType) -> Self {
+        Self {
+            name: name.into(),
+            typeid,
+            role: TagRole::None,
+        }
+    }
+
+    /// Builder: attach a semantic [`TagRole`] to this descriptor.
+    pub fn with_role(mut self, role: TagRole) -> Self {
+        self.role = role;
+        self
+    }
+
     /// Write this [TagDesc] to the provided `writer`, propagating any
     /// error that may occur. `spec_major` is the RAD spec major version being
     /// written: the role suffix is emitted only for versioned files
