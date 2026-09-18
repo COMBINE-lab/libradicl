@@ -1,0 +1,89 @@
+---
+title: Motivation & design principles
+description: Why RAD looks the way it does — the goals that shaped the format.
+---
+
+RAD exists to move mapping results from a mapper to a quantifier as cheaply as
+possible while remaining flexible enough to serve very different assays
+(bulk RNA-seq, single-cell RNA-seq, single-cell ATAC-seq, long reads). A handful
+of principles shaped every decision in the format.
+
+## 1. Carry only what the quantifier needs
+
+The format is *reduced* on purpose. A quantifier resolving reads to transcripts
+or to cells does not need the read sequence, the base qualities, or a CIGAR
+string; it needs the set of compatible targets and a little per-read metadata.
+By omitting everything else, RAD files are a fraction of the size of the
+equivalent BAM and can be produced and consumed with very little CPU spent on
+parsing.
+
+A direct corollary: **fields are stored at the narrowest integer width that
+fits.** A file with fewer than 2³² references stores reference IDs as `u32`; a
+barcode that fits in 32 bits is not stored in 64. The [type system](/libradicl/format/type-system/)
+exists to make this width explicit and machine-readable.
+
+## 2. Independent chunks for lock-free parallelism
+
+Everything after the prelude is a sequence of **chunks**, and each chunk is
+self-delimiting: its header states how many bytes and how many records it
+contains. A reader can therefore skip, distribute, or parse chunks without
+consulting anything else in the file. The reference implementation uses this to
+run one I/O thread that dispatches chunks to a worker pool through a lock-free
+queue — there is no per-record contention, and throughput scales with cores until
+the disk or the mapper upstream becomes the limit.
+
+This is also why the record layout is *fixed within a file*: a worker handed a
+raw chunk must be able to parse it using only the prelude it read once at the
+start.
+
+## 3. Self-description over convention
+
+Rather than bake a single record layout into readers, RAD declares its dynamic
+fields in the prelude. Three [tag sections](/libradicl/format/tags/) — file,
+read, and alignment — name the fields present at each level and give each a type.
+A reader builds its parser from these declarations.
+
+The benefit is that one library and one file format serve many assays. A
+single-cell RNA record and a single-cell ATAC record are both "a barcode, then a
+per-alignment payload"; they differ only in which tags the prelude declares. New
+assays can be expressed without a new format.
+
+## 4. Evolve without breaking readers
+
+Early RAD had no version field at all — the file began directly with header
+bytes — so any change to the layout risked silently desynchronizing existing
+readers. Version 2 fixes this with two mechanisms, described on the
+[spec versioning](/libradicl/versioning/spec-versioning/) page:
+
+- a **magic signature** plus an explicit `major.minor` **spec version**, so a
+  reader can detect the format and refuse a file it is too old to understand
+  rather than misparse it; and
+- an **extension block** and a length-prefixed **role** encoding, so that
+  *additive* changes (a new optional file field, a new semantic role) are
+  **minor** bumps that older readers skip cleanly instead of choking on.
+
+The guiding rule: a *major* bump is a breaking layout change; a *minor* bump is
+additive and forward-compatible. A reader accepts any minor within a major it
+supports and ignores what it does not recognize.
+
+## 5. Meaning travels with the data (roles)
+
+Historically, a consumer knew that the tag named `b` was the barcode and `u` was
+the UMI purely by convention — the *names* were a private contract between
+producer and consumer. Version 2 introduces [tag roles](/libradicl/versioning/tag-roles/):
+each tag descriptor can declare a semantic role (`Barcode`, `Umi`, `Reference`,
+`Orientation`, and more), and the barcode/UMI roles even carry their nucleotide
+length. A file becomes **self-describing at the semantic level**, not just the
+type level, so a reader no longer needs out-of-band knowledge of tag-name
+conventions or separate `cblen`/`ulen` length tags.
+
+## What RAD is not
+
+- **Not an alignment archive.** It deliberately discards information (sequence,
+  quality, CIGAR) that cannot be reconstructed from it. It is not a replacement
+  for BAM when you need the full alignment.
+- **Not a random-access format.** It is a forward stream of chunks. Tools that
+  want random access build their own side indices (for example, a collated,
+  barcode-sorted RAD with a chunk offset table).
+- **Not human-readable.** It is a binary format; use [`libradicl`](https://github.com/COMBINE-lab/libradicl)
+  or the tools above to inspect it.

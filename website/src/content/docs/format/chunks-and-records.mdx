@@ -1,0 +1,87 @@
+---
+title: Chunks & records
+description: The record data — how chunks and per-read records are laid out.
+---
+
+Everything after the [file-level tag values](/libradicl/format/overview/#file-level-tag-values)
+is a sequence of **chunks**. There are exactly `num_chunks` of them (from the
+[header](/libradicl/format/prelude-and-header/#header)). Chunks are the unit of
+parallelism: each is self-delimiting and can be parsed independently.
+
+## Chunk
+
+```
+[ nbytes : u32 ]     # size in bytes of this chunk's record payload
+[ nrec   : u32 ]     # number of records in this chunk
+[ record_0 ][ record_1 ] … [ record_{nrec-1} ]
+```
+
+`nbytes` counts the record payload that follows the two header fields. Because it
+is present, a reader can:
+
+- **skip** a chunk without parsing its records, and
+- **hand a raw chunk to another thread** that will parse it using only the
+  prelude — no shared state, no locking.
+
+A common producer groups all the records for one cell barcode into a chunk, but
+the format does not require any particular grouping.
+
+## Record
+
+Each record describes one read and its alignments:
+
+```
+[ naln : u32 ]                 # number of alignments for this read
+[ read-level tag values ]      # one value per read-tag descriptor, in order
+[ alignment_0 ][ alignment_1 ] … [ alignment_{naln-1} ]
+```
+
+- **naln** — how many alignments this read has.
+- **read-level tag values** — one value for each descriptor in the *read* tag
+  section, in declared order. For single-cell data this is where the **cell
+  barcode** and **UMI** live (written once, shared by every alignment of the
+  read).
+- **alignments** — `naln` alignment payloads.
+
+## Alignment
+
+Each alignment is simply one value per descriptor in the *alignment* tag section,
+in declared order:
+
+```
+[ alignment-level tag values ]   # one value per alignment-tag descriptor
+```
+
+For a typical RNA RAD this is a single word encoding the **reference ID** and the
+mapping **orientation** (the orientation packed into the high bit of the
+reference index). Other assays declare more alignment tags — scATAC records, for
+instance, add a **mapping position**, a **fragment length**, and a **mapping
+type** per alignment. Which fields are present, and what they mean, is exactly
+what the [tag sections](/libradicl/format/tags/) and (in v2) their
+[roles](/libradicl/versioning/tag-roles/) declare.
+
+## Layout integrity
+
+Because [fixed-width tags precede variable-width ones](/libradicl/format/tags/#ordering-rule-fixed-before-variable),
+a reader can compute the exact byte size of a record under a purely fixed-width
+layout:
+
+```
+record_bytes = 4 (naln)
+             + Σ (read-tag widths)
+             + naln × Σ (alignment-tag widths)
+```
+
+and confirm that a chunk's records sum to its declared `nbytes`. The reference
+implementation runs this check on the first chunk to catch a producer whose
+records do not match the declared layout (for example, an undeclared per-record
+field). The check is skipped for layouts with variable-width tags and for
+per-chunk-compressed files.
+
+## Compression
+
+Some consumers write a *collated* RAD (records regrouped by barcode) in which
+each chunk's payload is independently compressed with a self-describing codec
+recorded in a file tag. Because each chunk is compressed on its own, the file
+remains a stream of independently decodable chunks, preserving the parallel-read
+property. The base format described here is uncompressed.

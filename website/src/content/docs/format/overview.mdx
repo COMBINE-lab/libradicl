@@ -1,0 +1,61 @@
+---
+title: File structure
+description: The top-level layout of a RAD file, from prelude to chunks.
+---
+
+A RAD file has two parts: a **prelude** that describes the file, followed by the
+**data** — file-level tag values and then a sequence of record chunks.
+
+```
+┌───────────────────────────────────────────────┐
+│ PRELUDE                                        │
+│   ├─ (v2 only) magic + version + extension     │  ← see Prelude & header
+│   ├─ header (paired flag, references, #chunks) │
+│   └─ tag sections: file / read / alignment     │  ← see Tag sections
+├───────────────────────────────────────────────┤
+│ FILE-LEVEL TAG VALUES                          │  ← one value per file tag
+├───────────────────────────────────────────────┤
+│ CHUNK 0   [nbytes][nrec] record record …       │  ┐
+│ CHUNK 1   [nbytes][nrec] record record …       │  ├─ see Chunks & records
+│ …                                              │  ┘
+└───────────────────────────────────────────────┘
+```
+
+## Prelude
+
+The prelude is everything a reader must consume before it can parse records. It
+consists of:
+
+1. In a **[versioned](/libradicl/versioning/spec-versioning/) (v2)** file, a
+   magic signature `RAD_FILE`, the `major.minor` spec version, and a
+   length-prefixed **extension block**. A **legacy** file omits these and begins
+   directly at the header.
+2. The **header** — the paired-end flag, the reference count and reference names,
+   and the number of chunks. See [prelude & header](/libradicl/format/prelude-and-header/).
+3. Three **tag sections** — descriptors for the dynamic fields at the *file*,
+   *read*, and *alignment* levels. See [tag sections](/libradicl/format/tags/).
+
+## File-level tag values
+
+Immediately after the prelude, the file writes **one value for each descriptor in
+the file-tag section**, in order. These are properties that apply to the whole
+file — for example, the barcode and UMI lengths (`cblen` / `ulen`) in a
+single-cell RAD. Read- and alignment-level tag *values*, by contrast, appear
+inside each record, not here.
+
+## Chunks
+
+The rest of the file is a sequence of **chunks**. Each chunk is self-delimiting —
+its header gives the number of bytes and the number of records it contains — so
+chunks can be read and dispatched to worker threads independently. Each record
+within a chunk holds an alignment count, the read-level tag values, and then one
+alignment-level payload per alignment. See [chunks & records](/libradicl/format/chunks-and-records/).
+
+## Endianness and conventions
+
+- All multi-byte integers are **little-endian**.
+- Strings are length-prefixed: a `u16` length followed by that many `u8` bytes
+  (UTF-8/ASCII). There is no trailing `NUL`.
+- Arrays are a length followed by the elements (see the [type system](/libradicl/format/type-system/)).
+- Within a tag section, **fixed-width descriptors precede variable-width ones**
+  (see [tag sections](/libradicl/format/tags/)).

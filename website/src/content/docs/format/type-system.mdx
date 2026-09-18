@@ -1,0 +1,78 @@
+---
+title: Type system
+description: The RAD data types and how tag values are encoded.
+---
+
+Every dynamic field in a RAD file is described by a **type**. Types are what let
+the format store each field at the narrowest width that fits and let a reader
+parse a value it has never seen before. A type is encoded as a single `u8`
+identifier in a [tag descriptor](/libradicl/format/tags/).
+
+## Type identifiers
+
+| ID | Type | Width | Notes |
+|---:|------|-------|-------|
+| 0 | `bool` | 1 byte | |
+| 1 | `u8` | 1 byte | |
+| 2 | `u16` | 2 bytes | |
+| 3 | `u32` | 4 bytes | |
+| 4 | `u64` | 8 bytes | |
+| 5 | `f32` | 4 bytes | IEEE-754 |
+| 6 | `f64` | 8 bytes | IEEE-754 |
+| 7 | `array` | variable | see below |
+| 8 | `string` | variable | `u16` length + bytes |
+| 9 | `u128` | 16 bytes | |
+| 10 | `i8` | 1 byte | |
+| 11 | `i16` | 2 bytes | |
+| 12 | `i32` | 4 bytes | |
+| 13 | `i64` | 8 bytes | |
+| 14 | `i128` | 16 bytes | |
+
+All multi-byte integers and floats are **little-endian**.
+
+:::note
+The identifier values are not contiguous by width — the fixed-width unsigned
+integers and floats (`0`–`6`) and the two variable-length types (`7`, `8`) were
+assigned first; the wider and signed integers (`9`–`14`) were added later. Use
+the table, not the ordering, as the source of truth.
+:::
+
+## Fixed-width types
+
+The scalar types (`bool`, the signed/unsigned integers, and the floats) are
+stored as their natural little-endian byte representation, with no length prefix.
+A `bool` is a single byte, conventionally `0` or `1`.
+
+## Strings (ID 8)
+
+A string is:
+
+```
+[ length : u16 ][ length bytes ]
+```
+
+the bytes being the (UTF-8/ASCII) characters, with no trailing `NUL`. Reference
+names and tag names are encoded this way.
+
+## Arrays (ID 7)
+
+An array descriptor records **two** further type identifiers — the type of its
+*length* field and the type of its *elements*:
+
+```
+descriptor:  [ 7 ][ length_type : u8 ][ element_type : u8 ]
+value:       [ length : length_type ][ element … ]   # `length` elements
+```
+
+For example, an array of `u32` with a `u32` length is descriptor `7, 3, 3`, and a
+value is a `u32` count followed by that many `u32`s. **Arrays do not nest** — the
+element type must be a scalar, not another array or string.
+
+## Signed and wide integers
+
+The signed integers (`i8`–`i128`) and the wide unsigned integer (`u128`) round
+out the set for fields that need them — for instance a barcode that does not fit
+in 64 bits. They are stored little-endian like the other integers. Not every
+consumer supports every width in every position; a reader that encounters a width
+it cannot handle for a given field should report a clear error rather than
+misparse.

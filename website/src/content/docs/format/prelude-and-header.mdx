@@ -1,0 +1,74 @@
+---
+title: Prelude & header
+description: The optional version prefix and the RAD header, byte by byte.
+---
+
+The prelude is what a reader consumes before any record. In a **version 2** file
+it begins with a small versioning prefix; in a **legacy** file it begins directly
+with the header. Detection is described under [spec versioning](/libradicl/versioning/spec-versioning/);
+this page gives the byte layout.
+
+## Versioned prefix (v2 only)
+
+```
+[ magic : 8 bytes = "RAD_FILE" ][ major : u8 ][ minor : u8 ]
+[ ext_len : u32 ][ ext_len bytes ]
+```
+
+- **magic** — the ASCII string `RAD_FILE`. Its first byte (`'R'` = `0x52`) can
+  never begin a legacy header, whose first byte is the paired flag (`0` or `1`),
+  which is what makes legacy-vs-versioned detection unambiguous.
+- **major / minor** — the [spec version](/libradicl/versioning/spec-versioning/).
+  This build writes **major 2, minor 0**.
+- **extension block** — a `u32` length followed by that many opaque bytes,
+  **empty (`ext_len == 0`) today**. It exists so a future *minor* can add
+  file-level metadata that older readers skip wholesale rather than desyncing.
+
+A **legacy** file has none of the above and starts at the header's paired flag.
+A reader reports it as major 0, minor 0.
+
+## Header
+
+The header follows (in both legacy and versioned files):
+
+```
+[ paired : u8 ]           # 1 = the file records paired-end reads, 0 = single
+[ ref_count : u64 ]       # number of reference sequences (targets)
+[ ref_name_0 ] … [ ref_name_{ref_count-1} ]   # each a u16-length-prefixed string
+[ num_chunks : u64 ]      # number of record chunks that follow the prelude
+```
+
+- **paired** — whether the mapped reads are paired-end.
+- **ref_count** + **reference names** — the target set. Each name is a
+  length-prefixed string (`u16` length, then the bytes). Reference IDs used
+  elsewhere in the file index into this list.
+- **num_chunks** — the number of [chunks](/libradicl/format/chunks-and-records/)
+  after the file-level tag values.
+
+:::note[num_chunks and streaming writers]
+A producer that does not know the chunk count up front may write a placeholder
+and **back-patch** `num_chunks` once the file is complete. Because the field sits
+at a fixed offset from the start of the file, a writer must account for the
+versioned prefix (magic + version + extension block) when seeking back to it —
+otherwise it overwrites reference-name bytes. Readers are unaffected; they simply
+read the final value.
+:::
+
+## Tag sections
+
+After the header come the three [tag sections](/libradicl/format/tags/) — file,
+read, and alignment — which declare the dynamic fields of the file. In a
+versioned file, each tag descriptor additionally carries a
+[role](/libradicl/versioning/tag-roles/) suffix.
+
+## Reader detection logic
+
+A reader sniffs the first 8 bytes:
+
+- If they equal `RAD_FILE`, the file is **versioned**; parse `major`, `minor`,
+  the extension block, then the header.
+- Otherwise the file is **legacy**; those 8 bytes are the beginning of the header
+  and must be fed back to the header parser.
+
+The reference implementation does this without requiring a seekable stream by
+splicing the sniffed bytes back in front of the reader.

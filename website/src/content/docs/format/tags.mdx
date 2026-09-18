@@ -1,0 +1,69 @@
+---
+title: Tag sections
+description: How RAD declares its dynamic fields at the file, read, and alignment levels.
+---
+
+Tags are how RAD is **self-describing**. Instead of hard-coding which fields a
+record contains, the prelude declares them in three **tag sections**, and a
+reader configures its parser from those declarations.
+
+## Three levels
+
+| Section | A value appears… | Typical contents |
+|---------|------------------|------------------|
+| **File tags** | once, right after the prelude | barcode length, UMI length, global metadata |
+| **Read tags** | once per read (record) | cell barcode, UMI |
+| **Alignment tags** | once per alignment within a record | reference ID, orientation, position |
+
+The distinction is about *where the value lives*, not what it means. A read-level
+field is written once per read and shared by all of that read's alignments; an
+alignment-level field is written once per alignment.
+
+## Section layout
+
+Each of the three sections is written as:
+
+```
+[ num_tags : u16 ][ descriptor_0 ][ descriptor_1 ] … [ descriptor_{num_tags-1} ]
+```
+
+A reader parses all three sections — file, then read, then alignment — in order.
+
+## Tag descriptor
+
+Each descriptor names a field and gives its [type](/libradicl/format/type-system/):
+
+```
+[ name : string ]        # u16 length + bytes
+[ type_id : u8 ]         # a RAD type identifier
+( if type_id == 7 (array):  [ length_type : u8 ][ element_type : u8 ] )
+( if versioned (v2):        [ role : … ] )    # see Tag roles
+```
+
+In a **[versioned](/libradicl/versioning/spec-versioning/)** file, every
+descriptor — in all three sections — additionally carries a semantic
+[**role**](/libradicl/versioning/tag-roles/) suffix, which is what lets a reader
+locate the barcode, UMI, reference, and orientation fields without relying on
+tag-name conventions. Legacy files carry no role bytes.
+
+## Ordering rule: fixed before variable
+
+Within a section, **all fixed-width descriptors must come before any
+variable-width one** (`string` or `array`). This lets a reader compute the byte
+stride of the fixed portion of a record up front and validate that a chunk's
+records exactly fill its declared byte length — a cheap integrity check the
+reference implementation performs on the first chunk.
+
+## Example (single-cell RNA)
+
+A typical single-cell RNA RAD declares:
+
+- **File tags:** `cblen : u16`, `ulen : u16` — the barcode and UMI lengths.
+- **Read tags:** `b` (barcode, e.g. `u32`/`u64`), `u` (UMI, e.g. `u32`/`u64`).
+- **Alignment tags:** a reference/orientation field (often an `orientation + ref
+  ID` word) per alignment.
+
+A reader that understands these names (legacy) or reads their v2
+[roles](/libradicl/versioning/tag-roles/) knows how to extract the barcode, the
+UMI, and each alignment's target — without the format prescribing a single fixed
+record struct.
