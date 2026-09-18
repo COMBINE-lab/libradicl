@@ -1,0 +1,85 @@
+---
+title: Tag roles
+description: The v2 role system that makes RAD self-describing at the semantic level.
+---
+
+In version 2, every [tag descriptor](/libradicl/format/tags/#tag-descriptor)
+carries a semantic **role**. A role tells a reader *what a field means* —
+"this is the cell barcode", "this is the UMI", "this is the reference ID" — so a
+consumer no longer needs out-of-band knowledge of tag-name conventions (that `b`
+means barcode, `u` means UMI) or separate length tags (`cblen`, `ulen`) to
+interpret a file. The barcode and UMI roles even carry their nucleotide length,
+making those fields fully self-describing.
+
+Roles are present only in [versioned](/libradicl/versioning/spec-versioning/)
+files (major ≥ 2); legacy files carry no role bytes and every tag reads as
+`None`.
+
+## Wire encoding
+
+Each role is serialized, right after the descriptor's `[name][type]`, as:
+
+```
+[ role_code : u8 ][ plen : u8 ][ plen payload bytes ]
+```
+
+`plen` is the length of the role's parameter payload. This uniform, length-
+prefixed shape is what makes new and extended roles an **additive minor** rather
+than a breaking change:
+
+- a reader that meets an **unknown** role code (from a newer minor) decodes it as
+  `None` and skips `plen` bytes;
+- a reader that meets a **known** role whose payload **grew** in a newer minor
+  reads the fields it understands and advances to `plen`.
+
+Neither desyncs the descriptor stream. A payload cannot exceed 255 bytes (the
+`u8` `plen`); no role approaches that.
+
+## Role registry
+
+| code | role | payload (`plen`) | meaning |
+|-----:|------|------------------|---------|
+| 0 | `None` | — (`plen` = 0) | unannotated; the default, and every legacy tag |
+| 1 | `Barcode` | `[level : u8][len : u8]` (2) | a barcode level in the collation key; `level` orders outer→inner (0 = outermost / sample), `len` = nucleotide length (`0` = unspecified) |
+| 2 | `Umi` | `[len : u8]` (1) | the UMI; `len` = nucleotide length (`0` = unspecified) |
+| 3 | `Reference` | — (0) | an alignment's target reference ID |
+| 4 | `Orientation` | — (0) | orientation (or the field packing it, e.g. an orientation + reference-ID word) |
+| 5 | `MappingPosition` | — (0) | an alignment's mapping start coordinate (e.g. scATAC `start_pos`) |
+| 6 | `FragmentLength` | — (0) | the fragment/template length of an alignment (e.g. scATAC `frag_lengths`) |
+| 7 | `MappingType` | — (0) | the mapping-category flag for an alignment (e.g. scATAC `map_type`) |
+
+An unknown code decodes to `None` (its `plen` bytes skipped).
+
+:::note[Reserved vs. consumed]
+Codes 3–7 are **reserved semantic markers**: their integer widths come from the
+[`TagDesc`](/libradicl/format/tags/#tag-descriptor), so they carry no payload.
+`Barcode`, `Umi`, and `Orientation` are consumed today (they drive collation,
+deduplication, and orientation filtering). `Reference`, `MappingPosition`,
+`FragmentLength`, and `MappingType` are allocated and written but not yet
+*consumed* by the reference reader — they exist so a producer can self-describe
+those fields (notably the scATAC alignment fields) against a stable code
+allocation, and so a future reader can build a record's layout from roles instead
+of by position, without a major bump.
+:::
+
+## Why roles matter
+
+- **No name conventions.** A consumer finds the barcode by its `Barcode` role,
+  not by hoping the producer named the tag `b`. Producers remain free to name
+  tags anything.
+- **No separate length tags.** Because `Barcode` and `Umi` carry `len`, a fully
+  role-annotated file needs no `cblen`/`ulen`/`bNlen` file tags. Readers prefer
+  the role length and fall back to those file tags only for un-annotated files;
+  when both are present the role wins and a mismatch is a warning, not an error.
+- **Composite / hierarchical keys.** Multiple `Barcode` roles with increasing
+  `level` describe a hierarchical collation key — for example a *sample* barcode
+  (level 0) and a *cell* barcode (level 1) in a multiplexed assay — so one code
+  path handles single- and multi-barcode files alike.
+
+## Growing the registry
+
+New roles are always added by **allocating the next unused code** as an additive
+*minor* bump. A reader that predates a role skips it by `plen` and treats the tag
+as `None`, so old readers keep working. This is the intended path for future
+alignment fields (for example, per-alignment scores or explicit end positions)
+once a producer and consumer need them.

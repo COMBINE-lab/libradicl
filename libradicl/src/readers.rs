@@ -298,9 +298,12 @@ where
     // we include the endpoint here because we will not actually
     // copy a chunk in the first iteration (since we have not yet
     // read the chunk header, which comes at the end of the loop).
+    // Prefer the RAD's declared tag roles (#64) so a role-annotated file whose
+    // tags use non-conventional names is filtered/parsed correctly; falls back to
+    // the tag-name bridge for un-annotated (legacy) files.
     let record_context = prelude
-        .get_record_context::<<R as MappedRecord>::ParsingContext>()
-        .unwrap();
+        .get_record_context_prefer_roles::<<R as MappedRecord>::ParsingContext>()
+        .context("could not build the record context for the chunk reader")?;
     while let Some(chunk_num) = chunk_iter.next() {
         // while until_fn(chunk_num, &mut br) {
         // in the first iteration we've not read a header yet
@@ -480,9 +483,12 @@ where
     // we include the endpoint here because we will not actually
     // copy a chunk in the first iteration (since we have not yet
     // read the chunk header, which comes at the end of the loop).
+    // Prefer the RAD's declared tag roles (#64) so a role-annotated file whose
+    // tags use non-conventional names is filtered/parsed correctly; falls back to
+    // the tag-name bridge for un-annotated (legacy) files.
     let record_context = prelude
-        .get_record_context::<<R as MappedRecord>::ParsingContext>()
-        .unwrap();
+        .get_record_context_prefer_roles::<<R as MappedRecord>::ParsingContext>()
+        .context("could not build the record context for the chunk reader")?;
 
     while let Some(chunk_num) = chunk_iter.next() {
         //while until_fn(chunk_num, &mut br) {
@@ -1492,6 +1498,7 @@ mod tests {
         use std::io::Cursor;
 
         let hdr = crate::header::RadHeader {
+            version: crate::header::SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".into(), "tgt2".into(), "tgt3".into()],
@@ -1500,12 +1507,14 @@ mod tests {
         let mut file_tags = TagSection::new_with_label(TagSectionLabel::FileTags);
         for name in ["bclen", "umilen"] {
             file_tags.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: name.to_string(),
                 typeid: RadType::Int(RadIntId::U16),
             });
         }
         if codec_tag.is_some() {
             file_tags.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: crate::codec::CHUNK_CODEC_TAG.to_string(),
                 typeid: RadType::Int(RadIntId::U8),
             });
@@ -1513,12 +1522,14 @@ mod tests {
         let mut read_tags = TagSection::new_with_label(TagSectionLabel::ReadTags);
         for name in ["b", "u"] {
             read_tags.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: name.to_string(),
                 typeid: RadType::Int(RadIntId::U32),
             });
         }
         let mut aln_tags = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
         aln_tags.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_refid".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });

@@ -104,6 +104,65 @@ impl Hasher for U64Hasher {
     }
 }
 
+/// A `HashMap` keyed on a `u128` with the fixed, non-cryptographic
+/// [`U128BuildHasher`].
+///
+/// The generic collation gather ([`crate::bucket_gather::collate_bucket`]) keys
+/// its per-cell accounting map on a `u128` collation key (wide enough for a `u128`
+/// barcode or a composite sample+cell key), touched once per record over the whole
+/// bucket. Like [`U64Map`] it wants the fast fixed hasher, not the randomized one.
+pub type U128Map<V> = std::collections::HashMap<u128, V, U128BuildHasher>;
+
+/// A fixed-seed, allocation-free `BuildHasher` for `u128` keys — the `u128`
+/// analogue of [`U64BuildHasher`]. It folds the two 64-bit halves together and
+/// applies the same `FxHash` multiply step, so a `u128` key costs one extra xor
+/// over the `u64` case while keeping the good high-bit spread SwissTable relies on.
+/// See [`U64BuildHasher`] for the full rationale (determinism, distribution, why
+/// the randomized `ahash` is overkill on this access pattern).
+#[derive(Clone, Copy, Default)]
+pub struct U128BuildHasher;
+
+impl BuildHasher for U128BuildHasher {
+    type Hasher = U128Hasher;
+    #[inline]
+    fn build_hasher(&self) -> U128Hasher {
+        U128Hasher(0)
+    }
+}
+
+/// The [`Hasher`] produced by [`U128BuildHasher`]. See its docs.
+pub struct U128Hasher(u64);
+
+impl Hasher for U128Hasher {
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        // Fold the halves, then the FxHash combine step (see `U64Hasher`).
+        let folded = (i as u64) ^ ((i >> 64) as u64);
+        self.0 = (self.0.rotate_left(5) ^ folded).wrapping_mul(K);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(K);
+    }
+
+    /// Fallback for keys that are not a single `u128`. The collation map never
+    /// hits this (every key is `u128`); kept correct for general reuse.
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut acc = self.0;
+        for &b in bytes {
+            acc = (acc.rotate_left(5) ^ u64::from(b)).wrapping_mul(K);
+        }
+        self.0 = acc;
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod hash_tests {
     use super::*;

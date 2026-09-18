@@ -38,16 +38,180 @@ const I128ID: u8 = 14_u8;
 /// that the tag should be given, and the type of value that it
 /// holds.  At other points in the file, when this tag is used
 /// it will conform to this type description.
+/// `#[non_exhaustive]` so downstream crates construct via [`TagDesc::new`] /
+/// [`TagDesc::with_role`] and adding a field later (as `role` was) is not a
+/// breaking change for them.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TagDesc {
     pub name: String,
     pub typeid: RadType,
+    /// Optional semantic role (barcode/UMI/reference/orientation). Only carried on
+    /// disk in versioned RAD files (spec major >= 2); legacy files always read/write
+    /// [`TagRole::None`]. See COMBINE-lab/libradicl#64.
+    pub role: TagRole,
+}
+
+/// The semantic role of a tag, letting a reader locate the collation key (barcode
+/// levels), UMI, reference, and orientation fields from the RAD itself rather than
+/// from out-of-band tag-name conventions. Serialized per [`TagDesc`] only in
+/// versioned files (spec major >= 2). See COMBINE-lab/libradicl#64.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TagRole {
+    /// No declared role (the default; all legacy tags).
+    #[default]
+    None,
+    /// A barcode level contributing to the collation key, ordered outer→inner
+    /// (level 0 = outermost, e.g. sample; the innermost level is the cell).
+    /// `len` is the barcode's nucleotide length (needed e.g. for the Hamming
+    /// correction neighborhood); `0` means unspecified. This makes a barcode fully
+    /// self-describing — column and int type from the [`TagDesc`], plus order and
+    /// length from the role — with no reliance on `bNlen`/`cblen` file tags.
+    Barcode { level: u8, len: u8 },
+    /// The UMI. `len` is its nucleotide length (e.g. to render the UMI as
+    /// nucleotides, as `convert` does); `0` means unspecified. As with `Barcode`,
+    /// this makes the UMI self-describing with no reliance on a `ulen` file tag.
+    Umi { len: u8 },
+    /// An alignment's target reference id.
+    Reference,
+    /// Orientation (or the field packing it, e.g. an ori+ref_id word).
+    Orientation,
+    /// An alignment's mapping start coordinate on its reference (e.g. scATAC
+    /// `start_pos`, long-read `starts`). Reserved semantic marker: the integer
+    /// width comes from the [`TagDesc`], so the role carries no payload. Not yet
+    /// consumed — present so a producer can self-describe the position field and a
+    /// future reader can build the record layout from roles instead of by position.
+    MappingPosition,
+    /// The fragment/template length of an alignment (e.g. scATAC `frag_lengths`,
+    /// long-read `tlens`). Reserved semantic marker; no payload (width from the
+    /// [`TagDesc`]). Not yet consumed.
+    FragmentLength,
+    /// The mapping-category flag for an alignment (e.g. the scATAC `map_type`).
+    /// Reserved semantic marker; no payload (width from the [`TagDesc`]). Not yet
+    /// consumed.
+    MappingType,
+}
+
+impl TagRole {
+    #[inline]
+    fn code(&self) -> u8 {
+        match self {
+            TagRole::None => 0,
+            TagRole::Barcode { .. } => 1,
+            TagRole::Umi { .. } => 2,
+            TagRole::Reference => 3,
+            TagRole::Orientation => 4,
+            TagRole::MappingPosition => 5,
+            TagRole::FragmentLength => 6,
+            TagRole::MappingType => 7,
+        }
+    }
+
+    /// The role's parameter payload (everything after the `[code][plen]` prefix).
+    fn payload(&self) -> Vec<u8> {
+        match self {
+            TagRole::Barcode { level, len } => vec![*level, *len],
+            TagRole::Umi { len } => vec![*len],
+            TagRole::None
+            | TagRole::Reference
+            | TagRole::Orientation
+            | TagRole::MappingPosition
+            | TagRole::FragmentLength
+            | TagRole::MappingType => Vec::new(),
+        }
+    }
+
+    /// Serialize the role as `[code:u8][plen:u8][payload]` — uniform for every
+    /// role, including `None` (`[0][0]`). The explicit `plen` is what makes the
+    /// format forward-compatible within a major version: a reader skips an unknown
+    /// role code (from a newer *minor*) by `plen`, and reads a known role whose
+    /// payload *grew* in a newer minor by taking the fields it knows and advancing
+    /// to `plen`. Neither desyncs the descriptor stream. Payloads are capped at
+    /// 255 bytes (`u8` plen); no role approaches that.
+    fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        let payload = self.payload();
+        let plen = u8::try_from(payload.len())
+            .map_err(|_| anyhow::anyhow!("tag role payload exceeds 255 bytes"))?;
+        writer
+            .write_all(&[self.code(), plen])
+            .context("could not write tag role header")?;
+        writer
+            .write_all(&payload)
+            .context("could not write tag role payload")?;
+        Ok(())
+    }
+
+    /// Read a role written as `[code][plen][payload]`. A known code parses its
+    /// fields from the payload; an unknown code (newer minor) decodes to
+    /// [`TagRole::None`]. Either way the reader advances exactly `plen` payload
+    /// bytes, so the descriptor stream never desyncs. A known code whose declared
+    /// `plen` is shorter than its fields require is a malformed/too-old-for-this
+    /// payload and errors.
+    fn read<R: Read>(reader: &mut R) -> anyhow::Result<Self> {
+        let mut hdr = [0u8; 2];
+        reader
+            .read_exact(&mut hdr)
+            .context("could not read tag role header")?;
+        let (code, plen) = (hdr[0], hdr[1] as usize);
+        let mut payload = vec![0u8; plen];
+        reader
+            .read_exact(&mut payload)
+            .context("could not read tag role payload")?;
+        // A known role reads the fields it understands from the front of the
+        // payload; extra trailing bytes (a future minor's additions) are ignored.
+        let need = |n: usize| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                payload.len() >= n,
+                "tag role code {code} payload is {} bytes, need at least {n}",
+                payload.len()
+            );
+            Ok(())
+        };
+        Ok(match code {
+            1 => {
+                need(2)?;
+                TagRole::Barcode {
+                    level: payload[0],
+                    len: payload[1],
+                }
+            }
+            2 => {
+                need(1)?;
+                TagRole::Umi { len: payload[0] }
+            }
+            3 => TagRole::Reference,
+            4 => TagRole::Orientation,
+            5 => TagRole::MappingPosition,
+            6 => TagRole::FragmentLength,
+            7 => TagRole::MappingType,
+            _ => TagRole::None,
+        })
+    }
 }
 
 impl TagDesc {
+    /// Create a tag descriptor with no semantic role (the common case). Prefer
+    /// this (and [`Self::with_role`]) over a struct literal so adding fields later
+    /// doesn't break call sites.
+    pub fn new(name: impl Into<String>, typeid: RadType) -> Self {
+        Self {
+            name: name.into(),
+            typeid,
+            role: TagRole::None,
+        }
+    }
+
+    /// Builder: attach a semantic [`TagRole`] to this descriptor.
+    pub fn with_role(mut self, role: TagRole) -> Self {
+        self.role = role;
+        self
+    }
+
     /// Write this [TagDesc] to the provided `writer`, propagating any
-    /// error that may occur.
-    pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+    /// error that may occur. `spec_major` is the RAD spec major version being
+    /// written: the role suffix is emitted only for versioned files
+    /// (`spec_major >= `[`crate::constants::RAD_FIRST_VERSIONED_MAJOR`]).
+    pub fn write<W: Write>(&self, writer: &mut W, spec_major: u8) -> anyhow::Result<()> {
         // write the name
         let name_len: u16 = self
             .name
@@ -76,6 +240,9 @@ impl TagDesc {
                 .write_all(&val_id.to_le_bytes())
                 .context("could not write Array value type")?;
         };
+        if spec_major >= crate::constants::RAD_FIRST_VERSIONED_MAJOR {
+            self.role.write(writer)?;
+        }
         Ok(())
     }
 }
@@ -116,7 +283,7 @@ impl TagSection {
     }
 
     /// Write the tag section to the provided writer
-    pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+    pub fn write<W: Write>(&self, writer: &mut W, spec_major: u8) -> anyhow::Result<()> {
         let num_tags: u16 = self
             .tags
             .len()
@@ -127,7 +294,7 @@ impl TagSection {
             .context("couldn't write number of tags to writer")?;
 
         for tag in &self.tags {
-            tag.write(writer)?;
+            tag.write(writer, spec_major)?;
         }
         Ok(())
     }
@@ -146,6 +313,7 @@ impl TagSection {
             section.add_tag_desc(TagDesc {
                 name: name.to_string(),
                 typeid: value.rad_type(),
+                role: TagRole::None,
             });
         }
         let mut tag_map = TagMap::with_keyset(&section.tags);
@@ -164,10 +332,12 @@ impl TagSection {
         self.add_tag_desc(TagDesc {
             name: format!("{name}.keys"),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(key_type)),
+            role: TagRole::None,
         });
         self.add_tag_desc(TagDesc {
             name: format!("{name}.values"),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(val_type)),
+            role: TagRole::None,
         });
     }
 }
@@ -1578,7 +1748,7 @@ impl TagDesc {
     /// `reader` is positioned at the start of a valid [TagDesc], then this
     /// [TagDesc] is returned.  Otherwise, a description of the error is returned
     /// via an [anyhow::Error].
-    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<TagDesc> {
+    pub fn from_bytes<T: Read>(reader: &mut T, spec_major: u8) -> anyhow::Result<TagDesc> {
         // space for the string length (2 bytes)
         // the longest string possible (255 char)
         // and the typeid
@@ -1622,9 +1792,16 @@ impl TagDesc {
             }
         };
 
+        let role = if spec_major >= crate::constants::RAD_FIRST_VERSIONED_MAJOR {
+            TagRole::read(reader)?
+        } else {
+            TagRole::None
+        };
+
         Ok(TagDesc {
             name,
             typeid: rad_t,
+            role,
         })
     }
 
@@ -2112,8 +2289,8 @@ impl TagSection {
     /// `reader` is positioned at the start of a valid [TagSection], then this
     /// [TagSection] is returned.  Otherwise, a description of the error is returned
     /// via an [anyhow::Error].
-    pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<Self> {
-        Self::from_bytes_with_label(reader, TagSectionLabel::Unlabeled)
+    pub fn from_bytes<T: Read>(reader: &mut T, spec_major: u8) -> anyhow::Result<Self> {
+        Self::from_bytes_with_label(reader, TagSectionLabel::Unlabeled, spec_major)
     }
 
     /// Attempts to read a [TagSection] from the provided `reader`. If the
@@ -2124,6 +2301,7 @@ impl TagSection {
     pub fn from_bytes_with_label<T: Read>(
         reader: &mut T,
         label: TagSectionLabel,
+        spec_major: u8,
     ) -> anyhow::Result<Self> {
         let mut buf = [0u8; 2];
         reader.read_exact(&mut buf)?;
@@ -2135,7 +2313,7 @@ impl TagSection {
         };
 
         for _ in 0..num_tags {
-            ts.tags.push(TagDesc::from_bytes(reader)?);
+            ts.tags.push(TagDesc::from_bytes(reader, spec_major)?);
         }
         Ok(ts)
     }
@@ -2232,8 +2410,8 @@ impl TagSection {
 mod tests {
     use crate::rad_types::RadType;
     use crate::rad_types::{
-        OversizedValuePolicy, RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue,
-        TagWriteOutcome,
+        OversizedValuePolicy, RadAtomicId, RadIntId, TagMap, TagRole, TagSection, TagSectionLabel,
+        TagValue, TagWriteOutcome,
     };
     use std::io::Write;
 
@@ -2273,19 +2451,19 @@ mod tests {
 
         // round-trip through bytes
         let mut buf = Vec::<u8>::new();
-        section.write(&mut buf).unwrap();
+        section.write(&mut buf, 0).unwrap();
         tag_map.write_values(&mut buf).unwrap();
 
         let section_keys_bytes = {
             let mut c = std::io::Cursor::new(&buf);
-            TagSection::from_bytes_with_label(&mut c, TagSectionLabel::FileTags).unwrap()
+            TagSection::from_bytes_with_label(&mut c, TagSectionLabel::FileTags, 0).unwrap()
         };
         let read_map = section_keys_bytes
             .parse_tags_from_bytes(&mut std::io::Cursor::new(
                 &buf[{
                     // skip over the section schema bytes to reach tag values
                     let mut tmp = Vec::<u8>::new();
-                    section.write(&mut tmp).unwrap();
+                    section.write(&mut tmp, 0).unwrap();
                     tmp.len()
                 }..],
             ))
@@ -2340,9 +2518,134 @@ mod tests {
         let tag_type = 4_u8;
         let _ = buf.write_all(&tag_type.to_ne_bytes());
 
-        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        let desc = TagDesc::from_bytes(&mut buf.as_slice(), 0).unwrap();
         assert_eq!(desc.name, "mytag");
         assert_eq!(desc.typeid, RadType::Int(RadIntId::U64));
+    }
+
+    /// Per-tag roles round-trip only in versioned files: at spec major >= 2 the
+    /// role (incl. a Barcode level) survives write→read; at major 0 no role byte
+    /// is written and reading yields `TagRole::None`.
+    #[test]
+    fn tag_role_wire_bytes_are_stable() {
+        // Freeze the on-disk role encoding [code][plen][payload] so accidental wire
+        // drift is caught. If you change these bytes you are changing the RAD format.
+        let cases: [(TagRole, &[u8]); 8] = [
+            (TagRole::None, &[0, 0]),
+            (TagRole::Barcode { level: 1, len: 16 }, &[1, 2, 1, 16]),
+            (TagRole::Umi { len: 12 }, &[2, 1, 12]),
+            (TagRole::Reference, &[3, 0]),
+            (TagRole::Orientation, &[4, 0]),
+            (TagRole::MappingPosition, &[5, 0]),
+            (TagRole::FragmentLength, &[6, 0]),
+            (TagRole::MappingType, &[7, 0]),
+        ];
+        for (role, bytes) in cases {
+            let mut buf = Vec::new();
+            role.write(&mut buf).unwrap();
+            assert_eq!(buf, bytes, "wire drift for {role:?}");
+            assert_eq!(
+                TagRole::read(&mut std::io::Cursor::new(&buf)).unwrap(),
+                role
+            );
+        }
+    }
+
+    #[test]
+    fn tag_role_wire_is_forward_compatible() {
+        use std::io::Cursor;
+        // An unknown role code (from a newer minor) with a payload decodes to None
+        // and is skipped by plen; a real role written after it still reads — no
+        // desync.
+        let mut b = vec![200u8, 3, 0xAA, 0xBB, 0xCC];
+        TagRole::Barcode { level: 0, len: 8 }.write(&mut b).unwrap();
+        let mut c = Cursor::new(&b);
+        assert_eq!(TagRole::read(&mut c).unwrap(), TagRole::None);
+        assert_eq!(
+            TagRole::read(&mut c).unwrap(),
+            TagRole::Barcode { level: 0, len: 8 }
+        );
+
+        // A known role whose payload GREW in a future minor: extra trailing bytes
+        // are ignored and the reader advances the whole plen.
+        let grown = vec![1u8, 4, 2, 20, 0xDE, 0xAD];
+        let mut c = Cursor::new(&grown);
+        assert_eq!(
+            TagRole::read(&mut c).unwrap(),
+            TagRole::Barcode { level: 2, len: 20 }
+        );
+        assert_eq!(c.position(), grown.len() as u64);
+
+        // A known role with a too-short payload is malformed -> error.
+        assert!(TagRole::read(&mut Cursor::new(vec![1u8, 1, 5])).is_err());
+    }
+
+    #[test]
+    fn tag_role_roundtrips_only_when_versioned() {
+        for role in [
+            TagRole::Barcode { level: 3, len: 16 },
+            TagRole::Umi { len: 12 },
+            TagRole::Reference,
+            TagRole::Orientation,
+        ] {
+            let td = TagDesc {
+                name: "t".to_string(),
+                typeid: RadType::Int(RadIntId::U32),
+                role,
+            };
+            // versioned: role is written and recovered
+            let mut vb = Vec::new();
+            td.write(&mut vb, crate::constants::RAD_SPEC_MAJOR).unwrap();
+            let rv =
+                TagDesc::from_bytes(&mut vb.as_slice(), crate::constants::RAD_SPEC_MAJOR).unwrap();
+            assert_eq!(rv.role, role);
+
+            // legacy: no role byte; reading as legacy yields None and is shorter
+            let mut lb = Vec::new();
+            td.write(&mut lb, 0).unwrap();
+            assert!(vb.len() > lb.len());
+            let rl = TagDesc::from_bytes(&mut lb.as_slice(), 0).unwrap();
+            assert_eq!(rl.role, TagRole::None);
+        }
+
+        // a whole section round-trips its roles at the current spec version
+        let sec = TagSection {
+            label: TagSectionLabel::ReadTags,
+            tags: vec![
+                TagDesc {
+                    name: "b0".to_string(),
+                    typeid: RadType::Int(RadIntId::U32),
+                    role: TagRole::Barcode { level: 0, len: 16 },
+                },
+                TagDesc {
+                    name: "b1".to_string(),
+                    typeid: RadType::Int(RadIntId::U32),
+                    role: TagRole::Barcode { level: 1, len: 16 },
+                },
+                TagDesc {
+                    name: "u".to_string(),
+                    typeid: RadType::Int(RadIntId::U32),
+                    role: TagRole::Umi { len: 12 },
+                },
+            ],
+        };
+        let mut sb = Vec::new();
+        sec.write(&mut sb, crate::constants::RAD_SPEC_MAJOR)
+            .unwrap();
+        let rs = TagSection::from_bytes_with_label(
+            &mut sb.as_slice(),
+            TagSectionLabel::ReadTags,
+            crate::constants::RAD_SPEC_MAJOR,
+        )
+        .unwrap();
+        assert_eq!(
+            rs.tags.iter().map(|t| t.role).collect::<Vec<_>>(),
+            vec![
+                TagRole::Barcode { level: 0, len: 16 },
+                TagRole::Barcode { level: 1, len: 16 },
+                TagRole::Umi { len: 12 },
+            ]
+        );
     }
 
     #[test]
@@ -2356,7 +2659,7 @@ mod tests {
         let tag_type = 9_u8;
         let _ = buf.write_all(&tag_type.to_ne_bytes());
 
-        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        let desc = TagDesc::from_bytes(&mut buf.as_slice(), 0).unwrap();
         assert_eq!(desc.name, "mytag");
         assert_eq!(desc.typeid, RadType::Int(RadIntId::U128));
     }
@@ -2374,7 +2677,7 @@ mod tests {
         // element type
         let _ = buf.write_all(&2_u8.to_ne_bytes());
 
-        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        let desc = TagDesc::from_bytes(&mut buf.as_slice(), 0).unwrap();
         assert_eq!(desc.name, "mytag");
         assert_eq!(
             desc.typeid,
@@ -2395,7 +2698,7 @@ mod tests {
         // element type
         let _ = buf.write_all(&2_u8.to_ne_bytes());
 
-        let desc = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        let desc = TagDesc::from_bytes(&mut buf.as_slice(), 0).unwrap();
         assert_eq!(desc.name, "mytag");
         assert_eq!(
             desc.typeid,
@@ -2408,7 +2711,7 @@ mod tests {
         let _ = buf.write_all(tag_name);
         // type id
         let _ = buf.write_all(&8_u8.to_ne_bytes());
-        let desc_str = TagDesc::from_bytes(&mut buf.as_slice()).unwrap();
+        let desc_str = TagDesc::from_bytes(&mut buf.as_slice(), 0).unwrap();
 
         let tag_sec = TagSection {
             label: TagSectionLabel::FileTags,
@@ -2724,10 +3027,12 @@ mod tests {
     fn section_report_names_the_truncated_tags() {
         let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
         ts.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "ok".to_string(),
             typeid: RadType::String,
         });
         ts.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "too_long".to_string(),
             typeid: RadType::String,
         });
@@ -2750,6 +3055,7 @@ mod tests {
     fn section_report_is_clean_when_everything_fits() {
         let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
         ts.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "a".to_string(),
             typeid: RadType::String,
         });
@@ -2771,6 +3077,7 @@ mod tests {
         let mut ts = TagSection::new_with_label(TagSectionLabel::FileTags);
         for name in ["s", "arr", "long"] {
             ts.add_tag_desc(TagDesc {
+                role: crate::rad_types::TagRole::None,
                 name: name.to_string(),
                 typeid: if name == "arr" {
                     RadType::Array(RadIntId::U8, RadAtomicId::Int(RadIntId::U16))

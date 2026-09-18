@@ -1,0 +1,84 @@
+---
+title: Spec versioning
+description: The magic signature, major/minor semantics, and how the format evolves back-compatibly.
+---
+
+Early RAD had **no version or magic field** — a file began directly with the
+header's paired flag, so any change to the prelude or tag layout would silently
+desynchronize existing readers with no way to detect it. Version 2 introduces a
+magic signature and an explicit spec version so the format can evolve
+back-compatibly.
+
+## On-disk prefix
+
+A **versioned** prelude begins with:
+
+```
+[ magic : 8 bytes = "RAD_FILE" ][ major : u8 ][ minor : u8 ]
+[ ext_len : u32 ][ ext_len bytes ]
+```
+
+followed by the ordinary [header and tag sections](/libradicl/format/prelude-and-header/).
+A **legacy** prelude has none of this and begins directly at the header.
+
+## Detecting versioned vs legacy
+
+A reader sniffs the first 8 bytes:
+
+- If they equal the magic `RAD_FILE`, the file is **versioned**; the next two
+  bytes are `major`, `minor`.
+- Otherwise the file is **legacy** (reported as major 0, minor 0), and those 8
+  bytes are the start of the legacy header.
+
+This is unambiguous because the magic's first byte (`'R'` = `0x52`) can never
+begin a legacy prelude, whose first byte is the paired flag ∈ {0, 1}.
+
+## major / minor semantics
+
+`major` and `minor` are each a `u8`:
+
+- **major** — a *breaking* prelude/layout change. A reader **must reject** a file
+  whose `major` exceeds what it supports (rather than misparse it), and must
+  reject a magic-bearing file with a `major` below the first versioned major.
+- **minor** — an *additive* change (a new optional tag, a new [role](/libradicl/versioning/tag-roles/)).
+  Within a supported major, a reader **accepts a higher minor best-effort**,
+  ignoring fields and role codes it does not recognize.
+
+### Reserved major values
+
+| major | meaning |
+|------:|---------|
+| 0 | legacy (no magic); minor is 0 |
+| 1 | reserved — treat a magic-bearing major-1 file as malformed |
+| 2 | first versioned spec — introduces per-tag [collation roles](/libradicl/versioning/tag-roles/) |
+
+This build writes and understands **major 2, minor 0**.
+
+## What makes "minor is additive" real
+
+Two mechanisms let a *minor* add information that older readers skip cleanly
+instead of desyncing:
+
+1. **The prelude extension block.** Immediately after `[major][minor]` comes
+   `[ext_len : u32]` followed by `ext_len` opaque bytes — empty today. A future
+   minor can put new file-level metadata here; an older reader reads `ext_len`
+   and discards exactly that many bytes.
+2. **Length-prefixed roles.** Each tag [role](/libradicl/versioning/tag-roles/) is
+   written as `[code][plen][payload]`. A reader that does not recognize a role
+   code (a newer minor's addition) skips its `plen` payload bytes; a reader
+   seeing a known role whose payload *grew* reads the fields it knows and advances
+   to `plen`. Either way the descriptor stream never desyncs.
+
+## Compatibility notes
+
+- **Reading legacy files is unchanged** — a legacy prelude parses exactly as it
+  did before versioning existed.
+- **Writing stays legacy until a producer opts in.** A writer emits the magic +
+  version + extension block + role suffixes only for a versioned file; a legacy
+  file is written byte-for-byte as before.
+- **A versioned file is not readable by a pre-magic reader** — it would try to
+  read the magic as the paired flag and reference count. Producers (`piscem`,
+  `salmon`) and all readers must adopt the magic before versioned files are
+  emitted; until then their files stay legacy and interoperate normally.
+- Sidecar files (such as an unmapped-barcode count file) carry **their own**
+  independent versions and are unrelated to the prelude spec version.

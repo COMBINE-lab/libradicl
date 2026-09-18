@@ -2,6 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/libradicl.svg)](https://crates.io/crates/libradicl)
 [![docs.rs](https://img.shields.io/docsrs/libradicl)](https://docs.rs/libradicl)
+[![RAD spec](https://img.shields.io/badge/RAD-format%20spec-4c1)](https://combine-lab.github.io/libradicl/)
 
 A [Rust](https://www.rust-lang.org/) library for reading, writing and manipulating **RAD**
 (Reduced Alignment Data) files.
@@ -17,8 +18,10 @@ RAD files are produced by [`piscem`](https://github.com/COMBINE-lab/piscem) and
 [`alevin-fry`](https://github.com/COMBINE-lab/alevin-fry) and
 [`piscem-infer`](https://github.com/COMBINE-lab/piscem-infer).
 
-The working format specification lives
-[here](https://hackmd.io/@PI7Og0l1ReeBZu_pjQGUQQ/HkbVOHXUR).
+The RAD format specification — motivation, design principles, and the byte-level
+layout — is documented at **<https://combine-lab.github.io/libradicl/>** (source in
+[`website/`](website/)). The original working notes live
+[on HackMD](https://hackmd.io/@PI7Og0l1ReeBZu_pjQGUQQ/HkbVOHXUR).
 
 ## Install
 

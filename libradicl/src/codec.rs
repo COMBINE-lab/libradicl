@@ -182,11 +182,16 @@ impl ChunkIndexBuilder {
 /// [`crate::chunk::Chunk::into_bytes_with_codec`], so the collated RAD is
 /// readable by the standard and parallel chunk readers once the file header
 /// records the matching [`CHUNK_CODEC_TAG`]. Callers pass a non-`None` codec.
-pub(crate) fn recompress_bucket_per_chunk(
+///
+/// Appends the per-chunk-compressed bucket onto an existing `out`, so the caller
+/// need not hold a second full-bucket buffer for the result (only a small
+/// per-chunk scratch is allocated). Used by the generic gather to compress
+/// straight into its output accumulator.
+pub(crate) fn recompress_bucket_per_chunk_into(
     uncompressed: &[u8],
     codec: ChunkCodec,
-) -> anyhow::Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(uncompressed.len());
+    out: &mut Vec<u8>,
+) -> anyhow::Result<()> {
     let mut pos = 0usize;
     while pos < uncompressed.len() {
         let nbytes = u32::from_le_bytes(uncompressed[pos..pos + 4].try_into().unwrap()) as usize;
@@ -200,7 +205,7 @@ pub(crate) fn recompress_bucket_per_chunk(
         out.extend_from_slice(&comp);
         pos += nbytes;
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]

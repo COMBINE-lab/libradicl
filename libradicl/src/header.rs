@@ -38,12 +38,72 @@ pub struct RadPrelude {
     pub aln_tags: TagSection,
 }
 
+/// The RAD spec version of a prelude. Either a `Legacy` (magic-less) prelude,
+/// which behaves as major 0, or a `Versioned` one carrying an explicit
+/// `major.minor` (major `>=`[`constants::RAD_FIRST_VERSIONED_MAJOR`]). Making this
+/// a single value (rather than two raw `u8`s) means a header can't be left in an
+/// inconsistent "major 1" state, and `is_versioned()` reads better than a bare
+/// `major >= RAD_FIRST_VERSIONED_MAJOR` comparison at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecVersion {
+    /// A legacy, magic-less prelude (treated as major 0, minor 0).
+    Legacy,
+    /// A versioned prelude with an explicit major/minor.
+    Versioned { major: u8, minor: u8 },
+}
+
+impl SpecVersion {
+    /// The current spec version this build writes.
+    pub const fn current() -> Self {
+        SpecVersion::Versioned {
+            major: constants::RAD_SPEC_MAJOR,
+            minor: constants::RAD_SPEC_MINOR,
+        }
+    }
+    /// The effective major (`Legacy` == 0).
+    pub fn major(&self) -> u8 {
+        match self {
+            SpecVersion::Legacy => 0,
+            SpecVersion::Versioned { major, .. } => *major,
+        }
+    }
+    /// The effective minor (`Legacy` == 0).
+    pub fn minor(&self) -> u8 {
+        match self {
+            SpecVersion::Legacy => 0,
+            SpecVersion::Versioned { minor, .. } => *minor,
+        }
+    }
+    /// Whether the prelude is versioned (carries the magic + version prefix and
+    /// per-tag roles).
+    pub fn is_versioned(&self) -> bool {
+        matches!(self, SpecVersion::Versioned { .. })
+    }
+    /// Build from on-disk `major`/`minor`: major 0 is `Legacy`; a major in
+    /// `[1, RAD_FIRST_VERSIONED_MAJOR)` is a reserved/malformed value and errors.
+    pub fn from_parts(major: u8, minor: u8) -> anyhow::Result<Self> {
+        if major == 0 {
+            Ok(SpecVersion::Legacy)
+        } else if major < constants::RAD_FIRST_VERSIONED_MAJOR {
+            anyhow::bail!(
+                "RAD prelude has a reserved/legacy major version {major}; file is malformed"
+            )
+        } else {
+            Ok(SpecVersion::Versioned { major, minor })
+        }
+    }
+}
+
 /// The [RadHeader] contains the relevant information about the
 /// references against which the reads in this file were mapped and
 /// information about the way in which mapping was performed.
 #[derive(Educe)]
 #[educe(Debug, PartialEq, Eq)]
 pub struct RadHeader {
+    /// RAD spec version: [`SpecVersion::Legacy`] for a magic-less prelude, or
+    /// `Versioned { major, minor }` (major `>=`
+    /// [`constants::RAD_FIRST_VERSIONED_MAJOR`]) for a versioned one.
+    pub version: SpecVersion,
     pub is_paired: u8,
     pub ref_count: u64,
     pub ref_names: Vec<String>,
@@ -61,6 +121,9 @@ impl RadHeader {
     /// Create a new empty [RadHeader]
     pub fn new() -> Self {
         Self {
+            // Default to legacy so existing construction + write paths are
+            // byte-for-byte unchanged; a writer opts in with `SpecVersion::current()`.
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -79,7 +142,60 @@ impl RadHeader {
     /// next, then this function returns [Ok(RadHeader)], otherwise, it returns
     /// an [anyhow::Error] explaining the failure to parse the [RadHeader].
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<RadHeader> {
-        let mut rh = RadHeader::new();
+        // Sniff the optional magic. Its first byte (`b'R'`) can't begin a legacy
+        // prelude (whose first byte is `is_paired` in {0,1}), so this is
+        // unambiguous. On a legacy file the sniffed bytes ARE the start of the
+        // header, so we splice them back in front of the reader via `Read::chain`
+        // (no `Seek` needed -- works for `Cursor` and `BufReader` alike).
+        let mut magic = [0u8; constants::RAD_MAGIC.len()];
+        reader.read_exact(&mut magic)?;
+        if magic == constants::RAD_MAGIC {
+            let mut vbuf = [0u8; 2];
+            reader.read_exact(&mut vbuf)?;
+            let (major, minor) = (vbuf[0], vbuf[1]);
+            // Too-new guard: a higher *major* is a breaking layout this build does
+            // not understand, so refuse rather than silently misparse. A higher
+            // *minor* within the supported major is additive and read best-effort.
+            if major > constants::RAD_SPEC_MAJOR {
+                anyhow::bail!(
+                    "RAD spec major version {major} is newer than supported ({}); please update this tool",
+                    constants::RAD_SPEC_MAJOR
+                );
+            }
+            if major < constants::RAD_FIRST_VERSIONED_MAJOR {
+                anyhow::bail!(
+                    "RAD prelude carries the magic but a reserved/legacy major version {major}; file is malformed"
+                );
+            }
+            // Length-prefixed prelude extension block: `[ext_len:u32][ext_len bytes]`.
+            // Empty today; it exists so a future *minor* can add file-level metadata
+            // that older readers skip wholesale rather than desyncing. Read and
+            // discard whatever it holds.
+            let mut ext_len_buf = [0u8; 4];
+            reader
+                .read_exact(&mut ext_len_buf)
+                .context("could not read prelude extension length")?;
+            let ext_len = u32::from_le_bytes(ext_len_buf) as usize;
+            if ext_len > 0 {
+                let mut skip = vec![0u8; ext_len];
+                reader
+                    .read_exact(&mut skip)
+                    .context("could not read prelude extension block")?;
+            }
+            Self::read_fields(reader, SpecVersion::Versioned { major, minor })
+        } else {
+            let mut chained = std::io::Cursor::new(magic).chain(reader);
+            Self::read_fields(&mut chained, SpecVersion::Legacy)
+        }
+    }
+
+    /// Read the header fields (everything after the optional magic + version) from
+    /// `reader`, tagging the result with the spec `version`.
+    fn read_fields<T: Read>(reader: &mut T, version: SpecVersion) -> anyhow::Result<RadHeader> {
+        let mut rh = RadHeader {
+            version,
+            ..RadHeader::new()
+        };
 
         // size of the longest allowable string.
         let mut buf = [0u8; constants::MAX_REF_NAME_LEN];
@@ -123,6 +239,7 @@ impl RadHeader {
     /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
     pub fn from_bam_header(header: &sam::Header) -> RadHeader {
         let mut rh = RadHeader {
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -143,6 +260,11 @@ impl RadHeader {
     /// if written to an output stream.
     pub fn get_size(&self) -> usize {
         let mut tot_size = 0usize;
+        // versioned headers (major >= first-versioned) are prefixed by the magic
+        // + [major:u8][minor:u8] + the [ext_len:u32] extension block (empty today).
+        if self.version.is_versioned() {
+            tot_size += constants::RAD_MAGIC.len() + 2 + std::mem::size_of::<u32>();
+        }
         tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
         // each name takes 2 bytes for the length, plus the actual
         // number of bytes required by the string itself.
@@ -188,6 +310,16 @@ impl RadHeader {
         // header, this information is not meanginful because
         // it's not contained in the SAM header.  Think about if
         // and how to address that.
+        // Versioned files (major >= first-versioned) get the magic + [major][minor]
+        // prefix, then an empty length-prefixed extension block ([ext_len:u32] = 0)
+        // reserved for future minor-version file-level metadata; legacy headers
+        // (major 0) write exactly as before.
+        if self.version.is_versioned() {
+            w.write_all(&constants::RAD_MAGIC)?;
+            w.write_all(&[self.version.major(), self.version.minor()])?;
+            w.write_all(&0u32.to_le_bytes())?;
+        }
+
         w.write_all(&self.is_paired.to_le_bytes())?;
 
         let ref_count = self.ref_count;
@@ -234,9 +366,13 @@ impl RadPrelude {
     /// [anyhow::Error] otherwise.
     pub fn from_bytes<T: Read>(reader: &mut T) -> anyhow::Result<Self> {
         let hdr = RadHeader::from_bytes(reader)?;
-        let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags)?;
-        let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags)?;
-        let aln_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags)?;
+        // Tag descriptors carry per-tag roles only in versioned files; the major
+        // version (just parsed) tells the tag reader whether to expect them.
+        let m = hdr.version.major();
+        let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags, m)?;
+        let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags, m)?;
+        let aln_tags =
+            TagSection::from_bytes_with_label(reader, TagSectionLabel::AlignmentTags, m)?;
 
         //let file_tag_vals = file_tags.parse_tags_from_bytes(reader)?;
         //println!("file-level tag values: {:?}", file_tag_vals);
@@ -253,18 +389,19 @@ impl RadPrelude {
     /// [anyhow::Result] that records any error that occured during writing or
     /// Ok(()) if successful
     pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        let m = self.hdr.version.major();
         self.hdr
             .write(writer)
             .context("could not write the header of the prelude")?;
         self.file_tags
-            .write(writer)
+            .write(writer, m)
             .context("could not write the file-level tags of the prelude")?;
         self.read_tags
-            .write(writer)
-            .context("could not write the file-level tags of the prelude")?;
+            .write(writer, m)
+            .context("could not write the read-level tags of the prelude")?;
         self.aln_tags
-            .write(writer)
-            .context("could not write the file-level tags of the prelude")?;
+            .write(writer, m)
+            .context("could not write the alignment-level tags of the prelude")?;
         Ok(())
     }
 
@@ -299,18 +436,20 @@ impl RadPrelude {
         writer.write_all(&hdr_bytes)?;
 
         // File-tag section descriptors, adding the codec tag when compressing.
+        let m = self.hdr.version.major();
         if codec == ChunkCodec::None {
-            self.file_tags.write(writer)?;
+            self.file_tags.write(writer, m)?;
         } else {
             let mut file_tags = self.file_tags.clone();
             file_tags.add_tag_desc(TagDesc {
                 name: CHUNK_CODEC_TAG.to_string(),
                 typeid: RadType::Int(RadIntId::U8),
+                role: crate::rad_types::TagRole::None,
             });
-            file_tags.write(writer)?;
+            file_tags.write(writer, m)?;
         }
-        self.read_tags.write(writer)?;
-        self.aln_tags.write(writer)?;
+        self.read_tags.write(writer, m)?;
+        self.aln_tags.write(writer, m)?;
 
         // The source file-tag values (unchanged), then the codec value last so
         // it lines up with the descriptor appended above.
@@ -319,6 +458,7 @@ impl RadPrelude {
             let codec_desc = TagDesc {
                 name: CHUNK_CODEC_TAG.to_string(),
                 typeid: RadType::Int(RadIntId::U8),
+                role: crate::rad_types::TagRole::None,
             };
             let mut values = TagMap::with_keyset(std::slice::from_ref(&codec_desc));
             values.add(TagValue::U8(codec.as_u8()));
@@ -347,13 +487,152 @@ impl RadPrelude {
     pub fn get_record_context<R: RecordContext>(&self) -> anyhow::Result<R> {
         R::get_context_from_tag_section(&self.file_tags, &self.read_tags, &self.aln_tags)
     }
+
+    /// Like [`Self::get_record_context`], but the context is built preferring the
+    /// RAD's declared tag roles (#64) over tag-name conventions, so a
+    /// role-annotated RAD whose tags use non-conventional names is read correctly.
+    /// Falls back to the name bridge for un-annotated (legacy) files.
+    pub fn get_record_context_prefer_roles<R: RecordContext>(&self) -> anyhow::Result<R> {
+        R::get_context_prefer_roles(&self.file_tags, &self.read_tags, &self.aln_tags)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RadHeader, RadPrelude};
+    use super::{RadHeader, RadPrelude, SpecVersion};
     use crate::rad_types::{RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue};
     use crate::rad_types::{RadType, TagDesc};
+
+    /// A versioned header (spec >= 2) writes the magic + version prefix and reads
+    /// back with the same version; a legacy header writes no prefix and reads back
+    /// as version 0; and raw legacy bytes (no magic, as produced before versioning)
+    /// still parse as version 0 with the correct fields.
+    #[test]
+    fn magic_version_roundtrip_and_legacy_backcompat() {
+        let mk = |major: u8, minor: u8| RadHeader {
+            version: SpecVersion::from_parts(major, minor).unwrap(),
+            is_paired: 1,
+            ref_count: 2,
+            ref_names: vec!["a".to_string(), "bb".to_string()],
+            num_chunks: 5,
+        };
+
+        // versioned round-trip
+        let v = mk(
+            crate::constants::RAD_SPEC_MAJOR,
+            crate::constants::RAD_SPEC_MINOR,
+        );
+        let mut vb: Vec<u8> = Vec::new();
+        v.write(&mut vb).unwrap();
+        assert_eq!(
+            &vb[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+        let vr = RadHeader::from_bytes(&mut std::io::Cursor::new(&vb)).unwrap();
+        assert_eq!(vr.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(vr.version.minor(), crate::constants::RAD_SPEC_MINOR);
+        assert_eq!(vr.ref_names, v.ref_names);
+        assert_eq!(vr.num_chunks, 5);
+
+        // legacy round-trip: no magic prefix, version reads back as 0
+        let l = mk(0, 0);
+        let mut lb: Vec<u8> = Vec::new();
+        l.write(&mut lb).unwrap();
+        assert_ne!(
+            &lb[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+        let lr = RadHeader::from_bytes(&mut std::io::Cursor::new(&lb)).unwrap();
+        assert_eq!(lr.version.major(), 0);
+        assert_eq!(lr.version.minor(), 0);
+        assert_eq!(lr.ref_names, l.ref_names);
+
+        // a versioned file is byte-longer than the legacy one by exactly the prefix
+        // (magic + [major][minor] + [ext_len:u32])
+        assert_eq!(
+            vb.len() - lb.len(),
+            crate::constants::RAD_MAGIC.len() + 2 + std::mem::size_of::<u32>()
+        );
+    }
+
+    /// A writer can produce a versioned prelude *from scratch* (magic + version +
+    /// per-tag roles) that reads back intact — not just by copying a v2 source.
+    #[test]
+    fn prelude_v2_with_roles_roundtrips() {
+        use crate::rad_types::{RadIntId, RadType, TagDesc, TagRole};
+        let int = |n: &str, i: RadIntId, role: TagRole| TagDesc {
+            name: n.to_string(),
+            typeid: RadType::Int(i),
+            role,
+        };
+        let hdr = RadHeader {
+            version: SpecVersion::current(),
+            is_paired: 0,
+            ref_count: 1,
+            ref_names: vec!["r0".to_string()],
+            num_chunks: 3,
+        };
+        let file_tags = TagSection {
+            label: TagSectionLabel::FileTags,
+            tags: vec![int("cblen", RadIntId::U16, TagRole::None)],
+        };
+        let read_tags = TagSection {
+            label: TagSectionLabel::ReadTags,
+            tags: vec![
+                int("b", RadIntId::U32, TagRole::Barcode { level: 0, len: 16 }),
+                int("u", RadIntId::U32, TagRole::Umi { len: 12 }),
+            ],
+        };
+        let aln_tags = TagSection {
+            label: TagSectionLabel::AlignmentTags,
+            tags: vec![int("cor", RadIntId::U32, TagRole::Orientation)],
+        };
+        let prelude = RadPrelude::from_header_and_tag_sections(hdr, file_tags, read_tags, aln_tags);
+
+        let mut buf = Vec::new();
+        prelude.write(&mut buf).unwrap();
+        assert_eq!(
+            &buf[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+
+        let rp = RadPrelude::from_bytes(&mut buf.as_slice()).unwrap();
+        assert_eq!(rp.hdr.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(rp.hdr.version.minor(), crate::constants::RAD_SPEC_MINOR);
+        assert_eq!(rp.hdr.ref_names, vec!["r0".to_string()]);
+        assert_eq!(
+            rp.read_tags.tags[0].role,
+            TagRole::Barcode { level: 0, len: 16 }
+        );
+        assert_eq!(rp.read_tags.tags[1].role, TagRole::Umi { len: 12 });
+        assert_eq!(rp.aln_tags.tags[0].role, TagRole::Orientation);
+        assert_eq!(rp.file_tags.tags[0].role, TagRole::None);
+    }
+
+    /// A file whose major version exceeds what this build supports must be
+    /// refused (not silently misparsed); a higher minor within the supported
+    /// major is accepted.
+    #[test]
+    fn rejects_too_new_major_accepts_higher_minor() {
+        let mk_bytes = |major: u8, minor: u8| {
+            let mut b = Vec::new();
+            b.extend_from_slice(&crate::constants::RAD_MAGIC);
+            b.extend_from_slice(&[major, minor]);
+            b.extend_from_slice(&0u32.to_le_bytes()); // ext_len = 0
+            b.push(0); // is_paired
+            b.extend_from_slice(&0u64.to_le_bytes()); // ref_count = 0
+            b.extend_from_slice(&0u64.to_le_bytes()); // num_chunks = 0
+            b
+        };
+        let too_new = mk_bytes(crate::constants::RAD_SPEC_MAJOR + 1, 0);
+        assert!(RadHeader::from_bytes(&mut std::io::Cursor::new(too_new)).is_err());
+
+        let higher_minor = mk_bytes(crate::constants::RAD_SPEC_MAJOR, 200);
+        let h = RadHeader::from_bytes(&mut std::io::Cursor::new(higher_minor))
+            .expect("higher minor within a supported major must be accepted");
+        assert_eq!(h.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(h.version.minor(), 200);
+    }
 
     /// The speculative-reservation cap must not limit real headers. A human
     /// transcriptome has a few hundred thousand references, well past the cap,
@@ -363,6 +642,7 @@ mod tests {
         const NREFS: usize = 70_000; // > MAX_SPECULATIVE_REFS
         let names: Vec<String> = (0..NREFS).map(|i| format!("tx{i}")).collect();
         let hdr = RadHeader {
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: NREFS as u64,
             ref_names: names.clone(),
@@ -396,6 +676,7 @@ mod tests {
     #[test]
     fn can_write_prelude() {
         let hdr = RadHeader {
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -403,6 +684,7 @@ mod tests {
         };
 
         let ft_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "ref_lengths".to_string(),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
         };
@@ -410,6 +692,7 @@ mod tests {
         file_tags.add_tag_desc(ft_desc);
 
         let rd_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U8),
         };
@@ -417,14 +700,17 @@ mod tests {
         read_tags.add_tag_desc(rd_desc);
 
         let aln_coi = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_ref".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_mt = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_fl = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_len".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };
@@ -470,6 +756,7 @@ mod tests {
     #[test]
     fn preludes_equal_with_different_chunks() {
         let hdr = RadHeader {
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -477,6 +764,7 @@ mod tests {
         };
 
         let ft_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "ref_lengths".to_string(),
             typeid: RadType::Array(RadIntId::U32, RadAtomicId::Int(RadIntId::U32)),
         };
@@ -484,6 +772,7 @@ mod tests {
         file_tags.add_tag_desc(ft_desc);
 
         let rd_desc = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U8),
         };
@@ -491,14 +780,17 @@ mod tests {
         read_tags.add_tag_desc(rd_desc);
 
         let aln_coi = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "compressed_ori_ref".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_mt = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_map_type".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         };
         let aln_fl = TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "frag_len".to_string(),
             typeid: RadType::Int(RadIntId::U16),
         };

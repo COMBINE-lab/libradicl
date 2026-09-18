@@ -1,0 +1,72 @@
+---
+title: RAD format
+description: A compact, self-describing binary format for mapped sequencing reads.
+template: splash
+hero:
+  tagline: Reduced Alignment Data — a compact, parallel-friendly, self-describing binary record of how sequencing reads map to a set of targets.
+  actions:
+    - text: What is RAD?
+      link: introduction/what-is-rad/
+      icon: right-arrow
+    - text: Read the spec
+      link: format/overview/
+      icon: open-book
+      variant: minimal
+    - text: View on GitHub
+      link: https://github.com/COMBINE-lab/libradicl
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What is RAD?
+
+**RAD** (Reduced Alignment Data) is a binary format for recording how sequencing
+reads map to a set of targets — a transcriptome, genome, or metagenome. It is
+*reduced* because it is free to carry **less** information than a
+[SAM/BAM](https://samtools.github.io/hts-specs/) file: only what a downstream
+quantification tool actually needs. In exchange it is compact and cheap to parse
+in parallel, which is the whole point.
+
+RAD files are produced by [`piscem`](https://github.com/COMBINE-lab/piscem) and
+[`salmon`](https://github.com/COMBINE-lab/salmon), and consumed by
+[`alevin-fry`](https://github.com/COMBINE-lab/alevin-fry) and
+[`piscem-infer`](https://github.com/COMBINE-lab/piscem-infer). The reference
+reader/writer is [`libradicl`](https://github.com/COMBINE-lab/libradicl).
+
+<CardGrid stagger>
+  <Card title="Compact by design" icon="seti:binary">
+    Only the fields a quantifier needs, at the integer widths that fit them. No
+    sequence, no quality strings, no SAM boilerplate.
+  </Card>
+  <Card title="Built for parallelism" icon="random">
+    A file is a stream of independent **chunks**. One thread reads chunks off
+    disk and hands them to a pool of workers — no per-record locking.
+  </Card>
+  <Card title="Self-describing" icon="open-book">
+    A **tag system** declares the dynamic fields at each level; a reader learns
+    the record layout from the file, not from a hard-coded assumption.
+  </Card>
+  <Card title="Versioned & extensible" icon="rocket">
+    A magic signature plus a spec version lets the format grow
+    back-compatibly — new optional fields and semantic
+    [roles](versioning/tag-roles/) are additive minor bumps.
+  </Card>
+</CardGrid>
+
+## Where to start
+
+- New to the format? Start with [What is RAD?](introduction/what-is-rad/) and the
+  [motivation & design principles](introduction/design/).
+- Implementing a reader or writer? The [file structure](format/overview/) page is
+  the top of the byte-level specification.
+- Producing v2 files? See [spec versioning](versioning/spec-versioning/) and
+  [tag roles](versioning/tag-roles/).
+
+:::note[Status]
+This is a **working specification** and is subject to revision. Where this site
+and the reference implementation ([`libradicl`](https://github.com/COMBINE-lab/libradicl))
+disagree, the implementation is authoritative; please
+[open an issue](https://github.com/COMBINE-lab/libradicl/issues).
+:::

@@ -284,12 +284,12 @@ impl RecordHeader for PiscemBulkReadRecordHeader {
 /// Header for a generic record type, the only guaranteed field is
 /// the number of alignments
 #[allow(unused)]
-struct GenericReadRecordHeader {
+struct TagDrivenReadRecordHeader {
     pub na: u32,
 }
 
-impl RecordHeader for GenericReadRecordHeader {
-    type RecordType = GenericReadRecord;
+impl RecordHeader for TagDrivenReadRecordHeader {
+    type RecordType = TagDrivenReadRecord;
     fn naln(&self) -> u32 {
         self.na
     }
@@ -303,22 +303,26 @@ impl RecordHeader for GenericReadRecordHeader {
 /// but should allow us to easily test out RAD files containing
 /// different information
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GenericReadRecord {
+pub struct TagDrivenReadRecord {
     pub naln: u32,
     pub naln_tags: u32,
     pub rtags: Vec<TagValue>,
     pub atags: Vec<TagValue>,
+    /// Index into `rtags` of the collation barcode key (from the context, when
+    /// collating; `0` and unused otherwise). Lets the ctx-free `set_collate_key`
+    /// rewrite the corrected barcode in place.
+    pub key_tag_idx: usize,
 }
 
-impl GenericReadRecord {
+impl TagDrivenReadRecord {
     pub fn fmt_with_context(
         &self,
-        ctx: &GenericReadRecordContext,
+        ctx: &TagDrivenReadRecordContext,
         f: &mut impl Write,
     ) -> std::io::Result<()> {
         f.write_all(
             format!(
-                "GenericReadRecord{{ naln: {}, naln_tags: {},\nrtags: {},\natags:  {} }}\n",
+                "TagDrivenReadRecord{{ naln: {}, naln_tags: {},\nrtags: {},\natags:  {} }}\n",
                 self.naln,
                 self.naln_tags,
                 ctx.read_tags
@@ -347,9 +351,53 @@ impl GenericReadRecord {
 
 /// context needed to read a generic record
 #[derive(Debug, Clone)]
-pub struct GenericReadRecordContext {
+pub struct TagDrivenReadRecordContext {
     pub read_tags: TagSection,
     pub aln_tags: TagSection,
+    /// Index (into `read_tags`) of the read-level tag that is the collation
+    /// barcode key, when this record is being *collated*. `None` for plain reading
+    /// — a RAD need not be collatable to be read. Set at the collate entry point.
+    pub key_tag_idx: Option<usize>,
+    /// Index (into `aln_tags`) of the alignment tag that carries orientation (the
+    /// `compressed_ori_refid`-style word whose top bit is the strand), from a
+    /// declared `Orientation` role. When set, the scatter filters alignments by the
+    /// expected orientation; when `None`, all alignments are retained.
+    pub ori_tag_idx: Option<usize>,
+}
+
+/// Fixed on-disk byte width of an integer tag type. Panics on a non-integer
+/// (variable-width) tag — the generic collation path validates all tags are
+/// fixed-width integers before building a record (see `TagDrivenCollateCtx::new`).
+fn int_tag_bytes(t: &RadType) -> usize {
+    match t {
+        RadType::Int(i) => i.bytes_for_type(),
+        other => panic!("generic collation tag {other:?} is not a fixed-width integer"),
+    }
+}
+
+/// Read a fixed-width integer [`TagValue`] as a `u64` (barcodes/umis). Panics on a
+/// non-integer or oversized (u128) value — the collation key must be a fixed
+/// integer that fits `u64` (validated when the collation spec is built).
+fn tag_value_as_u64(v: &TagValue) -> u64 {
+    match v {
+        TagValue::U8(x) => *x as u64,
+        TagValue::U16(x) => *x as u64,
+        TagValue::U32(x) => *x as u64,
+        TagValue::U64(x) => *x,
+        other => panic!("collation key tag value {other:?} is not a u64-compatible integer"),
+    }
+}
+
+/// Overwrite a fixed-width integer [`TagValue`] with `k`, preserving its integer
+/// width (writing a corrected barcode back into a generic record in place).
+fn set_tag_value_u64(slot: &mut TagValue, k: u64) {
+    match slot {
+        TagValue::U8(x) => *x = k as u8,
+        TagValue::U16(x) => *x = k as u16,
+        TagValue::U32(x) => *x = k as u32,
+        TagValue::U64(x) => *x = k,
+        other => panic!("collation key tag value {other:?} is not a u64-compatible integer"),
+    }
 }
 
 // ### Known size trait
@@ -640,9 +688,26 @@ pub trait RecordContext {
     ) -> anyhow::Result<Self>
     where
         Self: Sized;
+
+    /// Build the context, preferring the RAD's declared tag roles (#64) over the
+    /// tag-name conventions, so a role-annotated RAD whose tags use
+    /// non-conventional names is still read correctly. The default falls back to
+    /// the name-based [`Self::get_context_from_tag_section`]; record contexts that
+    /// understand roles override this to try roles first and fall back to the name
+    /// bridge for un-annotated (legacy) files.
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        Self::get_context_from_tag_section(ft, rt, at)
+    }
 }
 
-impl RecordContext for GenericReadRecordContext {
+impl RecordContext for TagDrivenReadRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
     /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
     /// corresponding [TagSection].
@@ -654,6 +719,9 @@ impl RecordContext for GenericReadRecordContext {
         Ok(Self {
             read_tags: rt.clone(),
             aln_tags: at.clone(),
+            // reading is collation-agnostic; the collate entry point sets these.
+            key_tag_idx: None,
+            ori_tag_idx: None,
         })
     }
 }
@@ -668,6 +736,82 @@ pub struct AlevinFryRecordContext {
     pub umit: RadIntId,
 }
 
+/// Extract a single-barcode + UMI integer layout from declared read-tag roles:
+/// exactly one [`crate::rad_types::TagRole::Barcode`] tag supplies the barcode
+/// integer type and one [`crate::rad_types::TagRole::Umi`] tag supplies the UMI
+/// type. Returns `Ok(None)` when no barcode role is declared (so the caller falls
+/// back to the tag-name bridge); errors on an ambiguous/incomplete role set.
+/// Shared by the single-barcode ([`AlevinFryRecordContext`]) and long-read
+/// ([`ScLongReadRecordContext`]) contexts, which have the same `[bc][umi]` shape.
+fn bct_umit_from_roles(rt: &TagSection) -> anyhow::Result<Option<(RadIntId, RadIntId)>> {
+    use crate::rad_types::TagRole;
+    let bcs: Vec<_> = rt
+        .tags
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t.role, TagRole::Barcode { .. }))
+        .collect();
+    if bcs.is_empty() {
+        // No barcode role at all → not a role-annotated single-barcode layout; let
+        // the caller fall back to the tag-name bridge.
+        return Ok(None);
+    }
+    if bcs.len() != 1 {
+        bail!(
+            "single-barcode record expects exactly one Barcode role, found {}",
+            bcs.len()
+        );
+    }
+    let (bc_idx, bc_tag) = bcs[0];
+    let RadType::Int(bct) = bc_tag.typeid else {
+        bail!(
+            "barcode-role tag `{}` is not a fixed-width integer",
+            bc_tag.name
+        );
+    };
+    let umis: Vec<_> = rt
+        .tags
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t.role, TagRole::Umi { .. }))
+        .collect();
+    let (umi_idx, umit) = match umis.as_slice() {
+        [(i, u)] => match u.typeid {
+            RadType::Int(x) => (*i, x),
+            _ => bail!("umi-role tag `{}` is not a fixed-width integer", u.name),
+        },
+        // A Barcode role but no Umi role is a partially-stamped file: fall back to
+        // the tag-name bridge (which works if the tags are named b/u) rather than
+        // failing every reader. (Single-barcode policy; multi is strict.)
+        [] => return Ok(None),
+        _ => bail!("multiple Umi roles declared"),
+    };
+    // The single-barcode record reader consumes the read header positionally as
+    // `[na][bc][umi]`, so the roles must describe exactly that: barcode first, UMI
+    // immediately after, and no other read tags. Otherwise a role-annotated file
+    // with a different physical layout would be silently misread.
+    anyhow::ensure!(
+        bc_idx == 0 && umi_idx == 1 && rt.tags.len() == 2,
+        "single-barcode role layout must be exactly [Barcode, Umi] with no other \
+         read tags (found barcode at index {bc_idx}, umi at index {umi_idx}, \
+         {} read tags); the record reader is positional",
+        rt.tags.len()
+    );
+    Ok(Some((bct, umit)))
+}
+
+/// The UMI's nucleotide length as declared by its
+/// [`crate::rad_types::TagRole::Umi`] role. `None` when no Umi role is declared or
+/// it leaves `len` unspecified (`0`), so the caller can fall back to a `ulen` file
+/// tag. Mirrors [`MultiBarcodeRecordContext::cell_bc_len_from_roles`].
+pub fn umi_len_from_roles(read_tags: &TagSection) -> Option<u8> {
+    use crate::rad_types::TagRole;
+    read_tags.tags.iter().find_map(|t| match t.role {
+        TagRole::Umi { len } if len != 0 => Some(len),
+        _ => None,
+    })
+}
+
 impl RecordContext for AlevinFryRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
     /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
@@ -677,17 +821,29 @@ impl RecordContext for AlevinFryRecordContext {
         rt: &TagSection,
         _at: &TagSection,
     ) -> anyhow::Result<Self> {
-        // the tags we expect to exist
+        // the tags we expect to exist (name bridge; error rather than panic so a
+        // caller falling back from roles gets a clean failure).
         let bct = rt
             .get_tag_type("b")
-            .expect("alevin-fry record context requires a \'b\' read-level tag");
+            .context("alevin-fry record context requires a 'b' read-level tag")?;
         let umit = rt
             .get_tag_type("u")
-            .expect("alevin-fry record context requires a \'u\' read-level tag");
+            .context("alevin-fry record context requires a 'u' read-level tag")?;
         if let (RadType::Int(x), RadType::Int(y)) = (bct, umit) {
             Ok(Self { bct: x, umit: y })
         } else {
             bail!("alevin-fry record context requires that b and u tags are of type RadType::Int");
+        }
+    }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
         }
     }
 }
@@ -696,6 +852,12 @@ impl AlevinFryRecordContext {
     /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
+    }
+
+    /// Build the context from the read tags' declared roles (see
+    /// `bct_umit_from_roles`); `Ok(None)` when no barcode role is declared.
+    pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
+        Ok(bct_umit_from_roles(rt)?.map(|(bct, umit)| Self { bct, umit }))
     }
 }
 
@@ -1200,8 +1362,8 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordWithPos
     }
 }
 
-impl MappedRecord for GenericReadRecord {
-    type ParsingContext = GenericReadRecordContext;
+impl MappedRecord for TagDrivenReadRecord {
+    type ParsingContext = TagDrivenReadRecordContext;
     type PeekResult = Option<u64>;
 
     fn is_empty(&self) -> bool {
@@ -1213,11 +1375,11 @@ impl MappedRecord for GenericReadRecord {
     }
 
     fn has_alignment_on_strand(&self, _s: Strand) -> bool {
-        unimplemented!("no implementation of has_alignment_on_strand for GenericReadRecord")
+        unimplemented!("no implementation of has_alignment_on_strand for TagDrivenReadRecord")
     }
 
     fn refs(&self) -> &[u32] {
-        unimplemented!("no implementation of refs() for GenericReadRecord yet")
+        unimplemented!("no implementation of refs() for TagDrivenReadRecord yet")
     }
 
     #[inline]
@@ -1251,6 +1413,7 @@ impl MappedRecord for GenericReadRecord {
             naln_tags: *naln_tags as u32,
             rtags,
             atags,
+            key_tag_idx: ctx.key_tag_idx.unwrap_or(0),
         }
     }
 
@@ -1284,6 +1447,7 @@ impl MappedRecord for GenericReadRecord {
             naln_tags: *naln_tags as u32,
             rtags,
             atags,
+            key_tag_idx: ctx.key_tag_idx.unwrap_or(0),
         }
     }
     */
@@ -1296,8 +1460,174 @@ impl MappedRecord for GenericReadRecord {
     }
 
     #[inline]
-    fn write<W: Write>(&self, _writer: &mut W, _ctx: &Self::ParsingContext) -> anyhow::Result<()> {
-        unimplemented!("Currently there is no implementation for write for the GenericReadRecord");
+    fn write<W: Write>(&self, writer: &mut W, ctx: &Self::ParsingContext) -> anyhow::Result<()> {
+        // na, then read-level tag values (with any corrected barcode already in
+        // `rtags`), then `na ×` alignment-level tag values — the exact inverse of
+        // `from_bytes_with_context`.
+        RadIntId::U32
+            .write_to(self.naln, writer)
+            .context("couldn't write number of alignments for generic record")?;
+        for (td, tv) in ctx.read_tags.iter_desc().zip(self.rtags.iter()) {
+            tv.write_with_type(&td.typeid, writer)
+                .context("couldn't write read-level tag for generic record")?;
+        }
+        for chunk in self.atags.chunks_exact(self.naln_tags as usize) {
+            for (td, tv) in ctx.aln_tags.iter_desc().zip(chunk.iter()) {
+                tv.write_with_type(&td.typeid, writer)
+                    .context("couldn't write alignment-level tag for generic record")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// === generic record: collatable header + collation trait impls ===
+
+/// Collatable header for the generic record: the alignment count, the barcode
+/// collation key, and the (raw) read-level tag values so the full record can be
+/// reconstructed after the header is peeked during scatter.
+pub struct TagDrivenCollatableHeader {
+    pub naln: u32,
+    pub key: u64,
+    pub rtags: Vec<TagValue>,
+    pub key_tag_idx: usize,
+}
+
+impl RecordHeader for TagDrivenCollatableHeader {
+    type RecordType = TagDrivenReadRecord;
+    fn naln(&self) -> u32 {
+        self.naln
+    }
+}
+
+impl CollatableRecordHeader<u64> for TagDrivenCollatableHeader {
+    fn collate_key(&self) -> u64 {
+        self.key
+    }
+    fn write_fields<W: Write>(
+        &self,
+        writer: &mut W,
+        ctx: &TagDrivenReadRecordContext,
+    ) -> anyhow::Result<()> {
+        RadIntId::U32
+            .write_to(self.naln, writer)
+            .context("couldn't write number of alignments for generic record")?;
+        for (td, tv) in ctx.read_tags.iter_desc().zip(self.rtags.iter()) {
+            tv.write_with_type(&td.typeid, writer)
+                .context("couldn't write read-level tag for generic record header")?;
+        }
+        Ok(())
+    }
+}
+
+impl KnownSize for TagDrivenReadRecord {
+    fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        let read_bytes: usize = ctx
+            .read_tags
+            .iter_desc()
+            .map(|td| int_tag_bytes(&td.typeid))
+            .sum();
+        std::mem::size_of::<u32>() + read_bytes + (na as usize * Self::nbytes_aln(ctx))
+    }
+    fn nbytes_aln(ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
+        ctx.aln_tags
+            .iter_desc()
+            .map(|td| int_tag_bytes(&td.typeid))
+            .sum()
+    }
+}
+
+impl CollatableMappedRecord<u64> for TagDrivenReadRecord {
+    type CollatableRecordHeader = TagDrivenCollatableHeader;
+
+    fn from_bytes_collatable_header<T: Read>(
+        reader: &mut T,
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
+        let key_tag_idx = ctx
+            .key_tag_idx
+            .context("generic record collated without a key_tag_idx in its context")?;
+        let mut nb = [0u8; 4];
+        reader.read_exact(&mut nb)?;
+        let naln = u32::from_le_bytes(nb);
+        let rtags: Vec<TagValue> = ctx
+            .read_tags
+            .iter_desc()
+            .map(|td| td.value_from_bytes(reader))
+            .collect();
+        let key = tag_value_as_u64(&rtags[key_tag_idx]);
+        Ok(TagDrivenCollatableHeader {
+            naln,
+            key,
+            rtags,
+            key_tag_idx,
+        })
+    }
+
+    fn from_bytes_with_header_retain_ori<T: Read>(
+        reader: &mut T,
+        hdr: &mut Self::CollatableRecordHeader,
+        ctx: &<Self as MappedRecord>::ParsingContext,
+        expected_ori: &MappedFragmentOrientation,
+    ) -> Self {
+        // If the layout declares which alignment field carries orientation (a
+        // `compressed_ori_refid`-style word: top bit set ⇒ forward, else reverse),
+        // filter alignments to those matching `expected_ori` — mirroring the fast
+        // records' `keep_ori`. Without that role, or when no orientation is
+        // expected, all alignments are retained.
+        let naln_tags = ctx.aln_tags.iter_desc().len();
+        let exp: &Strand = expected_ori.into();
+        let filter = ctx.ori_tag_idx.is_some() && !exp.is_unknown();
+        let ori_idx = ctx.ori_tag_idx.unwrap_or(0);
+
+        let mut atags = Vec::with_capacity(hdr.naln as usize * naln_tags);
+        let mut aln: Vec<TagValue> = Vec::with_capacity(naln_tags);
+        let mut kept = 0u32;
+        for _ in 0..(hdr.naln as usize) {
+            aln.clear();
+            for td in ctx.aln_tags.iter_desc() {
+                aln.push(td.value_from_bytes(reader));
+            }
+            if filter {
+                let v = tag_value_as_u64(&aln[ori_idx]) as u32;
+                let strand = if (v & crate::utils::MASK_LOWER_31_U32) > 0 {
+                    Strand::Forward
+                } else {
+                    Strand::Reverse
+                };
+                if !(exp.same(&strand) || exp.is_unknown()) {
+                    continue;
+                }
+            }
+            atags.append(&mut aln);
+            kept += 1;
+        }
+        hdr.naln = kept;
+        Self {
+            naln: kept,
+            naln_tags: naln_tags as u32,
+            rtags: std::mem::take(&mut hdr.rtags),
+            atags,
+            key_tag_idx: hdr.key_tag_idx,
+        }
+    }
+
+    fn set_collate_key(&mut self, k: u64) {
+        set_tag_value_u64(&mut self.rtags[self.key_tag_idx], k);
+    }
+
+    fn collate_key(&self) -> u64 {
+        tag_value_as_u64(&self.rtags[self.key_tag_idx])
+    }
+
+    fn peek_collatable_header(
+        reader: &[u8],
+        ctx: &<Self as MappedRecord>::ParsingContext,
+    ) -> anyhow::Result<Self::CollatableRecordHeader> {
+        // Identical layout to `from_bytes_collatable_header`, over an in-memory
+        // slice — reuse it via a cursor rather than duplicating the tag walk.
+        let mut cur = std::io::Cursor::new(reader);
+        Self::from_bytes_collatable_header(&mut cur, ctx)
     }
 }
 
@@ -2000,12 +2330,29 @@ impl RecordContext for ScLongReadRecordContext {
             _ => bail!("barcode/umi must be RadType::Int"),
         }
     }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
+    }
 }
 
 impl ScLongReadRecordContext {
     /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
+    }
+
+    /// Build the context from the read tags' declared roles (see
+    /// `bct_umit_from_roles`); `Ok(None)` when no barcode role is declared.
+    pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
+        Ok(bct_umit_from_roles(rt)?.map(|(bct, umit)| Self { bct, umit }))
     }
 }
 
@@ -2416,9 +2763,38 @@ impl RecordContext for MultiBarcodeRecordContext {
             roles,
         })
     }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
+    }
 }
 
 impl MultiBarcodeRecordContext {
+    /// The innermost (cell) barcode's nucleotide length as declared by its
+    /// [`crate::rad_types::TagRole::Barcode`] role, i.e. the length carried by the
+    /// highest-`level` Barcode role. Returns `None` when no barcode role is
+    /// declared or the innermost one leaves `len` unspecified (`0`), so the caller
+    /// can fall back to a `bNlen`/`cblen` file tag.
+    pub fn cell_bc_len_from_roles(read_tags: &TagSection) -> Option<u8> {
+        use crate::rad_types::TagRole;
+        read_tags
+            .tags
+            .iter()
+            .filter_map(|t| match t.role {
+                TagRole::Barcode { level, len } => Some((level, len)),
+                _ => None,
+            })
+            .max_by_key(|(level, _)| *level)
+            .and_then(|(_, len)| if len == 0 { None } else { Some(len) })
+    }
+
     /// Create a new context from explicit barcode types, UMI type, and roles.
     pub fn new(
         bc_types: SmallVec<[RadIntId; MAX_INLINE_BARCODES]>,
@@ -2459,6 +2835,122 @@ impl MultiBarcodeRecordContext {
             }
         }
         Ok(roles)
+    }
+
+    /// Build a multi-barcode context from the read tags' declared roles, mirroring
+    /// [`crate::bucket_gather::CollationKeySpec::from_roles`]: the barcode levels
+    /// come from [`TagRole::Barcode`](crate::rad_types::TagRole::Barcode) (ordered outer→inner by `level`) and the UMI
+    /// from [`TagRole::Umi`](crate::rad_types::TagRole::Umi), with no reliance on the `b0`/`b1`/`u` name bridge.
+    ///
+    /// Returns `Ok(None)` when fewer than two barcode roles are declared (not a
+    /// composite layout — the caller can fall back to the single-barcode path or
+    /// the name bridge). The record reader consumes the read header sequentially as
+    /// `[na][barcodes…][umi]`, so this **fails** (rather than silently misreading)
+    /// unless the roles describe exactly that physical layout: the barcode fields
+    /// must be the first read tags in level order and the UMI must immediately
+    /// follow them, with no other read tags. The outermost level maps to
+    /// [`BarcodeRole::Sample`], the rest to [`BarcodeRole::Cell`], matching
+    /// `parse_roles_or_default`.
+    pub fn from_roles(read_tags: &TagSection) -> anyhow::Result<Option<Self>> {
+        use crate::rad_types::TagRole;
+        // (physical index, level, int type) for each barcode-role read tag.
+        let mut barcodes: Vec<(usize, u8, RadIntId)> = Vec::new();
+        let mut umi: Option<(usize, RadIntId)> = None;
+        for (idx, td) in read_tags.tags.iter().enumerate() {
+            match td.role {
+                TagRole::Barcode { level, .. } => {
+                    let RadType::Int(int) = td.typeid else {
+                        bail!(
+                            "barcode-role read tag `{}` is not a fixed-width integer",
+                            td.name
+                        );
+                    };
+                    barcodes.push((idx, level, int));
+                }
+                TagRole::Umi { .. } => {
+                    if umi.is_some() {
+                        bail!("multiple read tags declare the Umi role");
+                    }
+                    let RadType::Int(int) = td.typeid else {
+                        bail!(
+                            "umi-role read tag `{}` is not a fixed-width integer",
+                            td.name
+                        );
+                    };
+                    umi = Some((idx, int));
+                }
+                _ => {}
+            }
+        }
+        if barcodes.len() < 2 {
+            // Not a composite layout by roles; let the caller fall back.
+            return Ok(None);
+        }
+        // Order barcodes outer→inner by level; require levels distinct and the
+        // physical order to match the level order, because the reader consumes
+        // barcodes sequentially from the start of the header.
+        barcodes.sort_by_key(|(_, level, _)| *level);
+        for w in barcodes.windows(2) {
+            if w[0].1 == w[1].1 {
+                bail!("two barcode roles share level {}", w[0].1);
+            }
+            if w[0].0 >= w[1].0 {
+                bail!(
+                    "barcode-role physical order does not match level order; the sequential \
+                     record reader requires barcodes laid out outer→inner"
+                );
+            }
+        }
+        let num_bc = barcodes.len();
+        // The multi engine forms a u64 group key as (outer << cell_bits) | cell,
+        // keying on the first (sample) and last (cell) levels only. So until that
+        // key moves to u128 (deferred): reject > 2 levels (a middle level would be
+        // dropped from the key), and reject a cell barcode >= 64 bits (the shift
+        // would drop the sample). Guard here with a clear error rather than
+        // silently mis-grouping. (COMBINE-lab/libradicl#66; v2-hardening-plan C5.)
+        anyhow::ensure!(
+            num_bc <= 2,
+            "role-driven multi-barcode collation currently supports at most 2 barcode levels, \
+             but {num_bc} Barcode roles are declared; >2-level composite keys are a follow-up"
+        );
+        let cell_bits = barcodes[num_bc - 1].2.bytes_for_type() * 8;
+        anyhow::ensure!(
+            cell_bits < 64,
+            "role-driven multi-barcode collation currently requires a cell barcode narrower than \
+             64 bits (got {cell_bits}); a u64-wide cell would drop the sample from the group key"
+        );
+        let (umi_idx, umit) = umi.context("multi-barcode role layout declares no Umi role")?;
+        // Barcodes must be the first `num_bc` read tags, the UMI immediately
+        // after, and nothing else — the reader reads exactly `[na][bc…][umi]`.
+        if barcodes[0].0 != 0 || barcodes[num_bc - 1].0 != num_bc - 1 {
+            bail!("barcode-role tags must be the first read tags for the sequential reader");
+        }
+        if umi_idx != num_bc {
+            bail!("the Umi-role tag must immediately follow the barcode tags");
+        }
+        if read_tags.tags.len() != num_bc + 1 {
+            bail!(
+                "role-driven multi-barcode layout expects exactly {} read tags (barcodes + umi), \
+                 found {}",
+                num_bc + 1,
+                read_tags.tags.len()
+            );
+        }
+        let mut bc_types = SmallVec::new();
+        let mut roles = SmallVec::new();
+        for (i, (_, _, int)) in barcodes.iter().enumerate() {
+            bc_types.push(*int);
+            roles.push(if i == 0 {
+                BarcodeRole::Sample
+            } else {
+                BarcodeRole::Cell
+            });
+        }
+        Ok(Some(Self {
+            bc_types,
+            umit,
+            roles,
+        }))
     }
 }
 
@@ -3149,10 +3641,12 @@ mod tests {
         let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
         let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
         rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "b".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
         rt.add_tag_desc(TagDesc {
+            role: crate::rad_types::TagRole::None,
             name: "u".to_string(),
             typeid: RadType::Int(RadIntId::U32),
         });
@@ -3197,6 +3691,191 @@ mod tests {
         let new_rec = MultiBarcodeReadRecord::from_bytes_with_context(&mut cursor, &ctx);
 
         assert_eq!(rec, new_rec);
+    }
+
+    #[test]
+    fn single_barcode_role_layout_is_validated() {
+        use crate::rad_types::TagRole;
+        use crate::record::{AlevinFryRecordContext, RecordContext};
+        let tag = |name: &str, role: TagRole, int: RadIntId| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(int),
+        };
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+        let sec = |tags: Vec<TagDesc>| {
+            let mut s = TagSection::new_with_label(TagSectionLabel::ReadTags);
+            for t in tags {
+                s.add_tag_desc(t);
+            }
+            s
+        };
+        // [Barcode@0, Umi@1] — valid.
+        let ok = sec(vec![
+            tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32),
+            tag("umi", TagRole::Umi { len: 12 }, RadIntId::U32),
+        ]);
+        assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &ok, &at).is_ok());
+        // Swapped [Umi@0, Barcode@1] — the positional reader can't honor it → Err.
+        let swapped = sec(vec![
+            tag("umi", TagRole::Umi { len: 12 }, RadIntId::U32),
+            tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32),
+        ]);
+        assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &swapped, &at).is_err());
+        // Extra read tag after [Barcode, Umi] → Err (layout not positional).
+        let extra = sec(vec![
+            tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32),
+            tag("umi", TagRole::Umi { len: 12 }, RadIntId::U32),
+            tag("x", TagRole::None, RadIntId::U8),
+        ]);
+        assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &extra, &at).is_err());
+        // Barcode role but no Umi role → fall back to the name bridge: with tags
+        // named b/u it succeeds; with a renamed barcode and no `b` it errors.
+        let bc_named_b = sec(vec![
+            tag("b", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32),
+            tag("u", TagRole::None, RadIntId::U32),
+        ]);
+        assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &bc_named_b, &at).is_ok());
+        let bc_renamed_no_umi = sec(vec![tag(
+            "cb",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        )]);
+        assert!(
+            AlevinFryRecordContext::get_context_prefer_roles(&ft, &bc_renamed_no_umi, &at).is_err()
+        );
+    }
+
+    #[test]
+    fn prefer_roles_context_reads_renamed_tags_and_falls_back() {
+        use crate::rad_types::TagRole;
+        use crate::record::{AlevinFryRecordContext, MultiBarcodeRecordContext, RecordContext};
+
+        let tag = |name: &str, role: TagRole, int: RadIntId| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(int),
+        };
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        // Single-barcode: non-conventional names, but roles present -> read via roles.
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(tag(
+            "cb",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
+        rt.add_tag_desc(tag("umi", TagRole::Umi { len: 12 }, RadIntId::U64));
+        let ctx = AlevinFryRecordContext::get_context_prefer_roles(&ft, &rt, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U32);
+        assert_eq!(ctx.umit, RadIntId::U64);
+
+        // Legacy single-barcode: b/u names, no roles -> falls back to the bridge.
+        let mut legacy = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        legacy.add_tag_desc(tag("b", TagRole::None, RadIntId::U32));
+        legacy.add_tag_desc(tag("u", TagRole::None, RadIntId::U32));
+        let ctx = AlevinFryRecordContext::get_context_prefer_roles(&ft, &legacy, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U32);
+        assert_eq!(ctx.umit, RadIntId::U32);
+
+        // Multi-barcode: renamed sample/cell/umi with roles -> read via roles.
+        let mut mrt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        mrt.add_tag_desc(tag(
+            "sample_bc",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
+        mrt.add_tag_desc(tag(
+            "cell_bc",
+            TagRole::Barcode { level: 1, len: 16 },
+            RadIntId::U32,
+        ));
+        mrt.add_tag_desc(tag("umi", TagRole::Umi { len: 12 }, RadIntId::U32));
+        let mctx = MultiBarcodeRecordContext::get_context_prefer_roles(&ft, &mrt, &at).unwrap();
+        assert_eq!(mctx.bc_types.as_slice(), [RadIntId::U32, RadIntId::U32]);
+        assert_eq!(mctx.umit, RadIntId::U32);
+
+        // A declared barcode role without a Umi role is an error (not a silent fallback).
+        let mut no_umi = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        no_umi.add_tag_desc(tag(
+            "cb",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
+        assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &no_umi, &at).is_err());
+    }
+
+    #[test]
+    fn multi_barcode_context_from_roles() {
+        use crate::collation::BarcodeRole;
+        use crate::rad_types::TagRole;
+        use crate::record::MultiBarcodeRecordContext;
+
+        let bc = |name: &str, role: TagRole| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(RadIntId::U32),
+        };
+
+        // Well-formed 2-level layout with non-conventional names: roles drive it.
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(bc("sample_bc", TagRole::Barcode { level: 0, len: 16 }));
+        rt.add_tag_desc(bc("cell_bc", TagRole::Barcode { level: 1, len: 16 }));
+        rt.add_tag_desc(bc("umi", TagRole::Umi { len: 12 }));
+        let ctx = MultiBarcodeRecordContext::from_roles(&rt)
+            .unwrap()
+            .expect("two barcode roles should yield a composite context");
+        assert_eq!(ctx.bc_types.as_slice(), [RadIntId::U32, RadIntId::U32]);
+        assert_eq!(ctx.umit, RadIntId::U32);
+        assert_eq!(
+            ctx.roles.as_slice(),
+            [BarcodeRole::Sample, BarcodeRole::Cell]
+        );
+
+        // Fewer than two barcode roles -> None (fall back to single/name bridge).
+        let mut single = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        single.add_tag_desc(bc("b", TagRole::Barcode { level: 0, len: 16 }));
+        single.add_tag_desc(bc("u", TagRole::Umi { len: 12 }));
+        assert!(
+            MultiBarcodeRecordContext::from_roles(&single)
+                .unwrap()
+                .is_none()
+        );
+
+        // No declared roles at all -> None.
+        let mut plain = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        plain.add_tag_desc(bc("b0", TagRole::None));
+        plain.add_tag_desc(bc("b1", TagRole::None));
+        plain.add_tag_desc(bc("u", TagRole::None));
+        assert!(
+            MultiBarcodeRecordContext::from_roles(&plain)
+                .unwrap()
+                .is_none()
+        );
+
+        // Barcode physical order not matching level order -> error (the reader is
+        // sequential and cannot honor an interleaved/out-of-order layout).
+        let mut swapped = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        swapped.add_tag_desc(bc("outer", TagRole::Barcode { level: 1, len: 16 }));
+        swapped.add_tag_desc(bc("inner", TagRole::Barcode { level: 0, len: 16 }));
+        swapped.add_tag_desc(bc("umi", TagRole::Umi { len: 12 }));
+        assert!(MultiBarcodeRecordContext::from_roles(&swapped).is_err());
+
+        // Two barcodes but no UMI role -> error.
+        let mut noumi = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        noumi.add_tag_desc(bc("b0", TagRole::Barcode { level: 0, len: 16 }));
+        noumi.add_tag_desc(bc("b1", TagRole::Barcode { level: 1, len: 16 }));
+        assert!(MultiBarcodeRecordContext::from_roles(&noumi).is_err());
+
+        // UMI not immediately after the barcodes -> error.
+        let mut gap = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        gap.add_tag_desc(bc("b0", TagRole::Barcode { level: 0, len: 16 }));
+        gap.add_tag_desc(bc("b1", TagRole::Barcode { level: 1, len: 16 }));
+        gap.add_tag_desc(bc("extra", TagRole::None));
+        gap.add_tag_desc(bc("u", TagRole::Umi { len: 12 }));
+        assert!(MultiBarcodeRecordContext::from_roles(&gap).is_err());
     }
 
     #[test]

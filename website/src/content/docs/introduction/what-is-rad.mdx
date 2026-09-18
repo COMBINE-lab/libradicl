@@ -1,0 +1,64 @@
+---
+title: What is RAD?
+description: A short introduction to the Reduced Alignment Data format and where it fits.
+---
+
+The **Reduced Alignment Data (RAD)** format is a binary file format that records
+how sequencing reads map to a set of *targets* — the transcripts, contigs, or
+genomic references against which the reads were aligned or (pseudo-)mapped.
+
+It sits between a mapper and a quantifier:
+
+```
+reads ──▶  piscem / salmon  ──▶  .rad file  ──▶  alevin-fry / piscem-infer  ──▶  counts
+             (mapping)                              (resolution / quantification)
+```
+
+## "Reduced" relative to SAM/BAM
+
+A [SAM/BAM](https://samtools.github.io/hts-specs/) record is a faithful, general
+description of an alignment: the read sequence, base qualities, CIGAR string,
+mate information, optional tags, and more. That generality is exactly what a
+quantifier does **not** need. To assign a read to a transcript (or to a cell, or
+to resolve a UMI) a tool typically needs only:
+
+- **which targets** the read is compatible with (a list of reference IDs);
+- **the orientation** of each mapping;
+- for single-cell data, the **cell barcode** and **UMI**;
+- for some assays, a **position** and **fragment length**.
+
+RAD carries exactly these — and nothing else — at the smallest integer widths
+that fit. There are no read sequences and no quality strings. The result is a
+file that is dramatically smaller than the equivalent BAM and far cheaper to
+parse.
+
+## A stream of independent chunks
+
+The other half of the design is parallelism. After a small [prelude](/libradicl/format/prelude-and-header/),
+a RAD file is simply a sequence of **chunks**, each a self-contained batch of
+records. Chunks can be read and processed independently, so a single reader
+thread can pull chunks off disk and hand them to a pool of workers with no
+per-record synchronization. This is what lets tools like `alevin-fry` scale
+mapping-throughput-bound workloads across many cores.
+
+## Self-describing
+
+RAD does not hard-code a single record layout. Instead the prelude declares, via
+a [tag system](/libradicl/format/tags/), which dynamic fields appear at the file,
+read, and alignment levels, and at what types. A reader configures itself from
+those declarations. Version 2 of the format goes further and lets each tag carry
+a semantic [role](/libradicl/versioning/tag-roles/) — "this field is the cell
+barcode", "this one is the UMI" — so that the *meaning* of a field, not just its
+width, travels with the file.
+
+## Who uses it
+
+| Role | Tools |
+|------|-------|
+| **Producers** | [`piscem`](https://github.com/COMBINE-lab/piscem), [`salmon`](https://github.com/COMBINE-lab/salmon) |
+| **Consumers** | [`alevin-fry`](https://github.com/COMBINE-lab/alevin-fry), [`piscem-infer`](https://github.com/COMBINE-lab/piscem-infer) |
+| **Reference library** | [`libradicl`](https://github.com/COMBINE-lab/libradicl) (Rust) |
+
+If you are implementing a reader or writer, the [file structure](/libradicl/format/overview/)
+page begins the byte-level specification. If you want the reasoning behind the
+design, read on to [motivation & design principles](/libradicl/introduction/design/).
