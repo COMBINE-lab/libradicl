@@ -509,7 +509,7 @@ mod tests {
         let read_tags = TagSection {
             label: TagSectionLabel::ReadTags,
             tags: vec![
-                int("b", RadIntId::U32, TagRole::Barcode { level: 0 }),
+                int("b", RadIntId::U32, TagRole::Barcode { level: 0, len: 16 }),
                 int("u", RadIntId::U32, TagRole::Umi),
             ],
         };
@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(rp.hdr.major_version, crate::constants::RAD_SPEC_MAJOR);
         assert_eq!(rp.hdr.minor_version, crate::constants::RAD_SPEC_MINOR);
         assert_eq!(rp.hdr.ref_names, vec!["r0".to_string()]);
-        assert_eq!(rp.read_tags.tags[0].role, TagRole::Barcode { level: 0 });
+        assert_eq!(rp.read_tags.tags[0].role, TagRole::Barcode { level: 0, len: 16 });
         assert_eq!(rp.read_tags.tags[1].role, TagRole::Umi);
         assert_eq!(rp.aln_tags.tags[0].role, TagRole::Orientation);
         assert_eq!(rp.file_tags.tags[0].role, TagRole::None);

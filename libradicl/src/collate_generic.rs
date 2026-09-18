@@ -126,7 +126,7 @@ impl CollationKeySpec {
             .tags
             .iter()
             .filter_map(|t| match t.role {
-                TagRole::Barcode { level } => Some((level, t.name.as_str())),
+                TagRole::Barcode { level, .. } => Some((level, t.name.as_str())),
                 _ => None,
             })
             .collect();
@@ -1006,12 +1006,12 @@ mod tests {
                 TagDesc {
                     name: "b0".to_string(),
                     typeid: RadType::Int(RadIntId::U32),
-                    role: crate::rad_types::TagRole::Barcode { level: 0 },
+                    role: crate::rad_types::TagRole::Barcode { level: 0, len: 16 },
                 },
                 TagDesc {
                     name: "b1".to_string(),
                     typeid: RadType::Int(RadIntId::U32),
-                    role: crate::rad_types::TagRole::Barcode { level: 1 },
+                    role: crate::rad_types::TagRole::Barcode { level: 1, len: 16 },
                 },
                 TagDesc {
                     name: "u".to_string(),

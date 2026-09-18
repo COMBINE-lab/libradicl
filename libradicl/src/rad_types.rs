@@ -59,7 +59,11 @@ pub enum TagRole {
     None,
     /// A barcode level contributing to the collation key, ordered outer→inner
     /// (level 0 = outermost, e.g. sample; the innermost level is the cell).
-    Barcode { level: u8 },
+    /// `len` is the barcode's nucleotide length (needed e.g. for the Hamming
+    /// correction neighborhood); `0` means unspecified. This makes a barcode fully
+    /// self-describing — column and int type from the [`TagDesc`], plus order and
+    /// length from the role — with no reliance on `bNlen`/`cblen` file tags.
+    Barcode { level: u8, len: u8 },
     /// The UMI.
     Umi,
     /// An alignment's target reference id.
@@ -80,21 +84,21 @@ impl TagRole {
         }
     }
 
-    /// Serialize the role: one code byte, plus a level byte for `Barcode`.
+    /// Serialize the role: one code byte, plus a `[level][len]` pair for `Barcode`.
     fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         writer
             .write_all(&[self.code()])
             .context("could not write tag role")?;
-        if let TagRole::Barcode { level } = self {
+        if let TagRole::Barcode { level, len } = self {
             writer
-                .write_all(&[*level])
-                .context("could not write barcode role level")?;
+                .write_all(&[*level, *len])
+                .context("could not write barcode role level/len")?;
         }
         Ok(())
     }
 
     /// Read a role. An unknown code (e.g. from a newer *minor* version) decodes to
-    /// [`TagRole::None`]; only `Barcode` carries a parameter, and any future
+    /// [`TagRole::None`]; only `Barcode` carries parameters, and any future
     /// parameter-bearing role must be a *major* bump (rejected by the too-new
     /// guard), so a param-less unknown code never desyncs the stream.
     fn read<R: Read>(reader: &mut R) -> anyhow::Result<Self> {
@@ -104,11 +108,14 @@ impl TagRole {
             .context("could not read tag role")?;
         Ok(match b[0] {
             1 => {
-                let mut l = [0u8; 1];
+                let mut ll = [0u8; 2];
                 reader
-                    .read_exact(&mut l)
-                    .context("could not read barcode role level")?;
-                TagRole::Barcode { level: l[0] }
+                    .read_exact(&mut ll)
+                    .context("could not read barcode role level/len")?;
+                TagRole::Barcode {
+                    level: ll[0],
+                    len: ll[1],
+                }
             }
             2 => TagRole::Umi,
             3 => TagRole::Reference,
@@ -2441,7 +2448,7 @@ mod tests {
     #[test]
     fn tag_role_roundtrips_only_when_versioned() {
         for role in [
-            TagRole::Barcode { level: 3 },
+            TagRole::Barcode { level: 3, len: 16 },
             TagRole::Umi,
             TagRole::Reference,
             TagRole::Orientation,
@@ -2473,12 +2480,12 @@ mod tests {
                 TagDesc {
                     name: "b0".to_string(),
                     typeid: RadType::Int(RadIntId::U32),
-                    role: TagRole::Barcode { level: 0 },
+                    role: TagRole::Barcode { level: 0, len: 16 },
                 },
                 TagDesc {
                     name: "b1".to_string(),
                     typeid: RadType::Int(RadIntId::U32),
-                    role: TagRole::Barcode { level: 1 },
+                    role: TagRole::Barcode { level: 1, len: 16 },
                 },
                 TagDesc {
                     name: "u".to_string(),
@@ -2499,8 +2506,8 @@ mod tests {
         assert_eq!(
             rs.tags.iter().map(|t| t.role).collect::<Vec<_>>(),
             vec![
-                TagRole::Barcode { level: 0 },
-                TagRole::Barcode { level: 1 },
+                TagRole::Barcode { level: 0, len: 16 },
+                TagRole::Barcode { level: 1, len: 16 },
                 TagRole::Umi,
             ]
         );

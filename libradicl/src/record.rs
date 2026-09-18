@@ -2749,6 +2749,24 @@ impl RecordContext for MultiBarcodeRecordContext {
 }
 
 impl MultiBarcodeRecordContext {
+    /// The innermost (cell) barcode's nucleotide length as declared by its
+    /// [`crate::rad_types::TagRole::Barcode`] role, i.e. the length carried by the
+    /// highest-`level` Barcode role. Returns `None` when no barcode role is
+    /// declared or the innermost one leaves `len` unspecified (`0`), so the caller
+    /// can fall back to a `bNlen`/`cblen` file tag.
+    pub fn cell_bc_len_from_roles(read_tags: &TagSection) -> Option<u8> {
+        use crate::rad_types::TagRole;
+        read_tags
+            .tags
+            .iter()
+            .filter_map(|t| match t.role {
+                TagRole::Barcode { level, len } => Some((level, len)),
+                _ => None,
+            })
+            .max_by_key(|(level, _)| *level)
+            .and_then(|(_, len)| if len == 0 { None } else { Some(len) })
+    }
+
     /// Create a new context from explicit barcode types, UMI type, and roles.
     pub fn new(
         bc_types: SmallVec<[RadIntId; MAX_INLINE_BARCODES]>,
@@ -2812,7 +2830,7 @@ impl MultiBarcodeRecordContext {
         let mut umi: Option<(usize, RadIntId)> = None;
         for (idx, td) in read_tags.tags.iter().enumerate() {
             match td.role {
-                TagRole::Barcode { level } => {
+                TagRole::Barcode { level, .. } => {
                     let RadType::Int(int) = td.typeid else {
                         bail!(
                             "barcode-role read tag `{}` is not a fixed-width integer",
@@ -3642,7 +3660,7 @@ mod tests {
 
         // Single-barcode: non-conventional names, but roles present -> read via roles.
         let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        rt.add_tag_desc(tag("cb", TagRole::Barcode { level: 0 }, RadIntId::U32));
+        rt.add_tag_desc(tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32));
         rt.add_tag_desc(tag("umi", TagRole::Umi, RadIntId::U64));
         let ctx = AlevinFryRecordContext::get_context_prefer_roles(&ft, &rt, &at).unwrap();
         assert_eq!(ctx.bct, RadIntId::U32);
@@ -3658,8 +3676,8 @@ mod tests {
 
         // Multi-barcode: renamed sample/cell/umi with roles -> read via roles.
         let mut mrt = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        mrt.add_tag_desc(tag("sample_bc", TagRole::Barcode { level: 0 }, RadIntId::U32));
-        mrt.add_tag_desc(tag("cell_bc", TagRole::Barcode { level: 1 }, RadIntId::U32));
+        mrt.add_tag_desc(tag("sample_bc", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32));
+        mrt.add_tag_desc(tag("cell_bc", TagRole::Barcode { level: 1, len: 16 }, RadIntId::U32));
         mrt.add_tag_desc(tag("umi", TagRole::Umi, RadIntId::U32));
         let mctx = MultiBarcodeRecordContext::get_context_prefer_roles(&ft, &mrt, &at).unwrap();
         assert_eq!(mctx.bc_types.as_slice(), [RadIntId::U32, RadIntId::U32]);
@@ -3667,7 +3685,7 @@ mod tests {
 
         // A declared barcode role without a Umi role is an error (not a silent fallback).
         let mut no_umi = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        no_umi.add_tag_desc(tag("cb", TagRole::Barcode { level: 0 }, RadIntId::U32));
+        no_umi.add_tag_desc(tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32));
         assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &no_umi, &at).is_err());
     }
 
@@ -3685,8 +3703,8 @@ mod tests {
 
         // Well-formed 2-level layout with non-conventional names: roles drive it.
         let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        rt.add_tag_desc(bc("sample_bc", TagRole::Barcode { level: 0 }));
-        rt.add_tag_desc(bc("cell_bc", TagRole::Barcode { level: 1 }));
+        rt.add_tag_desc(bc("sample_bc", TagRole::Barcode { level: 0, len: 16 }));
+        rt.add_tag_desc(bc("cell_bc", TagRole::Barcode { level: 1, len: 16 }));
         rt.add_tag_desc(bc("umi", TagRole::Umi));
         let ctx = MultiBarcodeRecordContext::from_roles(&rt)
             .unwrap()
@@ -3700,7 +3718,7 @@ mod tests {
 
         // Fewer than two barcode roles -> None (fall back to single/name bridge).
         let mut single = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        single.add_tag_desc(bc("b", TagRole::Barcode { level: 0 }));
+        single.add_tag_desc(bc("b", TagRole::Barcode { level: 0, len: 16 }));
         single.add_tag_desc(bc("u", TagRole::Umi));
         assert!(MultiBarcodeRecordContext::from_roles(&single).unwrap().is_none());
 
@@ -3714,21 +3732,21 @@ mod tests {
         // Barcode physical order not matching level order -> error (the reader is
         // sequential and cannot honor an interleaved/out-of-order layout).
         let mut swapped = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        swapped.add_tag_desc(bc("outer", TagRole::Barcode { level: 1 }));
-        swapped.add_tag_desc(bc("inner", TagRole::Barcode { level: 0 }));
+        swapped.add_tag_desc(bc("outer", TagRole::Barcode { level: 1, len: 16 }));
+        swapped.add_tag_desc(bc("inner", TagRole::Barcode { level: 0, len: 16 }));
         swapped.add_tag_desc(bc("umi", TagRole::Umi));
         assert!(MultiBarcodeRecordContext::from_roles(&swapped).is_err());
 
         // Two barcodes but no UMI role -> error.
         let mut noumi = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        noumi.add_tag_desc(bc("b0", TagRole::Barcode { level: 0 }));
-        noumi.add_tag_desc(bc("b1", TagRole::Barcode { level: 1 }));
+        noumi.add_tag_desc(bc("b0", TagRole::Barcode { level: 0, len: 16 }));
+        noumi.add_tag_desc(bc("b1", TagRole::Barcode { level: 1, len: 16 }));
         assert!(MultiBarcodeRecordContext::from_roles(&noumi).is_err());
 
         // UMI not immediately after the barcodes -> error.
         let mut gap = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        gap.add_tag_desc(bc("b0", TagRole::Barcode { level: 0 }));
-        gap.add_tag_desc(bc("b1", TagRole::Barcode { level: 1 }));
+        gap.add_tag_desc(bc("b0", TagRole::Barcode { level: 0, len: 16 }));
+        gap.add_tag_desc(bc("b1", TagRole::Barcode { level: 1, len: 16 }));
         gap.add_tag_desc(bc("extra", TagRole::None));
         gap.add_tag_desc(bc("u", TagRole::Umi));
         assert!(MultiBarcodeRecordContext::from_roles(&gap).is_err());

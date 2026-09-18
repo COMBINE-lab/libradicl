@@ -42,6 +42,7 @@
 //! ```
 
 use crate::chunk::Chunk;
+use crate::constants;
 use crate::header::RadPrelude;
 use crate::rad_types::{TagMap, TagValue};
 use crate::record::MappedRecord;
@@ -79,6 +80,7 @@ impl<W: Write + Seek> RadFileWriter<W> {
 
         // Compute the byte offset of the num_chunks field *before* writing.
         // Header layout:
+        //   [ magic (8) + major/minor (2) ]  — only when versioned (spec major >= 2)
         //   1 byte  — is_paired
         //   8 bytes — ref_count
         //   for each ref_name: 2 bytes (length) + name bytes
@@ -92,7 +94,16 @@ impl<W: Write + Seek> RadFileWriter<W> {
             .iter()
             .map(|n| 2u64 + n.len() as u64)
             .sum();
-        let num_chunks_offset = start + 1 + 8 + ref_names_size;
+        // A versioned prelude writes the magic + [major][minor] prefix ahead of the
+        // header, so the num_chunks field sits that many bytes further in. Missing
+        // this backpatches num_chunks into the ref-name region (see #64).
+        let version_prefix: u64 = if prelude.hdr.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR
+        {
+            constants::RAD_MAGIC.len() as u64 + 2
+        } else {
+            0
+        };
+        let num_chunks_offset = start + version_prefix + 1 + 8 + ref_names_size;
 
         prelude
             .write(&mut inner)
@@ -390,6 +401,58 @@ mod tests {
         assert_eq!(read_chunk1.nrec, 3);
         assert_eq!(read_chunk2.nrec, 3);
         assert_eq!(read_chunk1.reads[0], rec);
+    }
+
+    #[test]
+    fn rad_file_writer_v2_backpatches_num_chunks_past_magic() {
+        // Regression: a versioned (spec major >= 2) prelude writes a magic +
+        // major/minor prefix ahead of the header, so `num_chunks` sits that many
+        // bytes further in. The writer's backpatch offset must include the prefix;
+        // otherwise it overwrites the ref-name region (corrupting the header) and
+        // num_chunks reads back wrong. Also confirms a Barcode{level,len} role
+        // round-trips through the full write→read path.
+        use crate::rad_types::TagRole;
+
+        let (mut prelude, file_tag_map) = make_af_prelude();
+        prelude.hdr.major_version = crate::constants::RAD_SPEC_MAJOR;
+        prelude.hdr.minor_version = crate::constants::RAD_SPEC_MINOR;
+        prelude.read_tags.tags[0].role = TagRole::Barcode { level: 0, len: 16 };
+        let ctx = AlevinFryRecordContext::get_context_from_tag_section(
+            &prelude.file_tags,
+            &prelude.read_tags,
+            &prelude.aln_tags,
+        )
+        .unwrap();
+        let rec = make_af_record();
+        let chunk = Chunk::<AlevinFryReadRecord> {
+            nbytes: 0,
+            nrec: 3,
+            reads: vec![rec.clone(), rec.clone(), rec.clone()],
+        };
+
+        let mut fw = RadFileWriter::new(Cursor::new(Vec::new()), &prelude, &file_tag_map).unwrap();
+        fw.write_chunk(&chunk, &ctx).unwrap();
+        fw.write_chunk(&chunk, &ctx).unwrap();
+        fw.write_chunk(&chunk, &ctx).unwrap();
+        let cursor = fw.finalize().unwrap();
+
+        let mut cursor = Cursor::new(cursor.into_inner());
+        // The magic must be intact at the very start.
+        assert_eq!(
+            &cursor.get_ref()[..crate::constants::RAD_MAGIC.len()],
+            &crate::constants::RAD_MAGIC
+        );
+        let read_prelude = RadPrelude::from_bytes(&mut cursor).expect("read v2 prelude");
+        assert_eq!(read_prelude.hdr.major_version, crate::constants::RAD_SPEC_MAJOR);
+        // ref names must be uncorrupted (the bug wrote num_chunks into them).
+        assert_eq!(read_prelude.hdr.ref_names, prelude.hdr.ref_names);
+        // num_chunks backpatched to the correct location.
+        assert_eq!(read_prelude.hdr.num_chunks, 3);
+        // the Barcode role (with len) round-trips.
+        assert_eq!(
+            read_prelude.read_tags.tags[0].role,
+            TagRole::Barcode { level: 0, len: 16 }
+        );
     }
 
     #[test]
