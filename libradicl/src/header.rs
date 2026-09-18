@@ -419,6 +419,14 @@ impl RadPrelude {
     pub fn get_record_context<R: RecordContext>(&self) -> anyhow::Result<R> {
         R::get_context_from_tag_section(&self.file_tags, &self.read_tags, &self.aln_tags)
     }
+
+    /// Like [`Self::get_record_context`], but the context is built preferring the
+    /// RAD's declared tag roles (#64) over tag-name conventions, so a
+    /// role-annotated RAD whose tags use non-conventional names is read correctly.
+    /// Falls back to the name bridge for un-annotated (legacy) files.
+    pub fn get_record_context_prefer_roles<R: RecordContext>(&self) -> anyhow::Result<R> {
+        R::get_context_prefer_roles(&self.file_tags, &self.read_tags, &self.aln_tags)
+    }
 }
 
 #[cfg(test)]

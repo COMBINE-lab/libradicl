@@ -298,8 +298,11 @@ where
     // we include the endpoint here because we will not actually
     // copy a chunk in the first iteration (since we have not yet
     // read the chunk header, which comes at the end of the loop).
+    // Prefer the RAD's declared tag roles (#64) so a role-annotated file whose
+    // tags use non-conventional names is filtered/parsed correctly; falls back to
+    // the tag-name bridge for un-annotated (legacy) files.
     let record_context = prelude
-        .get_record_context::<<R as MappedRecord>::ParsingContext>()
+        .get_record_context_prefer_roles::<<R as MappedRecord>::ParsingContext>()
         .unwrap();
     while let Some(chunk_num) = chunk_iter.next() {
         // while until_fn(chunk_num, &mut br) {
@@ -480,8 +483,11 @@ where
     // we include the endpoint here because we will not actually
     // copy a chunk in the first iteration (since we have not yet
     // read the chunk header, which comes at the end of the loop).
+    // Prefer the RAD's declared tag roles (#64) so a role-annotated file whose
+    // tags use non-conventional names is filtered/parsed correctly; falls back to
+    // the tag-name bridge for un-annotated (legacy) files.
     let record_context = prelude
-        .get_record_context::<<R as MappedRecord>::ParsingContext>()
+        .get_record_context_prefer_roles::<<R as MappedRecord>::ParsingContext>()
         .unwrap();
 
     while let Some(chunk_num) = chunk_iter.next() {

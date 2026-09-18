@@ -692,6 +692,23 @@ pub trait RecordContext {
     ) -> anyhow::Result<Self>
     where
         Self: Sized;
+
+    /// Build the context, preferring the RAD's declared tag roles (#64) over the
+    /// tag-name conventions, so a role-annotated RAD whose tags use
+    /// non-conventional names is still read correctly. The default falls back to
+    /// the name-based [`Self::get_context_from_tag_section`]; record contexts that
+    /// understand roles override this to try roles first and fall back to the name
+    /// bridge for un-annotated (legacy) files.
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        Self::get_context_from_tag_section(ft, rt, at)
+    }
 }
 
 impl RecordContext for GenericReadRecordContext {
@@ -724,6 +741,53 @@ pub struct AlevinFryRecordContext {
     pub umit: RadIntId,
 }
 
+/// Extract a single-barcode + UMI integer layout from declared read-tag roles:
+/// exactly one [`crate::rad_types::TagRole::Barcode`] tag supplies the barcode
+/// integer type and one [`crate::rad_types::TagRole::Umi`] tag supplies the UMI
+/// type. Returns `Ok(None)` when no barcode role is declared (so the caller falls
+/// back to the tag-name bridge); errors on an ambiguous/incomplete role set.
+/// Shared by the single-barcode ([`AlevinFryRecordContext`]) and long-read
+/// ([`ScLongReadRecordContext`]) contexts, which have the same `[bc][umi]` shape.
+fn bct_umit_from_roles(rt: &TagSection) -> anyhow::Result<Option<(RadIntId, RadIntId)>> {
+    use crate::rad_types::TagRole;
+    let bcs: Vec<_> = rt
+        .tags
+        .iter()
+        .filter(|t| matches!(t.role, TagRole::Barcode { .. }))
+        .collect();
+    if bcs.is_empty() {
+        return Ok(None);
+    }
+    if bcs.len() != 1 {
+        bail!(
+            "single-barcode record expects exactly one Barcode role, found {}",
+            bcs.len()
+        );
+    }
+    let RadType::Int(bct) = bcs[0].typeid else {
+        bail!(
+            "barcode-role tag `{}` is not a fixed-width integer",
+            bcs[0].name
+        );
+    };
+    let umis: Vec<_> = rt
+        .tags
+        .iter()
+        .filter(|t| matches!(t.role, TagRole::Umi))
+        .collect();
+    let umit = match umis.as_slice() {
+        [u] => match u.typeid {
+            RadType::Int(x) => x,
+            _ => bail!("umi-role tag `{}` is not a fixed-width integer", u.name),
+        },
+        [] => bail!(
+            "a Barcode role is declared but no Umi role; cannot build the record context from roles"
+        ),
+        _ => bail!("multiple Umi roles declared"),
+    };
+    Ok(Some((bct, umit)))
+}
+
 impl RecordContext for AlevinFryRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
     /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
@@ -746,12 +810,29 @@ impl RecordContext for AlevinFryRecordContext {
             bail!("alevin-fry record context requires that b and u tags are of type RadType::Int");
         }
     }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
+    }
 }
 
 impl AlevinFryRecordContext {
     /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
+    }
+
+    /// Build the context from the read tags' declared roles (see
+    /// [`bct_umit_from_roles`]); `Ok(None)` when no barcode role is declared.
+    pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
+        Ok(bct_umit_from_roles(rt)?.map(|(bct, umit)| Self { bct, umit }))
     }
 }
 
@@ -2221,12 +2302,29 @@ impl RecordContext for ScLongReadRecordContext {
             _ => bail!("barcode/umi must be RadType::Int"),
         }
     }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
+    }
 }
 
 impl ScLongReadRecordContext {
     /// Create a new AlevinFryRecordContext from the barcode and umi [RadIntId] types.
     pub fn from_bct_umit(bct: RadIntId, umit: RadIntId) -> Self {
         Self { bct, umit }
+    }
+
+    /// Build the context from the read tags' declared roles (see
+    /// [`bct_umit_from_roles`]); `Ok(None)` when no barcode role is declared.
+    pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
+        Ok(bct_umit_from_roles(rt)?.map(|(bct, umit)| Self { bct, umit }))
     }
 }
 
@@ -2636,6 +2734,17 @@ impl RecordContext for MultiBarcodeRecordContext {
             umit,
             roles,
         })
+    }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
     }
 }
 
@@ -3516,6 +3625,50 @@ mod tests {
         let new_rec = MultiBarcodeReadRecord::from_bytes_with_context(&mut cursor, &ctx);
 
         assert_eq!(rec, new_rec);
+    }
+
+    #[test]
+    fn prefer_roles_context_reads_renamed_tags_and_falls_back() {
+        use crate::rad_types::TagRole;
+        use crate::record::{AlevinFryRecordContext, MultiBarcodeRecordContext, RecordContext};
+
+        let tag = |name: &str, role: TagRole, int: RadIntId| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(int),
+        };
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        // Single-barcode: non-conventional names, but roles present -> read via roles.
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(tag("cb", TagRole::Barcode { level: 0 }, RadIntId::U32));
+        rt.add_tag_desc(tag("umi", TagRole::Umi, RadIntId::U64));
+        let ctx = AlevinFryRecordContext::get_context_prefer_roles(&ft, &rt, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U32);
+        assert_eq!(ctx.umit, RadIntId::U64);
+
+        // Legacy single-barcode: b/u names, no roles -> falls back to the bridge.
+        let mut legacy = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        legacy.add_tag_desc(tag("b", TagRole::None, RadIntId::U32));
+        legacy.add_tag_desc(tag("u", TagRole::None, RadIntId::U32));
+        let ctx = AlevinFryRecordContext::get_context_prefer_roles(&ft, &legacy, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U32);
+        assert_eq!(ctx.umit, RadIntId::U32);
+
+        // Multi-barcode: renamed sample/cell/umi with roles -> read via roles.
+        let mut mrt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        mrt.add_tag_desc(tag("sample_bc", TagRole::Barcode { level: 0 }, RadIntId::U32));
+        mrt.add_tag_desc(tag("cell_bc", TagRole::Barcode { level: 1 }, RadIntId::U32));
+        mrt.add_tag_desc(tag("umi", TagRole::Umi, RadIntId::U32));
+        let mctx = MultiBarcodeRecordContext::get_context_prefer_roles(&ft, &mrt, &at).unwrap();
+        assert_eq!(mctx.bc_types.as_slice(), [RadIntId::U32, RadIntId::U32]);
+        assert_eq!(mctx.umit, RadIntId::U32);
+
+        // A declared barcode role without a Umi role is an error (not a silent fallback).
+        let mut no_umi = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        no_umi.add_tag_desc(tag("cb", TagRole::Barcode { level: 0 }, RadIntId::U32));
+        assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &no_umi, &at).is_err());
     }
 
     #[test]
