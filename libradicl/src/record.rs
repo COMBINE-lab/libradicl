@@ -764,7 +764,10 @@ fn bct_umit_from_roles(rt: &TagSection) -> anyhow::Result<Option<(RadIntId, RadI
     }
     let (bc_idx, bc_tag) = bcs[0];
     let RadType::Int(bct) = bc_tag.typeid else {
-        bail!("barcode-role tag `{}` is not a fixed-width integer", bc_tag.name);
+        bail!(
+            "barcode-role tag `{}` is not a fixed-width integer",
+            bc_tag.name
+        );
     };
     let umis: Vec<_> = rt
         .tags
@@ -2869,7 +2872,10 @@ impl MultiBarcodeRecordContext {
                         bail!("multiple read tags declare the Umi role");
                     }
                     let RadType::Int(int) = td.typeid else {
-                        bail!("umi-role read tag `{}` is not a fixed-width integer", td.name);
+                        bail!(
+                            "umi-role read tag `{}` is not a fixed-width integer",
+                            td.name
+                        );
                     };
                     umi = Some((idx, int));
                 }
@@ -3756,7 +3762,11 @@ mod tests {
 
         // Single-barcode: non-conventional names, but roles present -> read via roles.
         let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        rt.add_tag_desc(tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32));
+        rt.add_tag_desc(tag(
+            "cb",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
         rt.add_tag_desc(tag("umi", TagRole::Umi { len: 12 }, RadIntId::U64));
         let ctx = AlevinFryRecordContext::get_context_prefer_roles(&ft, &rt, &at).unwrap();
         assert_eq!(ctx.bct, RadIntId::U32);
@@ -3772,8 +3782,16 @@ mod tests {
 
         // Multi-barcode: renamed sample/cell/umi with roles -> read via roles.
         let mut mrt = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        mrt.add_tag_desc(tag("sample_bc", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32));
-        mrt.add_tag_desc(tag("cell_bc", TagRole::Barcode { level: 1, len: 16 }, RadIntId::U32));
+        mrt.add_tag_desc(tag(
+            "sample_bc",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
+        mrt.add_tag_desc(tag(
+            "cell_bc",
+            TagRole::Barcode { level: 1, len: 16 },
+            RadIntId::U32,
+        ));
         mrt.add_tag_desc(tag("umi", TagRole::Umi { len: 12 }, RadIntId::U32));
         let mctx = MultiBarcodeRecordContext::get_context_prefer_roles(&ft, &mrt, &at).unwrap();
         assert_eq!(mctx.bc_types.as_slice(), [RadIntId::U32, RadIntId::U32]);
@@ -3781,7 +3799,11 @@ mod tests {
 
         // A declared barcode role without a Umi role is an error (not a silent fallback).
         let mut no_umi = TagSection::new_with_label(TagSectionLabel::ReadTags);
-        no_umi.add_tag_desc(tag("cb", TagRole::Barcode { level: 0, len: 16 }, RadIntId::U32));
+        no_umi.add_tag_desc(tag(
+            "cb",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
         assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &no_umi, &at).is_err());
     }
 
@@ -3816,14 +3838,22 @@ mod tests {
         let mut single = TagSection::new_with_label(TagSectionLabel::ReadTags);
         single.add_tag_desc(bc("b", TagRole::Barcode { level: 0, len: 16 }));
         single.add_tag_desc(bc("u", TagRole::Umi { len: 12 }));
-        assert!(MultiBarcodeRecordContext::from_roles(&single).unwrap().is_none());
+        assert!(
+            MultiBarcodeRecordContext::from_roles(&single)
+                .unwrap()
+                .is_none()
+        );
 
         // No declared roles at all -> None.
         let mut plain = TagSection::new_with_label(TagSectionLabel::ReadTags);
         plain.add_tag_desc(bc("b0", TagRole::None));
         plain.add_tag_desc(bc("b1", TagRole::None));
         plain.add_tag_desc(bc("u", TagRole::None));
-        assert!(MultiBarcodeRecordContext::from_roles(&plain).unwrap().is_none());
+        assert!(
+            MultiBarcodeRecordContext::from_roles(&plain)
+                .unwrap()
+                .is_none()
+        );
 
         // Barcode physical order not matching level order -> error (the reader is
         // sequential and cannot honor an interleaved/out-of-order layout).

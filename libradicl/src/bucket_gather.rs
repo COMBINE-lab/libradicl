@@ -335,7 +335,11 @@ fn le_u64(b: &[u8]) -> u64 {
     // be silently truncated here. u128 barcode keys are rejected upstream
     // (`reject_u128_key`, and the multi from_roles guard), so this only fires if a
     // new caller forgets that.
-    debug_assert!(b.len() <= 8, "le_u64 given a {}-byte field (u128?)", b.len());
+    debug_assert!(
+        b.len() <= 8,
+        "le_u64 given a {}-byte field (u128?)",
+        b.len()
+    );
     let mut v = 0u64;
     for (i, &x) in b.iter().enumerate().take(8) {
         v |= (x as u64) << (8 * i);
@@ -617,7 +621,9 @@ where
     // otherwise stage in `tmp` and compress chunk-by-chunk into `out`. Either way
     // peak memory is ~one bucket.
     // Pass 2 only needs the (header, stride) arithmetic, not the key extractor.
-    let fixed_stride = fixed.as_ref().map(|fx| (fx.read_header_bytes, fx.aln_stride));
+    let fixed_stride = fixed
+        .as_ref()
+        .map(|fx| (fx.read_header_bytes, fx.aln_stride));
     if codec == ChunkCodec::None {
         let out_start = out.len();
         out.resize(out_start + total, 0);
@@ -1023,7 +1029,8 @@ mod tests {
             let mut out = Vec::new();
             let mut cur = Cursor::new(input.as_slice());
             let nchunks =
-                collate_bucket::<TagDrivenReadRecord, _>(&mut cur, n, &ctx, codec, &mut out).unwrap();
+                collate_bucket::<TagDrivenReadRecord, _>(&mut cur, n, &ctx, codec, &mut out)
+                    .unwrap();
             let (chunks, total) = read_back::<TagDrivenReadRecord>(&out, codec, &ctx);
             assert_eq!(total, n);
             assert_eq!(nchunks, 3, "three distinct (sample,cell) groups");

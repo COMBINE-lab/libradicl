@@ -98,8 +98,7 @@ impl<W: Write + Seek> RadFileWriter<W> {
         // extension block ahead of the header, so the num_chunks field sits that
         // many bytes further in. Missing this backpatches num_chunks into the
         // ref-name region (see #64). Keep in sync with `RadHeader::write`.
-        let version_prefix: u64 = if prelude.hdr.version.is_versioned()
-        {
+        let version_prefix: u64 = if prelude.hdr.version.is_versioned() {
             constants::RAD_MAGIC.len() as u64 + 2 + std::mem::size_of::<u32>() as u64
         } else {
             0
@@ -442,7 +441,10 @@ mod tests {
             &crate::constants::RAD_MAGIC
         );
         let read_prelude = RadPrelude::from_bytes(&mut cursor).expect("read v2 prelude");
-        assert_eq!(read_prelude.hdr.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(
+            read_prelude.hdr.version.major(),
+            crate::constants::RAD_SPEC_MAJOR
+        );
         // ref names must be uncorrupted (the bug wrote num_chunks into them).
         assert_eq!(read_prelude.hdr.ref_names, prelude.hdr.ref_names);
         // num_chunks backpatched to the correct location.

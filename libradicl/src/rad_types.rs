@@ -2544,7 +2544,10 @@ mod tests {
             let mut buf = Vec::new();
             role.write(&mut buf).unwrap();
             assert_eq!(buf, bytes, "wire drift for {role:?}");
-            assert_eq!(TagRole::read(&mut std::io::Cursor::new(&buf)).unwrap(), role);
+            assert_eq!(
+                TagRole::read(&mut std::io::Cursor::new(&buf)).unwrap(),
+                role
+            );
         }
     }
 

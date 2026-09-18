@@ -85,7 +85,9 @@ impl SpecVersion {
         if major == 0 {
             Ok(SpecVersion::Legacy)
         } else if major < constants::RAD_FIRST_VERSIONED_MAJOR {
-            anyhow::bail!("RAD prelude has a reserved/legacy major version {major}; file is malformed")
+            anyhow::bail!(
+                "RAD prelude has a reserved/legacy major version {major}; file is malformed"
+            )
         } else {
             Ok(SpecVersion::Versioned { major, minor })
         }
@@ -598,7 +600,10 @@ mod tests {
         assert_eq!(rp.hdr.version.major(), crate::constants::RAD_SPEC_MAJOR);
         assert_eq!(rp.hdr.version.minor(), crate::constants::RAD_SPEC_MINOR);
         assert_eq!(rp.hdr.ref_names, vec!["r0".to_string()]);
-        assert_eq!(rp.read_tags.tags[0].role, TagRole::Barcode { level: 0, len: 16 });
+        assert_eq!(
+            rp.read_tags.tags[0].role,
+            TagRole::Barcode { level: 0, len: 16 }
+        );
         assert_eq!(rp.read_tags.tags[1].role, TagRole::Umi { len: 12 });
         assert_eq!(rp.aln_tags.tags[0].role, TagRole::Orientation);
         assert_eq!(rp.file_tags.tags[0].role, TagRole::None);

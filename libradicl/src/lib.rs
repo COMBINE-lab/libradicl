@@ -53,9 +53,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
+pub mod bucket_gather;
 pub mod chunk;
 pub mod codec;
-pub mod bucket_gather;
 pub mod collation;
 pub(crate) mod collation_spool;
 pub mod constants;
