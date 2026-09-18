@@ -64,8 +64,10 @@ pub enum TagRole {
     /// self-describing — column and int type from the [`TagDesc`], plus order and
     /// length from the role — with no reliance on `bNlen`/`cblen` file tags.
     Barcode { level: u8, len: u8 },
-    /// The UMI.
-    Umi,
+    /// The UMI. `len` is its nucleotide length (e.g. to render the UMI as
+    /// nucleotides, as `convert` does); `0` means unspecified. As with `Barcode`,
+    /// this makes the UMI self-describing with no reliance on a `ulen` file tag.
+    Umi { len: u8 },
     /// An alignment's target reference id.
     Reference,
     /// Orientation (or the field packing it, e.g. an ori+ref_id word).
@@ -78,27 +80,32 @@ impl TagRole {
         match self {
             TagRole::None => 0,
             TagRole::Barcode { .. } => 1,
-            TagRole::Umi => 2,
+            TagRole::Umi { .. } => 2,
             TagRole::Reference => 3,
             TagRole::Orientation => 4,
         }
     }
 
-    /// Serialize the role: one code byte, plus a `[level][len]` pair for `Barcode`.
+    /// Serialize the role: one code byte, plus `[level][len]` for `Barcode` and
+    /// `[len]` for `Umi`.
     fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
         writer
             .write_all(&[self.code()])
             .context("could not write tag role")?;
-        if let TagRole::Barcode { level, len } = self {
-            writer
+        match self {
+            TagRole::Barcode { level, len } => writer
                 .write_all(&[*level, *len])
-                .context("could not write barcode role level/len")?;
+                .context("could not write barcode role level/len")?,
+            TagRole::Umi { len } => writer
+                .write_all(&[*len])
+                .context("could not write umi role len")?,
+            _ => {}
         }
         Ok(())
     }
 
     /// Read a role. An unknown code (e.g. from a newer *minor* version) decodes to
-    /// [`TagRole::None`]; only `Barcode` carries parameters, and any future
+    /// [`TagRole::None`]; only `Barcode`/`Umi` carry parameters, and any future
     /// parameter-bearing role must be a *major* bump (rejected by the too-new
     /// guard), so a param-less unknown code never desyncs the stream.
     fn read<R: Read>(reader: &mut R) -> anyhow::Result<Self> {
@@ -117,7 +124,13 @@ impl TagRole {
                     len: ll[1],
                 }
             }
-            2 => TagRole::Umi,
+            2 => {
+                let mut l = [0u8; 1];
+                reader
+                    .read_exact(&mut l)
+                    .context("could not read umi role len")?;
+                TagRole::Umi { len: l[0] }
+            }
             3 => TagRole::Reference,
             4 => TagRole::Orientation,
             _ => TagRole::None,
@@ -2449,7 +2462,7 @@ mod tests {
     fn tag_role_roundtrips_only_when_versioned() {
         for role in [
             TagRole::Barcode { level: 3, len: 16 },
-            TagRole::Umi,
+            TagRole::Umi { len: 12 },
             TagRole::Reference,
             TagRole::Orientation,
         ] {
@@ -2490,7 +2503,7 @@ mod tests {
                 TagDesc {
                     name: "u".to_string(),
                     typeid: RadType::Int(RadIntId::U32),
-                    role: TagRole::Umi,
+                    role: TagRole::Umi { len: 12 },
                 },
             ],
         };
@@ -2508,7 +2521,7 @@ mod tests {
             vec![
                 TagRole::Barcode { level: 0, len: 16 },
                 TagRole::Barcode { level: 1, len: 16 },
-                TagRole::Umi,
+                TagRole::Umi { len: 12 },
             ]
         );
     }

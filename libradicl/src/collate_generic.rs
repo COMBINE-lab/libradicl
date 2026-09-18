@@ -1016,7 +1016,7 @@ mod tests {
                 TagDesc {
                     name: "u".to_string(),
                     typeid: RadType::Int(RadIntId::U32),
-                    role: crate::rad_types::TagRole::Umi,
+                    role: crate::rad_types::TagRole::Umi { len: 12 },
                 },
             ],
         };
