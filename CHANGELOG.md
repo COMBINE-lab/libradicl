@@ -4,6 +4,74 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.20.0](https://github.com/COMBINE-lab/libradicl/compare/v0.19.1...v0.20.0) (2026-09-18)
+
+
+### Bug Fixes
+
+* Include magic+version prefix in RadHeader::get_size for versioned headers ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([b4eb70a](https://github.com/COMBINE-lab/libradicl/commit/b4eb70a06a8ac67d8e5bc219d56ba4a99481f3a8))
+* P0 correctness/robustness for the role-driven collation paths (#64/#66) ([36414fb](https://github.com/COMBINE-lab/libradicl/commit/36414fb49c9307f40b21689f7892b7da70a353f3))
+
+### Documentation
+
+* Make the cell-index u32 invariant explicit + note the opt-in axis ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([290d0d3](https://github.com/COMBINE-lab/libradicl/commit/290d0d324e94808b71296f9a0eee1cd432d58900))
+* V2 hardening plan (review dispositions + P0/P1/P2) ([6940ee8](https://github.com/COMBINE-lab/libradicl/commit/6940ee8ffa1358f99b0ebf90c2c763fa3253bb0d))
+* Mark P1 done in the v2 hardening plan (SpecVersion/non_exhaustive -> P2) ([cfc22fe](https://github.com/COMBINE-lab/libradicl/commit/cfc22fe8bf2e527eabf98f86757f87f90a210bc2))
+* Make rad-prelude-versioning normative for roles + extension block (P2/P2-7) ([e6eebe6](https://github.com/COMBINE-lab/libradicl/commit/e6eebe6db7347e7db1b354406c9ecaefacd8d7a8))
+* Mark P2 Phase A+B done in the hardening plan (Phase C = publish, remains) ([2c41b2a](https://github.com/COMBINE-lab/libradicl/commit/2c41b2a0de966bf802fad7f79b277bb90a790301))
+* Add Astro/Starlight RAD format specification site ([b0c4013](https://github.com/COMBINE-lab/libradicl/commit/b0c40135d5adeb874bd4eb0a6638e2bb046e37e5))
+* Fix broken/private intra-doc links (rustdoc -D warnings) ([dee7a0c](https://github.com/COMBINE-lab/libradicl/commit/dee7a0c6eba109c572f65b2c6db9018c40a0592e))
+
+### Features
+
+* Parse-based generic collation core + ScatterProbe (step 1 of #62) ([68b8e6f](https://github.com/COMBINE-lab/libradicl/commit/68b8e6f9bcbb0355e91ff5bb743a2de7754f52dd))
+* Wire built-in records into the generic core via ScatterProbe ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([427dc7f](https://github.com/COMBINE-lab/libradicl/commit/427dc7fb8eb2b202179098d7154feb2d7f39379e))
+* Record chunk offsets in the streaming generic two-pass ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([cfd171b](https://github.com/COMBINE-lab/libradicl/commit/cfd171bb6991855f143ec914f682d74aa4e24542))
+* Wire single-barcode gather onto the unified collate_bucket ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([b80d2ae](https://github.com/COMBINE-lab/libradicl/commit/b80d2ae8f1f05dd94a280b46f21dfe04956402e8))
+* Wire multi-barcode (Flex) gather onto the unified collate_bucket; re-scan pass 2 ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([5465d15](https://github.com/COMBINE-lab/libradicl/commit/5465d156c3cc6203dda51c82c21f52bd9b9517ed))
+* CollationKeySpec + tag-driven generic-record gather ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([dc65715](https://github.com/COMBINE-lab/libradicl/commit/dc6571502d8d0cee061ee4117a02ebf2a519d06e))
+* Make GenericReadRecord collatable (scatter/gather) for single-barcode ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([3ab3b46](https://github.com/COMBINE-lab/libradicl/commit/3ab3b4679ebc4d7bf7a94a61e232174f74db733c))
+* RAD magic + spec-version prefix with legacy back-compat ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([e02cf1b](https://github.com/COMBINE-lab/libradicl/commit/e02cf1b86cd3767e5c1f482f1bed8bbebf92190d))
+* RAD spec version as major.minor + too-new guard + versioning spec ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([944e977](https://github.com/COMBINE-lab/libradicl/commit/944e977c4d404af69ab9d496b13e4582bfb1daa2))
+* Per-TagDesc semantic roles, gated on spec version ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([fe4051f](https://github.com/COMBINE-lab/libradicl/commit/fe4051fef0d4721e6b410b8a20f0dbfbb502ac3c))
+* Derive the collation key from declared roles; dispatch prefers roles ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([fb988d3](https://github.com/COMBINE-lab/libradicl/commit/fb988d3f713bb5ae2e0d44446d3f77d247b0ad94))
+* Consume Umi/Orientation roles — generic path filters by strand ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([80c0a8a](https://github.com/COMBINE-lab/libradicl/commit/80c0a8a6edd6aeba0d2d415477ee51a293008601))
+* Add first-chunk field-completeness self-check ([14e3ee5](https://github.com/COMBINE-lab/libradicl/commit/14e3ee534cb1deaf4b9d133afd7f172d96a24042))
+* Role-driven MultiBarcodeRecordContext for composite collation ([#66](https://github.com/COMBINE-lab/libradicl/issues/66)) ([aaaa0e9](https://github.com/COMBINE-lab/libradicl/commit/aaaa0e9d7751a52fed913f805057e7e3e59f1112))
+* Unify scATAC collation onto collate_bucket; retire twopass_atac ([2a03e14](https://github.com/COMBINE-lab/libradicl/commit/2a03e144296eec224347f7ce3bb246ccc2a0bdd7))
+* Role-aware record contexts for the read path ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([ac4371a](https://github.com/COMBINE-lab/libradicl/commit/ac4371a458867fc7a48e550b19b8f43f1e023b2d))
+* Barcode role carries nucleotide length; fix v2 writer num_chunks (#64/#66) ([e801b53](https://github.com/COMBINE-lab/libradicl/commit/e801b53c1766da813ad5a83e4a6e82b6baaaf677))
+* UMI role carries nucleotide length (Umi{len}), matching Barcode ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([b65c0c7](https://github.com/COMBINE-lab/libradicl/commit/b65c0c7e5298434719dee09a4d4eb71508df0c21))
+* Forward-compatible v2 role encoding + prelude extension block (P0, #64) ([8076188](https://github.com/COMBINE-lab/libradicl/commit/8076188930e84793ff5744d6828982fecc1b0d6e))
+* TagDesc::new / with_role constructors (P1 partial, C6) ([491c25d](https://github.com/COMBINE-lab/libradicl/commit/491c25d619d743e57ea062f70691a1a5a1c2c360))
+* Reserve MappingPosition/FragmentLength/MappingType roles (5,6,7) ([e1c9b86](https://github.com/COMBINE-lab/libradicl/commit/e1c9b86f0c34d72273191e1b2b0b5c413586b680))
+
+### Performance
+
+* Bounded-memory collate_bucket (build-in-out, len-only pass-1) ([86ea742](https://github.com/COMBINE-lab/libradicl/commit/86ea74297f489a2e2d06018501437ef73f5c1479))
+* Pass-2 reads each record straight into its slot (match two-pass) ([ae90c6d](https://github.com/COMBINE-lab/libradicl/commit/ae90c6de2230e3f05f454d42bb501e14532983b0))
+* Fixed-layout fast pass-2 for the gather (fix Flex wall regression) ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([e29caba](https://github.com/COMBINE-lab/libradicl/commit/e29caba34acc4358ef67b3b045e1c5f402d7e93a))
+
+### Refactor
+
+* Collate_bucket emits chunks only; caller records the index ([1c5b6a2](https://github.com/COMBINE-lab/libradicl/commit/1c5b6a267a7d1f48e2f6b9e604443dd24140421c))
+* Streaming bounded-memory generic gather + rename to CollationScan ([a4e58d1](https://github.com/COMBINE-lab/libradicl/commit/a4e58d12e671fc9dfa0cf70de82d6e09eea3f210))
+* Retire collate_temporary_bucket_twopass_generic ([#62](https://github.com/COMBINE-lab/libradicl/issues/62)) ([30f3522](https://github.com/COMBINE-lab/libradicl/commit/30f352264a4c41fdef99fa346224c3f33cf9d0e0))
+* P1 collation-engine robustness (#62/#64/#66) ([a447695](https://github.com/COMBINE-lab/libradicl/commit/a4476957fb9b74cb91d0bd3853c248e3c5387ea8))
+* SpecVersion enum + non_exhaustive TagDesc (P2/C4/C6) ([f29fa49](https://github.com/COMBINE-lab/libradicl/commit/f29fa494c10c4387fbf156a61e5f4ef84f997dd0))
+* Drop dead umi_tag_idx; fix copy-pasted prelude-write context (P2/D13) ([e84a546](https://github.com/COMBINE-lab/libradicl/commit/e84a5466deaef7bd7d460a83f11b50662d8a7bdc))
+* Rename module collate_generic -> bucket_gather (P2/C8) ([c0cb573](https://github.com/COMBINE-lab/libradicl/commit/c0cb57313595f576c08318d266bc6b535d5cb472))
+* Rename tag-driven Generic* -> TagDriven* (P2/C8) ([fc486f7](https://github.com/COMBINE-lab/libradicl/commit/fc486f7d6fbaef0623d89a707fc300936c0286db))
+* Finish Generic->TagDriven rename in read_chunk example ([a660da1](https://github.com/COMBINE-lab/libradicl/commit/a660da1d2643b695d68f0a05901132f6353fc66b))
+
+### Testing
+
+* From-scratch v2 prelude with roles round-trips (writer capability) ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([406613b](https://github.com/COMBINE-lab/libradicl/commit/406613baa1e74af27521c644f11f5dce2cf47c4c))
+
+### Style
+
+* Apply cargo fmt (rustfmt) across the crate ([457e507](https://github.com/COMBINE-lab/libradicl/commit/457e50737ba025c82210a6ad9c7fece4dd563672))
+
 ## [0.19.1](https://github.com/COMBINE-lab/libradicl/compare/v0.19.0...v0.19.1) (2026-09-13)
 
 
