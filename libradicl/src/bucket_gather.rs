@@ -25,7 +25,7 @@
 //! parse-based scan via [`scan_by_parse`], with no `KnownSize` bound on the
 //! engine.
 //!
-//! The caller records the emitted chunks' offsets in a [`ChunkIndexBuilder`]
+//! The caller records the emitted chunks' offsets in a [`ChunkIndexBuilder`](crate::codec::ChunkIndexBuilder)
 //! (under its output-write lock, so offsets stay in file order).
 
 use crate::codec::ChunkCodec;
@@ -264,7 +264,7 @@ impl CollationScan for crate::record::TagDrivenReadRecord {
 /// The length lets the gather relocate the record's raw bytes without
 /// re-serializing. Fixed-layout records should implement `scan` as a raw key-read
 /// plus an arithmetic `seek` over the alignment block (see [`scan_fixed_bc_umi`]);
-/// records that can't (variable-length, or any [`CollatableMappedRecord`] a
+/// records that can't (variable-length, or any [`CollatableMappedRecord`](crate::record::CollatableMappedRecord) a
 /// consumer would rather not hand-optimize) can defer to [`scan_by_parse`].
 pub trait CollationScan {
     /// Parsing context (RAD tags etc.); `()` when none is needed.
@@ -310,7 +310,7 @@ pub struct FixedLayout<C> {
     pub key_from_header: fn(&[u8], &C) -> u128,
 }
 
-/// Parse-based [`CollationScan::scan`] for any [`CollatableMappedRecord`]: parse
+/// Parse-based [`CollationScan::scan`] for any [`CollatableMappedRecord`](crate::record::CollatableMappedRecord): parse
 /// one record (advancing `r`) and measure its length from the stream position.
 /// Works for fixed- and variable-length records alike; needs no `KnownSize`.
 pub fn scan_by_parse<T, B, R>(r: &mut R, ctx: &T::ParsingContext) -> anyhow::Result<(u128, usize)>
@@ -501,7 +501,7 @@ where
 }
 
 /// `CollationScan` for the scATAC record. Layout is `[na][bc][aln × na]` with a
-/// fixed per-alignment stride (see [`AtacSeqReadRecord::nbytes_aln`]) and **no
+/// fixed per-alignment stride (see [`AtacSeqReadRecord`](crate::record::AtacSeqReadRecord)::nbytes_aln) and **no
 /// UMI**; the collation key is the barcode. Fully fixed, so pass 2 relocates
 /// records forward with no re-scan (`fixed_layout`).
 impl CollationScan for crate::record::AtacSeqReadRecord {

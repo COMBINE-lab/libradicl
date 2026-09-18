@@ -855,7 +855,7 @@ impl AlevinFryRecordContext {
     }
 
     /// Build the context from the read tags' declared roles (see
-    /// [`bct_umit_from_roles`]); `Ok(None)` when no barcode role is declared.
+    /// `bct_umit_from_roles`); `Ok(None)` when no barcode role is declared.
     pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
         Ok(bct_umit_from_roles(rt)?.map(|(bct, umit)| Self { bct, umit }))
     }
@@ -2350,7 +2350,7 @@ impl ScLongReadRecordContext {
     }
 
     /// Build the context from the read tags' declared roles (see
-    /// [`bct_umit_from_roles`]); `Ok(None)` when no barcode role is declared.
+    /// `bct_umit_from_roles`); `Ok(None)` when no barcode role is declared.
     pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
         Ok(bct_umit_from_roles(rt)?.map(|(bct, umit)| Self { bct, umit }))
     }
@@ -2839,8 +2839,8 @@ impl MultiBarcodeRecordContext {
 
     /// Build a multi-barcode context from the read tags' declared roles, mirroring
     /// [`crate::bucket_gather::CollationKeySpec::from_roles`]: the barcode levels
-    /// come from [`TagRole::Barcode`] (ordered outer→inner by `level`) and the UMI
-    /// from [`TagRole::Umi`], with no reliance on the `b0`/`b1`/`u` name bridge.
+    /// come from [`TagRole::Barcode`](crate::rad_types::TagRole::Barcode) (ordered outer→inner by `level`) and the UMI
+    /// from [`TagRole::Umi`](crate::rad_types::TagRole::Umi), with no reliance on the `b0`/`b1`/`u` name bridge.
     ///
     /// Returns `Ok(None)` when fewer than two barcode roles are declared (not a
     /// composite layout — the caller can fall back to the single-barcode path or
@@ -2850,7 +2850,7 @@ impl MultiBarcodeRecordContext {
     /// must be the first read tags in level order and the UMI must immediately
     /// follow them, with no other read tags. The outermost level maps to
     /// [`BarcodeRole::Sample`], the rest to [`BarcodeRole::Cell`], matching
-    /// [`Self::parse_roles_or_default`].
+    /// `parse_roles_or_default`.
     pub fn from_roles(read_tags: &TagSection) -> anyhow::Result<Option<Self>> {
         use crate::rad_types::TagRole;
         // (physical index, level, int type) for each barcode-role read tag.
