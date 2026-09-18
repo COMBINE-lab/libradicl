@@ -284,12 +284,12 @@ impl RecordHeader for PiscemBulkReadRecordHeader {
 /// Header for a generic record type, the only guaranteed field is
 /// the number of alignments
 #[allow(unused)]
-struct GenericReadRecordHeader {
+struct TagDrivenReadRecordHeader {
     pub na: u32,
 }
 
-impl RecordHeader for GenericReadRecordHeader {
-    type RecordType = GenericReadRecord;
+impl RecordHeader for TagDrivenReadRecordHeader {
+    type RecordType = TagDrivenReadRecord;
     fn naln(&self) -> u32 {
         self.na
     }
@@ -303,7 +303,7 @@ impl RecordHeader for GenericReadRecordHeader {
 /// but should allow us to easily test out RAD files containing
 /// different information
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GenericReadRecord {
+pub struct TagDrivenReadRecord {
     pub naln: u32,
     pub naln_tags: u32,
     pub rtags: Vec<TagValue>,
@@ -314,15 +314,15 @@ pub struct GenericReadRecord {
     pub key_tag_idx: usize,
 }
 
-impl GenericReadRecord {
+impl TagDrivenReadRecord {
     pub fn fmt_with_context(
         &self,
-        ctx: &GenericReadRecordContext,
+        ctx: &TagDrivenReadRecordContext,
         f: &mut impl Write,
     ) -> std::io::Result<()> {
         f.write_all(
             format!(
-                "GenericReadRecord{{ naln: {}, naln_tags: {},\nrtags: {},\natags:  {} }}\n",
+                "TagDrivenReadRecord{{ naln: {}, naln_tags: {},\nrtags: {},\natags:  {} }}\n",
                 self.naln,
                 self.naln_tags,
                 ctx.read_tags
@@ -351,7 +351,7 @@ impl GenericReadRecord {
 
 /// context needed to read a generic record
 #[derive(Debug, Clone)]
-pub struct GenericReadRecordContext {
+pub struct TagDrivenReadRecordContext {
     pub read_tags: TagSection,
     pub aln_tags: TagSection,
     /// Index (into `read_tags`) of the read-level tag that is the collation
@@ -367,7 +367,7 @@ pub struct GenericReadRecordContext {
 
 /// Fixed on-disk byte width of an integer tag type. Panics on a non-integer
 /// (variable-width) tag — the generic collation path validates all tags are
-/// fixed-width integers before building a record (see `GenericCollateCtx::new`).
+/// fixed-width integers before building a record (see `TagDrivenCollateCtx::new`).
 fn int_tag_bytes(t: &RadType) -> usize {
     match t {
         RadType::Int(i) => i.bytes_for_type(),
@@ -707,7 +707,7 @@ pub trait RecordContext {
     }
 }
 
-impl RecordContext for GenericReadRecordContext {
+impl RecordContext for TagDrivenReadRecordContext {
     /// Currently, the [AlevinFryRecordContext] only cares about and provides the read tags that
     /// correspond to the types used to encode the barcode and the UMI. Here, these are parsed from the
     /// corresponding [TagSection].
@@ -1359,8 +1359,8 @@ impl<B: ConvertiblePrimitiveInteger> MappedRecord for AlevinFryReadRecordWithPos
     }
 }
 
-impl MappedRecord for GenericReadRecord {
-    type ParsingContext = GenericReadRecordContext;
+impl MappedRecord for TagDrivenReadRecord {
+    type ParsingContext = TagDrivenReadRecordContext;
     type PeekResult = Option<u64>;
 
     fn is_empty(&self) -> bool {
@@ -1372,11 +1372,11 @@ impl MappedRecord for GenericReadRecord {
     }
 
     fn has_alignment_on_strand(&self, _s: Strand) -> bool {
-        unimplemented!("no implementation of has_alignment_on_strand for GenericReadRecord")
+        unimplemented!("no implementation of has_alignment_on_strand for TagDrivenReadRecord")
     }
 
     fn refs(&self) -> &[u32] {
-        unimplemented!("no implementation of refs() for GenericReadRecord yet")
+        unimplemented!("no implementation of refs() for TagDrivenReadRecord yet")
     }
 
     #[inline]
@@ -1483,28 +1483,28 @@ impl MappedRecord for GenericReadRecord {
 /// Collatable header for the generic record: the alignment count, the barcode
 /// collation key, and the (raw) read-level tag values so the full record can be
 /// reconstructed after the header is peeked during scatter.
-pub struct GenericCollatableHeader {
+pub struct TagDrivenCollatableHeader {
     pub naln: u32,
     pub key: u64,
     pub rtags: Vec<TagValue>,
     pub key_tag_idx: usize,
 }
 
-impl RecordHeader for GenericCollatableHeader {
-    type RecordType = GenericReadRecord;
+impl RecordHeader for TagDrivenCollatableHeader {
+    type RecordType = TagDrivenReadRecord;
     fn naln(&self) -> u32 {
         self.naln
     }
 }
 
-impl CollatableRecordHeader<u64> for GenericCollatableHeader {
+impl CollatableRecordHeader<u64> for TagDrivenCollatableHeader {
     fn collate_key(&self) -> u64 {
         self.key
     }
     fn write_fields<W: Write>(
         &self,
         writer: &mut W,
-        ctx: &GenericReadRecordContext,
+        ctx: &TagDrivenReadRecordContext,
     ) -> anyhow::Result<()> {
         RadIntId::U32
             .write_to(self.naln, writer)
@@ -1517,7 +1517,7 @@ impl CollatableRecordHeader<u64> for GenericCollatableHeader {
     }
 }
 
-impl KnownSize for GenericReadRecord {
+impl KnownSize for TagDrivenReadRecord {
     fn nbytes(na: u32, ctx: &<Self as MappedRecord>::ParsingContext) -> usize {
         let read_bytes: usize = ctx
             .read_tags
@@ -1534,8 +1534,8 @@ impl KnownSize for GenericReadRecord {
     }
 }
 
-impl CollatableMappedRecord<u64> for GenericReadRecord {
-    type CollatableRecordHeader = GenericCollatableHeader;
+impl CollatableMappedRecord<u64> for TagDrivenReadRecord {
+    type CollatableRecordHeader = TagDrivenCollatableHeader;
 
     fn from_bytes_collatable_header<T: Read>(
         reader: &mut T,
@@ -1553,7 +1553,7 @@ impl CollatableMappedRecord<u64> for GenericReadRecord {
             .map(|td| td.value_from_bytes(reader))
             .collect();
         let key = tag_value_as_u64(&rtags[key_tag_idx]);
-        Ok(GenericCollatableHeader {
+        Ok(TagDrivenCollatableHeader {
             naln,
             key,
             rtags,

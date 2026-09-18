@@ -52,7 +52,7 @@ struct KeyPart {
 /// from a read-level [`TagSection`] **fails** when no key field is identified, so
 /// a non-collatable RAD is rejected at the collate entry point rather than deep in
 /// the gather. Because [`CollationScan::scan`] for the generic record requires a
-/// [`GenericCollateCtx`] (which embeds a spec), and the only way to obtain one is
+/// [`TagDrivenCollateCtx`] (which embeds a spec), and the only way to obtain one is
 /// this fallible constructor, the type system + the constructor together enforce
 /// "you cannot gather a layout you have not proven collatable."
 #[derive(Clone, Debug)]
@@ -165,12 +165,12 @@ impl CollationKeySpec {
 /// the fixed per-alignment stride. Obtainable only via [`Self::new`], which is
 /// where a layout's collatability is decided.
 #[derive(Clone, Debug)]
-pub struct GenericCollateCtx {
+pub struct TagDrivenCollateCtx {
     key: CollationKeySpec,
     aln_stride: usize,
 }
 
-impl GenericCollateCtx {
+impl TagDrivenCollateCtx {
     /// Build the collation context from the read/alignment tag sections and the
     /// barcode-level key tag names. Fails if the key spec can't be built (see
     /// [`CollationKeySpec::from_read_tags`]) or if any alignment tag is
@@ -189,7 +189,7 @@ impl GenericCollateCtx {
         })
     }
 
-    /// The tag-driven [`crate::record::GenericReadRecord`] scatter is `u64`-keyed
+    /// The tag-driven [`crate::record::TagDrivenReadRecord`] scatter is `u64`-keyed
     /// (`CollatableMappedRecord<u64>`), so it cannot rewrite a `u128` barcode. The
     /// `collate_bucket` gather itself is `u128`-capable, but until the scatter is
     /// too (COMBINE-lab/libradicl, deferred), reject a `U128` key part here with a
@@ -241,9 +241,9 @@ impl GenericCollateCtx {
     }
 }
 
-impl CollationScan for crate::record::GenericReadRecord {
-    type Ctx = GenericCollateCtx;
-    fn scan<R: Read + Seek>(r: &mut R, ctx: &GenericCollateCtx) -> anyhow::Result<(u128, usize)> {
+impl CollationScan for crate::record::TagDrivenReadRecord {
+    type Ctx = TagDrivenCollateCtx;
+    fn scan<R: Read + Seek>(r: &mut R, ctx: &TagDrivenCollateCtx) -> anyhow::Result<(u128, usize)> {
         // Read the fixed read-level header (na + read tags), extract the key, then
         // skip the fixed-stride alignment block.
         let hb = ctx.key.read_header_bytes;
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn generic_record_composite_key_collates() {
-        use crate::record::GenericReadRecord;
+        use crate::record::TagDrivenReadRecord;
         let read_tags = tag_section(
             TagSectionLabel::ReadTags,
             &[
@@ -1007,7 +1007,7 @@ mod tests {
             &[("refid", RadIntId::U32), ("as", RadIntId::U32)],
         );
         // key = composite (sample=b0, cell=b1): (b0 << 32) | b1
-        let ctx = GenericCollateCtx::new(&read_tags, &aln_tags, &["b0", "b1"]).unwrap();
+        let ctx = TagDrivenCollateCtx::new(&read_tags, &aln_tags, &["b0", "b1"]).unwrap();
         assert_eq!(ctx.aln_stride, 8);
         assert_eq!(ctx.key.read_header_bytes, 16);
 
@@ -1023,8 +1023,8 @@ mod tests {
             let mut out = Vec::new();
             let mut cur = Cursor::new(input.as_slice());
             let nchunks =
-                collate_bucket::<GenericReadRecord, _>(&mut cur, n, &ctx, codec, &mut out).unwrap();
-            let (chunks, total) = read_back::<GenericReadRecord>(&out, codec, &ctx);
+                collate_bucket::<TagDrivenReadRecord, _>(&mut cur, n, &ctx, codec, &mut out).unwrap();
+            let (chunks, total) = read_back::<TagDrivenReadRecord>(&out, codec, &ctx);
             assert_eq!(total, n);
             assert_eq!(nchunks, 3, "three distinct (sample,cell) groups");
             let m: std::collections::HashMap<u128, u32> = chunks.into_iter().collect();
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn generic_ctx_from_roles_matches_names_and_none_without_roles() {
-        use crate::record::GenericReadRecord;
+        use crate::record::TagDrivenReadRecord;
         // read tags b0,b1 (composite key via roles), u; aln refid,as
         let read_tags = TagSection {
             label: TagSectionLabel::ReadTags,
@@ -1062,7 +1062,7 @@ mod tests {
             TagSectionLabel::AlignmentTags,
             &[("refid", RadIntId::U32), ("as", RadIntId::U32)],
         );
-        let ctx = GenericCollateCtx::from_roles(&read_tags, &aln_tags)
+        let ctx = TagDrivenCollateCtx::from_roles(&read_tags, &aln_tags)
             .unwrap()
             .expect("barcode roles present");
 
@@ -1076,10 +1076,10 @@ mod tests {
         let mut out = Vec::new();
         let mut cur = Cursor::new(recs.concat());
         let nchunks =
-            collate_bucket::<GenericReadRecord, _>(&mut cur, n, &ctx, ChunkCodec::None, &mut out)
+            collate_bucket::<TagDrivenReadRecord, _>(&mut cur, n, &ctx, ChunkCodec::None, &mut out)
                 .unwrap();
         assert_eq!(nchunks, 2, "(1,7) grouped, (2,7) distinct");
-        let (chunks, _) = read_back::<GenericReadRecord>(&out, ChunkCodec::None, &ctx);
+        let (chunks, _) = read_back::<TagDrivenReadRecord>(&out, ChunkCodec::None, &ctx);
         let m: std::collections::HashMap<u128, u32> = chunks.into_iter().collect();
         assert_eq!(m[&((1u128 << 32) | 7)], 2);
         assert_eq!(m[&((2u128 << 32) | 7)], 1);
@@ -1090,7 +1090,7 @@ mod tests {
             &[("b", RadIntId::U32), ("u", RadIntId::U32)],
         );
         assert!(
-            GenericCollateCtx::from_roles(&plain, &aln_tags)
+            TagDrivenCollateCtx::from_roles(&plain, &aln_tags)
                 .unwrap()
                 .is_none()
         );
@@ -1120,7 +1120,7 @@ mod tests {
             name: "cigar".to_string(),
             typeid: RadType::String,
         });
-        assert!(GenericCollateCtx::new(&read_ok, &var_aln, &["b"]).is_err());
+        assert!(TagDrivenCollateCtx::new(&read_ok, &var_aln, &["b"]).is_err());
         // single-barcode key works
         assert!(CollationKeySpec::from_read_tags(&read_ok, &["b"]).is_ok());
     }
@@ -1146,13 +1146,13 @@ mod tests {
             TagSectionLabel::ReadTags,
             &[("b", RadIntId::U128), ("u", RadIntId::U32)],
         );
-        assert!(GenericCollateCtx::new(&rt, &at, &["b"]).is_err());
+        assert!(TagDrivenCollateCtx::new(&rt, &at, &["b"]).is_err());
         // u64 barcode is fine
         let rt_ok = tag_section(
             TagSectionLabel::ReadTags,
             &[("b", RadIntId::U64), ("u", RadIntId::U32)],
         );
-        assert!(GenericCollateCtx::new(&rt_ok, &at, &["b"]).is_ok());
+        assert!(TagDrivenCollateCtx::new(&rt_ok, &at, &["b"]).is_ok());
     }
 
     #[test]
