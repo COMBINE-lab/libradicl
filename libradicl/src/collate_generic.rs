@@ -147,12 +147,15 @@ impl CollationKeySpec {
         for p in &self.parts {
             let mut c = Cursor::new(&header[p.offset..]);
             let v = p.int.read_value_into_u128(&mut c);
-            let mask = if p.bits >= 128 {
-                u128::MAX
+            // A 128-bit part must be the only part (the `total_bits <= 128` check in
+            // the constructor guarantees it), so it *is* the whole key. Shifting a
+            // u128 by 128 is UB/panic, so special-case it rather than shift.
+            if p.bits >= 128 {
+                key = v;
             } else {
-                (1u128 << p.bits) - 1
-            };
-            key = (key << p.bits) | (v & mask);
+                let mask = (1u128 << p.bits) - 1;
+                key = (key << p.bits) | (v & mask);
+            }
         }
         key
     }
@@ -179,10 +182,25 @@ impl GenericCollateCtx {
         key_tag_names: &[&str],
     ) -> anyhow::Result<Self> {
         let key = CollationKeySpec::from_read_tags(read_tags, key_tag_names)?;
+        Self::reject_u128_key(&key)?;
         Ok(Self {
             key,
             aln_stride: Self::aln_stride(aln_tags)?,
         })
+    }
+
+    /// The tag-driven [`crate::record::GenericReadRecord`] scatter is `u64`-keyed
+    /// (`CollatableMappedRecord<u64>`), so it cannot rewrite a `u128` barcode. The
+    /// `collate_bucket` gather itself is `u128`-capable, but until the scatter is
+    /// too (COMBINE-lab/libradicl, deferred), reject a `U128` key part here with a
+    /// clear error rather than panicking deep in the scatter.
+    fn reject_u128_key(key: &CollationKeySpec) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            key.parts.iter().all(|p| p.bits <= 64),
+            "generic (tag-driven) collation does not yet support a barcode wider than 64 bits; \
+             this RAD declares a u128 barcode key"
+        );
+        Ok(())
     }
 
     /// Like [`Self::new`] but takes the collation key from the read tags' declared
@@ -194,10 +212,13 @@ impl GenericCollateCtx {
         aln_tags: &TagSection,
     ) -> anyhow::Result<Option<Self>> {
         match CollationKeySpec::from_roles(read_tags)? {
-            Some(key) => Ok(Some(Self {
-                key,
-                aln_stride: Self::aln_stride(aln_tags)?,
-            })),
+            Some(key) => {
+                Self::reject_u128_key(&key)?;
+                Ok(Some(Self {
+                    key,
+                    aln_stride: Self::aln_stride(aln_tags)?,
+                }))
+            }
             None => Ok(None),
         }
     }
@@ -307,6 +328,11 @@ where
 /// field lifted out of an already-read header buffer, no reader round-trip).
 #[inline]
 fn le_u64(b: &[u8]) -> u64 {
+    // Callers pass a single barcode field; a field wider than 8 bytes (u128) would
+    // be silently truncated here. u128 barcode keys are rejected upstream
+    // (`reject_u128_key`, and the multi from_roles guard), so this only fires if a
+    // new caller forgets that.
+    debug_assert!(b.len() <= 8, "le_u64 given a {}-byte field (u128?)", b.len());
     let mut v = 0u64;
     for (i, &x) in b.iter().enumerate().take(8) {
         v |= (x as u64) << (8 * i);
@@ -1085,6 +1111,36 @@ mod tests {
         assert!(GenericCollateCtx::new(&read_ok, &var_aln, &["b"]).is_err());
         // single-barcode key works
         assert!(CollationKeySpec::from_read_tags(&read_ok, &["b"]).is_ok());
+    }
+
+    #[test]
+    fn single_u128_key_extract_does_not_panic() {
+        // A single 128-bit barcode occupies the whole key; `extract` must not shift
+        // a u128 by 128 (debug panic) — it returns the value verbatim.
+        let rt = tag_section(TagSectionLabel::ReadTags, &[("b", RadIntId::U128)]);
+        let spec = CollationKeySpec::from_read_tags(&rt, &["b"]).unwrap();
+        let val: u128 = 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210;
+        let mut header = vec![0u8; 4]; // na
+        header.extend_from_slice(&val.to_le_bytes());
+        assert_eq!(spec.extract(&header), val);
+    }
+
+    #[test]
+    fn generic_ctx_rejects_u128_barcode_until_scatter_supports_it() {
+        // The tag-driven generic record scatter is u64-keyed; a u128 barcode must
+        // be rejected at context construction, not panic deep in the scatter.
+        let at = tag_section(TagSectionLabel::AlignmentTags, &[("refid", RadIntId::U32)]);
+        let rt = tag_section(
+            TagSectionLabel::ReadTags,
+            &[("b", RadIntId::U128), ("u", RadIntId::U32)],
+        );
+        assert!(GenericCollateCtx::new(&rt, &at, &["b"]).is_err());
+        // u64 barcode is fine
+        let rt_ok = tag_section(
+            TagSectionLabel::ReadTags,
+            &[("b", RadIntId::U64), ("u", RadIntId::U32)],
+        );
+        assert!(GenericCollateCtx::new(&rt_ok, &at, &["b"]).is_ok());
     }
 
     #[test]
