@@ -1,7 +1,7 @@
 use anyhow::{self, Context};
 use libradicl::chunk::Chunk;
 use libradicl::header;
-use libradicl::record::{GenericReadRecord, GenericReadRecordContext};
+use libradicl::record::{TagDrivenReadRecord, TagDrivenReadRecordContext};
 use std::io::{BufReader, Write};
 
 fn main() -> anyhow::Result<()> {
@@ -19,8 +19,8 @@ fn main() -> anyhow::Result<()> {
 
     // Any extra context we may need to parse the records. In this case, it's the
     // size of the barcode and the umi.
-    let tag_context = p.get_record_context::<GenericReadRecordContext>()?;
-    let first_chunk = Chunk::<GenericReadRecord>::from_bytes(&mut ifile, &tag_context);
+    let tag_context = p.get_record_context::<TagDrivenReadRecordContext>()?;
+    let first_chunk = Chunk::<TagDrivenReadRecord>::from_bytes(&mut ifile, &tag_context);
     println!(
         "Chunk :: nbytes: {}, nrecs: {}",
         first_chunk.nbytes, first_chunk.nrec
@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     let mut total_chunks = 1;
 
     while total_chunks < p.hdr.num_chunks {
-        let chunk = Chunk::<GenericReadRecord>::from_bytes(&mut ifile, &tag_context);
+        let chunk = Chunk::<TagDrivenReadRecord>::from_bytes(&mut ifile, &tag_context);
         total_rec += chunk.nrec as usize;
         total_bytes += chunk.nbytes as usize;
         total_chunks += 1;
