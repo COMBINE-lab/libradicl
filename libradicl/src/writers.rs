@@ -98,7 +98,7 @@ impl<W: Write + Seek> RadFileWriter<W> {
         // extension block ahead of the header, so the num_chunks field sits that
         // many bytes further in. Missing this backpatches num_chunks into the
         // ref-name region (see #64). Keep in sync with `RadHeader::write`.
-        let version_prefix: u64 = if prelude.hdr.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR
+        let version_prefix: u64 = if prelude.hdr.version.is_versioned()
         {
             constants::RAD_MAGIC.len() as u64 + 2 + std::mem::size_of::<u32>() as u64
         } else {
@@ -296,8 +296,7 @@ mod tests {
     /// Build a minimal AlevinFry prelude and matching file-tag values for tests.
     fn make_af_prelude() -> (RadPrelude, TagMap) {
         let hdr = RadHeader {
-            major_version: 0,
-            minor_version: 0,
+            version: crate::header::SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -415,8 +414,7 @@ mod tests {
         use crate::rad_types::TagRole;
 
         let (mut prelude, file_tag_map) = make_af_prelude();
-        prelude.hdr.major_version = crate::constants::RAD_SPEC_MAJOR;
-        prelude.hdr.minor_version = crate::constants::RAD_SPEC_MINOR;
+        prelude.hdr.version = crate::header::SpecVersion::current();
         prelude.read_tags.tags[0].role = TagRole::Barcode { level: 0, len: 16 };
         let ctx = AlevinFryRecordContext::get_context_from_tag_section(
             &prelude.file_tags,
@@ -444,7 +442,7 @@ mod tests {
             &crate::constants::RAD_MAGIC
         );
         let read_prelude = RadPrelude::from_bytes(&mut cursor).expect("read v2 prelude");
-        assert_eq!(read_prelude.hdr.major_version, crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(read_prelude.hdr.version.major(), crate::constants::RAD_SPEC_MAJOR);
         // ref names must be uncorrupted (the bug wrote num_chunks into them).
         assert_eq!(read_prelude.hdr.ref_names, prelude.hdr.ref_names);
         // num_chunks backpatched to the correct location.
@@ -461,8 +459,7 @@ mod tests {
         // Prelude with a reserved fixed-length ArrayF64 file tag (placeholder),
         // plus a scalar tag before it to exercise non-zero offsets.
         let hdr = RadHeader {
-            major_version: 0,
-            minor_version: 0,
+            version: crate::header::SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 2,
             ref_names: vec!["t0".to_string(), "t1".to_string()],

@@ -38,18 +38,70 @@ pub struct RadPrelude {
     pub aln_tags: TagSection,
 }
 
+/// The RAD spec version of a prelude. Either a `Legacy` (magic-less) prelude,
+/// which behaves as major 0, or a `Versioned` one carrying an explicit
+/// `major.minor` (major `>=`[`constants::RAD_FIRST_VERSIONED_MAJOR`]). Making this
+/// a single value (rather than two raw `u8`s) means a header can't be left in an
+/// inconsistent "major 1" state, and `is_versioned()` reads better than a bare
+/// `major >= RAD_FIRST_VERSIONED_MAJOR` comparison at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecVersion {
+    /// A legacy, magic-less prelude (treated as major 0, minor 0).
+    Legacy,
+    /// A versioned prelude with an explicit major/minor.
+    Versioned { major: u8, minor: u8 },
+}
+
+impl SpecVersion {
+    /// The current spec version this build writes.
+    pub const fn current() -> Self {
+        SpecVersion::Versioned {
+            major: constants::RAD_SPEC_MAJOR,
+            minor: constants::RAD_SPEC_MINOR,
+        }
+    }
+    /// The effective major (`Legacy` == 0).
+    pub fn major(&self) -> u8 {
+        match self {
+            SpecVersion::Legacy => 0,
+            SpecVersion::Versioned { major, .. } => *major,
+        }
+    }
+    /// The effective minor (`Legacy` == 0).
+    pub fn minor(&self) -> u8 {
+        match self {
+            SpecVersion::Legacy => 0,
+            SpecVersion::Versioned { minor, .. } => *minor,
+        }
+    }
+    /// Whether the prelude is versioned (carries the magic + version prefix and
+    /// per-tag roles).
+    pub fn is_versioned(&self) -> bool {
+        matches!(self, SpecVersion::Versioned { .. })
+    }
+    /// Build from on-disk `major`/`minor`: major 0 is `Legacy`; a major in
+    /// `[1, RAD_FIRST_VERSIONED_MAJOR)` is a reserved/malformed value and errors.
+    pub fn from_parts(major: u8, minor: u8) -> anyhow::Result<Self> {
+        if major == 0 {
+            Ok(SpecVersion::Legacy)
+        } else if major < constants::RAD_FIRST_VERSIONED_MAJOR {
+            anyhow::bail!("RAD prelude has a reserved/legacy major version {major}; file is malformed")
+        } else {
+            Ok(SpecVersion::Versioned { major, minor })
+        }
+    }
+}
+
 /// The [RadHeader] contains the relevant information about the
 /// references against which the reads in this file were mapped and
 /// information about the way in which mapping was performed.
 #[derive(Educe)]
 #[educe(Debug, PartialEq, Eq)]
 pub struct RadHeader {
-    /// RAD spec **major** version: 0 for a legacy (magic-less) prelude, >= 2 for a
-    /// versioned one (see [`constants::RAD_MAGIC`] / [`constants::RAD_SPEC_MAJOR`]).
-    /// Major bumps are breaking; minor bumps are additive.
-    pub major_version: u8,
-    /// RAD spec **minor** version (0 for legacy).
-    pub minor_version: u8,
+    /// RAD spec version: [`SpecVersion::Legacy`] for a magic-less prelude, or
+    /// `Versioned { major, minor }` (major `>=`
+    /// [`constants::RAD_FIRST_VERSIONED_MAJOR`]) for a versioned one.
+    pub version: SpecVersion,
     pub is_paired: u8,
     pub ref_count: u64,
     pub ref_names: Vec<String>,
@@ -67,11 +119,9 @@ impl RadHeader {
     /// Create a new empty [RadHeader]
     pub fn new() -> Self {
         Self {
-            // Default to legacy (major 0) so existing construction + write paths
-            // are byte-for-byte unchanged; a writer opts in by setting
-            // `major_version = constants::RAD_SPEC_MAJOR`.
-            major_version: 0,
-            minor_version: 0,
+            // Default to legacy so existing construction + write paths are
+            // byte-for-byte unchanged; a writer opts in with `SpecVersion::current()`.
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -130,19 +180,18 @@ impl RadHeader {
                     .read_exact(&mut skip)
                     .context("could not read prelude extension block")?;
             }
-            Self::read_fields(reader, major, minor)
+            Self::read_fields(reader, SpecVersion::Versioned { major, minor })
         } else {
             let mut chained = std::io::Cursor::new(magic).chain(reader);
-            Self::read_fields(&mut chained, 0, 0)
+            Self::read_fields(&mut chained, SpecVersion::Legacy)
         }
     }
 
     /// Read the header fields (everything after the optional magic + version) from
-    /// `reader`, tagging the result with the spec `major`/`minor`.
-    fn read_fields<T: Read>(reader: &mut T, major: u8, minor: u8) -> anyhow::Result<RadHeader> {
+    /// `reader`, tagging the result with the spec `version`.
+    fn read_fields<T: Read>(reader: &mut T, version: SpecVersion) -> anyhow::Result<RadHeader> {
         let mut rh = RadHeader {
-            major_version: major,
-            minor_version: minor,
+            version,
             ..RadHeader::new()
         };
 
@@ -188,8 +237,7 @@ impl RadHeader {
     /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
     pub fn from_bam_header(header: &sam::Header) -> RadHeader {
         let mut rh = RadHeader {
-            major_version: 0,
-            minor_version: 0,
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 0,
             ref_names: vec![],
@@ -212,7 +260,7 @@ impl RadHeader {
         let mut tot_size = 0usize;
         // versioned headers (major >= first-versioned) are prefixed by the magic
         // + [major:u8][minor:u8] + the [ext_len:u32] extension block (empty today).
-        if self.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR {
+        if self.version.is_versioned() {
             tot_size += constants::RAD_MAGIC.len() + 2 + std::mem::size_of::<u32>();
         }
         tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
@@ -264,9 +312,9 @@ impl RadHeader {
         // prefix, then an empty length-prefixed extension block ([ext_len:u32] = 0)
         // reserved for future minor-version file-level metadata; legacy headers
         // (major 0) write exactly as before.
-        if self.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR {
+        if self.version.is_versioned() {
             w.write_all(&constants::RAD_MAGIC)?;
-            w.write_all(&[self.major_version, self.minor_version])?;
+            w.write_all(&[self.version.major(), self.version.minor()])?;
             w.write_all(&0u32.to_le_bytes())?;
         }
 
@@ -318,7 +366,7 @@ impl RadPrelude {
         let hdr = RadHeader::from_bytes(reader)?;
         // Tag descriptors carry per-tag roles only in versioned files; the major
         // version (just parsed) tells the tag reader whether to expect them.
-        let m = hdr.major_version;
+        let m = hdr.version.major();
         let file_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::FileTags, m)?;
         let read_tags = TagSection::from_bytes_with_label(reader, TagSectionLabel::ReadTags, m)?;
         let aln_tags =
@@ -339,7 +387,7 @@ impl RadPrelude {
     /// [anyhow::Result] that records any error that occured during writing or
     /// Ok(()) if successful
     pub fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
-        let m = self.hdr.major_version;
+        let m = self.hdr.version.major();
         self.hdr
             .write(writer)
             .context("could not write the header of the prelude")?;
@@ -386,7 +434,7 @@ impl RadPrelude {
         writer.write_all(&hdr_bytes)?;
 
         // File-tag section descriptors, adding the codec tag when compressing.
-        let m = self.hdr.major_version;
+        let m = self.hdr.version.major();
         if codec == ChunkCodec::None {
             self.file_tags.write(writer, m)?;
         } else {
@@ -449,7 +497,7 @@ impl RadPrelude {
 
 #[cfg(test)]
 mod tests {
-    use super::{RadHeader, RadPrelude};
+    use super::{RadHeader, RadPrelude, SpecVersion};
     use crate::rad_types::{RadAtomicId, RadIntId, TagMap, TagSection, TagSectionLabel, TagValue};
     use crate::rad_types::{RadType, TagDesc};
 
@@ -460,8 +508,7 @@ mod tests {
     #[test]
     fn magic_version_roundtrip_and_legacy_backcompat() {
         let mk = |major: u8, minor: u8| RadHeader {
-            major_version: major,
-            minor_version: minor,
+            version: SpecVersion::from_parts(major, minor).unwrap(),
             is_paired: 1,
             ref_count: 2,
             ref_names: vec!["a".to_string(), "bb".to_string()],
@@ -480,8 +527,8 @@ mod tests {
             &crate::constants::RAD_MAGIC
         );
         let vr = RadHeader::from_bytes(&mut std::io::Cursor::new(&vb)).unwrap();
-        assert_eq!(vr.major_version, crate::constants::RAD_SPEC_MAJOR);
-        assert_eq!(vr.minor_version, crate::constants::RAD_SPEC_MINOR);
+        assert_eq!(vr.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(vr.version.minor(), crate::constants::RAD_SPEC_MINOR);
         assert_eq!(vr.ref_names, v.ref_names);
         assert_eq!(vr.num_chunks, 5);
 
@@ -494,8 +541,8 @@ mod tests {
             &crate::constants::RAD_MAGIC
         );
         let lr = RadHeader::from_bytes(&mut std::io::Cursor::new(&lb)).unwrap();
-        assert_eq!(lr.major_version, 0);
-        assert_eq!(lr.minor_version, 0);
+        assert_eq!(lr.version.major(), 0);
+        assert_eq!(lr.version.minor(), 0);
         assert_eq!(lr.ref_names, l.ref_names);
 
         // a versioned file is byte-longer than the legacy one by exactly the prefix
@@ -517,8 +564,7 @@ mod tests {
             role,
         };
         let hdr = RadHeader {
-            major_version: crate::constants::RAD_SPEC_MAJOR,
-            minor_version: crate::constants::RAD_SPEC_MINOR,
+            version: SpecVersion::current(),
             is_paired: 0,
             ref_count: 1,
             ref_names: vec!["r0".to_string()],
@@ -549,8 +595,8 @@ mod tests {
         );
 
         let rp = RadPrelude::from_bytes(&mut buf.as_slice()).unwrap();
-        assert_eq!(rp.hdr.major_version, crate::constants::RAD_SPEC_MAJOR);
-        assert_eq!(rp.hdr.minor_version, crate::constants::RAD_SPEC_MINOR);
+        assert_eq!(rp.hdr.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(rp.hdr.version.minor(), crate::constants::RAD_SPEC_MINOR);
         assert_eq!(rp.hdr.ref_names, vec!["r0".to_string()]);
         assert_eq!(rp.read_tags.tags[0].role, TagRole::Barcode { level: 0, len: 16 });
         assert_eq!(rp.read_tags.tags[1].role, TagRole::Umi { len: 12 });
@@ -579,8 +625,8 @@ mod tests {
         let higher_minor = mk_bytes(crate::constants::RAD_SPEC_MAJOR, 200);
         let h = RadHeader::from_bytes(&mut std::io::Cursor::new(higher_minor))
             .expect("higher minor within a supported major must be accepted");
-        assert_eq!(h.major_version, crate::constants::RAD_SPEC_MAJOR);
-        assert_eq!(h.minor_version, 200);
+        assert_eq!(h.version.major(), crate::constants::RAD_SPEC_MAJOR);
+        assert_eq!(h.version.minor(), 200);
     }
 
     /// The speculative-reservation cap must not limit real headers. A human
@@ -591,8 +637,7 @@ mod tests {
         const NREFS: usize = 70_000; // > MAX_SPECULATIVE_REFS
         let names: Vec<String> = (0..NREFS).map(|i| format!("tx{i}")).collect();
         let hdr = RadHeader {
-            major_version: 0,
-            minor_version: 0,
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: NREFS as u64,
             ref_names: names.clone(),
@@ -626,8 +671,7 @@ mod tests {
     #[test]
     fn can_write_prelude() {
         let hdr = RadHeader {
-            major_version: 0,
-            minor_version: 0,
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],
@@ -707,8 +751,7 @@ mod tests {
     #[test]
     fn preludes_equal_with_different_chunks() {
         let hdr = RadHeader {
-            major_version: 0,
-            minor_version: 0,
+            version: SpecVersion::Legacy,
             is_paired: 0,
             ref_count: 3,
             ref_names: vec!["tgt1".to_string(), "tgt2".to_string(), "tgt3".to_string()],

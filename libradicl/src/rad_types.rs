@@ -38,7 +38,11 @@ const I128ID: u8 = 14_u8;
 /// that the tag should be given, and the type of value that it
 /// holds.  At other points in the file, when this tag is used
 /// it will conform to this type description.
+/// `#[non_exhaustive]` so downstream crates construct via [`TagDesc::new`] /
+/// [`TagDesc::with_role`] and adding a field later (as `role` was) is not a
+/// breaking change for them.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TagDesc {
     pub name: String,
     pub typeid: RadType,
