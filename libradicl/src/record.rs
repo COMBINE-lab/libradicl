@@ -2901,6 +2901,23 @@ impl MultiBarcodeRecordContext {
             }
         }
         let num_bc = barcodes.len();
+        // The multi engine forms a u64 group key as (outer << cell_bits) | cell,
+        // keying on the first (sample) and last (cell) levels only. So until that
+        // key moves to u128 (deferred): reject > 2 levels (a middle level would be
+        // dropped from the key), and reject a cell barcode >= 64 bits (the shift
+        // would drop the sample). Guard here with a clear error rather than
+        // silently mis-grouping. (COMBINE-lab/libradicl#66; v2-hardening-plan C5.)
+        anyhow::ensure!(
+            num_bc <= 2,
+            "role-driven multi-barcode collation currently supports at most 2 barcode levels, \
+             but {num_bc} Barcode roles are declared; >2-level composite keys are a follow-up"
+        );
+        let cell_bits = barcodes[num_bc - 1].2.bytes_for_type() * 8;
+        anyhow::ensure!(
+            cell_bits < 64,
+            "role-driven multi-barcode collation currently requires a cell barcode narrower than \
+             64 bits (got {cell_bits}); a u64-wide cell would drop the sample from the group key"
+        );
         let (umi_idx, umit) = umi.context("multi-barcode role layout declares no Umi role")?;
         // Barcodes must be the first `num_bc` read tags, the UMI immediately
         // after, and nothing else — the reader reads exactly `[na][bc…][umi]`.

@@ -303,7 +303,7 @@ where
     // the tag-name bridge for un-annotated (legacy) files.
     let record_context = prelude
         .get_record_context_prefer_roles::<<R as MappedRecord>::ParsingContext>()
-        .unwrap();
+        .context("could not build the record context for the chunk reader")?;
     while let Some(chunk_num) = chunk_iter.next() {
         // while until_fn(chunk_num, &mut br) {
         // in the first iteration we've not read a header yet
@@ -488,7 +488,7 @@ where
     // the tag-name bridge for un-annotated (legacy) files.
     let record_context = prelude
         .get_record_context_prefer_roles::<<R as MappedRecord>::ParsingContext>()
-        .unwrap();
+        .context("could not build the record context for the chunk reader")?;
 
     while let Some(chunk_num) = chunk_iter.next() {
         //while until_fn(chunk_num, &mut br) {

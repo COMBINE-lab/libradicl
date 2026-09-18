@@ -63,32 +63,45 @@ pub fn validate_first_chunk_layout<T: Read>(
     let nrec = u32::from_le_bytes(hb[4..8].try_into().unwrap()) as usize;
     anyhow::ensure!(nbytes >= 8, "chunk header claims nbytes={nbytes} (< 8)");
     let payload = nbytes - 8;
-    let mut buf = vec![0u8; payload];
-    reader
-        .read_exact(&mut buf)
-        .context("first chunk is truncated relative to its declared nbytes")?;
 
-    let mut off = 0usize;
+    // Stream the walk: read each record's small fixed header, then skip its
+    // alignment block in bounded chunks — never allocate the whole (up to 4 GiB)
+    // payload.
+    let mut hdr_buf = vec![0u8; rec_hdr];
+    let mut sink = [0u8; 8192];
+    let mut consumed = 0usize;
     for i in 0..nrec {
         anyhow::ensure!(
-            off + rec_hdr <= payload,
+            consumed + rec_hdr <= payload,
             "record {i} header overruns the chunk payload; on-disk records do not match \
              the declared tag layout (undeclared field?)"
         );
-        let na = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
-        let rec = rec_hdr + na * aln_stride;
+        reader
+            .read_exact(&mut hdr_buf)
+            .context("first chunk is truncated relative to its declared nbytes")?;
+        let na = u32::from_le_bytes(hdr_buf[0..4].try_into().unwrap()) as usize;
+        let aln_bytes = na * aln_stride;
         anyhow::ensure!(
-            off + rec <= payload,
-            "record {i} ({rec} B) overruns the chunk payload; on-disk records are larger \
-             than the declared tags describe (undeclared field?)"
+            consumed + rec_hdr + aln_bytes <= payload,
+            "record {i} ({} B) overruns the chunk payload; on-disk records are larger \
+             than the declared tags describe (undeclared field?)",
+            rec_hdr + aln_bytes
         );
-        off += rec;
+        let mut remaining = aln_bytes;
+        while remaining > 0 {
+            let n = remaining.min(sink.len());
+            reader
+                .read_exact(&mut sink[..n])
+                .context("first chunk is truncated relative to its declared nbytes")?;
+            remaining -= n;
+        }
+        consumed += rec_hdr + aln_bytes;
     }
     anyhow::ensure!(
-        off == payload,
+        consumed == payload,
         "the first chunk has {} byte(s) beyond its {nrec} declared records; on-disk records \
          do not match the declared tag layout (undeclared field?)",
-        payload - off
+        payload - consumed
     );
     Ok(())
 }
@@ -463,6 +476,37 @@ mod tests {
         let mut cur = Cursor::new(buf);
         crate::chunk::validate_first_chunk_layout(&mut cur, &rt, &at)
             .expect("well-formed chunk should validate");
+    }
+
+    #[test]
+    fn field_completeness_accepts_empty_chunk() {
+        // nrec == 0 (payload == 0) is well-formed.
+        let (rt, at) = af_like_tag_sections();
+        let buf = make_chunk(&[]);
+        let mut cur = Cursor::new(buf);
+        crate::chunk::validate_first_chunk_layout(&mut cur, &rt, &at)
+            .expect("empty chunk should validate");
+    }
+
+    #[test]
+    fn field_completeness_rejects_record_overrunning_payload() {
+        // A record whose declared `na` implies more alignment bytes than the chunk
+        // payload holds must be rejected (not read past the end).
+        let (rt, at) = af_like_tag_sections();
+        // Hand-build a chunk: nbytes covers exactly one na=0 record (4 + 8), but the
+        // record claims na = 100.
+        let rec_hdr = 4 + 8; // na + b + u
+        let nbytes = (8 + rec_hdr) as u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&nbytes.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // nrec = 1
+        buf.extend_from_slice(&100u32.to_le_bytes()); // na = 100 (overruns)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // b
+        buf.extend_from_slice(&0u32.to_le_bytes()); // u
+        let mut cur = Cursor::new(buf);
+        let err = crate::chunk::validate_first_chunk_layout(&mut cur, &rt, &at)
+            .expect_err("a record overrunning the payload should be rejected");
+        assert!(format!("{err}").contains("overruns"));
     }
 
     #[test]

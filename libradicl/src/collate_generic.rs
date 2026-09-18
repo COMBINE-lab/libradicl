@@ -274,37 +274,40 @@ pub trait CollationScan {
     /// `(key, on_disk_len_bytes)`.
     fn scan<R: Read + Seek>(r: &mut R, ctx: &Self::Ctx) -> anyhow::Result<(u128, usize)>;
 
-    /// If this record has a fixed on-disk layout, return `(read_header_bytes,
-    /// aln_stride)` — the byte length of the fixed header (`na` + read-level
-    /// fields, up to the first alignment) and the fixed per-alignment stride. This
-    /// lets the gather's pass 2 relocate a record forward with no backward seek
-    /// (read the header, derive the key + length, read the alignment block straight
-    /// into the output). `None` (the default) ⇒ variable layout; pass 2 falls back
-    /// to `scan` + seek-back. When `Some`, [`Self::key_from_header`] must extract
-    /// the key from the header bytes.
+    /// If this record has a fixed on-disk layout, return a [`FixedLayout`] — the
+    /// fixed header length, the per-alignment stride, **and** the key-from-header
+    /// extractor, together. This lets the gather's pass 2 relocate a record forward
+    /// with no backward seek. `None` (the default) ⇒ variable layout; pass 2 falls
+    /// back to `scan` + seek-back.
+    ///
+    /// Returning all three as one value (rather than a `fixed_header_stride` plus a
+    /// separately-overridden `key_from_header`) makes it impossible to opt into the
+    /// fast path without also supplying the key extractor — no panicking "you
+    /// forgot to override the other method" default.
     ///
     /// This is the opt-in that decides whether a record type uses the pass-1
     /// `(cell index)` side table (fast pass 2, small per-bucket memory) or the
-    /// re-scan fallback (no side table). It is worth overriding only when
-    /// recomputing the key in pass 2 is expensive relative to a plain read — i.e.
-    /// composite/multi-field keys over many small records (multi-barcode). For
-    /// cheap single-field keys (the alevin-fry / long-read family) the re-scan is
-    /// effectively free, so they leave this `None` and pay no side-table memory.
-    /// The choice is per record *type* (key cost), not per file *size*: a
-    /// size-based switch would be backwards, since it is precisely the large
-    /// many-record case where the re-scan of an expensive key costs the most. If a
-    /// future cheap-key record ever has enormous record counts where even the
-    /// cheap re-scan adds up, overriding this is the (size-heuristic-free) lever.
-    fn fixed_header_stride(_ctx: &Self::Ctx) -> Option<(usize, usize)> {
+    /// re-scan fallback. It is worth overriding only when recomputing the key in
+    /// pass 2 is expensive relative to a plain read — i.e. composite/multi-field
+    /// keys over many small records (multi-barcode). Cheap single-field keys (the
+    /// alevin-fry / long-read family) leave this `None` and pay no side-table
+    /// memory. The choice is per record *type* (key cost), not per file *size*.
+    fn fixed_layout(_ctx: &Self::Ctx) -> Option<FixedLayout<Self::Ctx>> {
         None
     }
+}
 
-    /// Extract the collation key from a record's header bytes (`hdr` is at least
-    /// `read_header_bytes` long). Only called when [`Self::fixed_header_stride`]
-    /// returns `Some`; the default panics to catch a missing override.
-    fn key_from_header(_hdr: &[u8], _ctx: &Self::Ctx) -> u128 {
-        unreachable!("key_from_header called without a fixed_header_stride override")
-    }
+/// The fixed on-disk layout of a record type (see [`CollationScan::fixed_layout`]):
+/// the read-header byte length, the per-alignment stride, and a (non-capturing)
+/// function extracting the collation key from a record's header bytes.
+pub struct FixedLayout<C> {
+    /// `na` + read-level fields, up to the first alignment.
+    pub read_header_bytes: usize,
+    /// Fixed per-alignment byte stride.
+    pub aln_stride: usize,
+    /// Extract the collation key from a record's header bytes (at least
+    /// `read_header_bytes` long).
+    pub key_from_header: fn(&[u8], &C) -> u128,
 }
 
 /// Parse-based [`CollationScan::scan`] for any [`CollatableMappedRecord`]: parse
@@ -473,30 +476,30 @@ where
         let na = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         let key = multi_key_from_header(&buf, ctx);
 
-        let (_hdr, stride) = Self::fixed_header_stride(ctx).expect("multi has a fixed layout");
+        let stride = Self::fixed_layout(ctx)
+            .expect("multi has a fixed layout")
+            .aln_stride;
         let skip = ctx.umit.bytes_for_type() + na * stride;
         r.seek_relative(skip as i64)?;
         Ok((u128::from(key), hdr + skip))
     }
 
-    fn fixed_header_stride(ctx: &Self::Ctx) -> Option<(usize, usize)> {
-        let hdr = 4 + ctx.total_bc_bytes() + ctx.umit.bytes_for_type();
-        let stride =
-            <crate::record::MultiBarcodeReadRecordT<B> as crate::record::KnownSize>::nbytes_aln(
-                ctx,
-            );
-        Some((hdr, stride))
-    }
-
-    fn key_from_header(hdr: &[u8], ctx: &Self::Ctx) -> u128 {
-        u128::from(multi_key_from_header(hdr, ctx))
+    fn fixed_layout(ctx: &Self::Ctx) -> Option<FixedLayout<Self::Ctx>> {
+        Some(FixedLayout {
+            read_header_bytes: 4 + ctx.total_bc_bytes() + ctx.umit.bytes_for_type(),
+            aln_stride:
+                <crate::record::MultiBarcodeReadRecordT<B> as crate::record::KnownSize>::nbytes_aln(
+                    ctx,
+                ),
+            key_from_header: |hdr, ctx| u128::from(multi_key_from_header(hdr, ctx)),
+        })
     }
 }
 
 /// `CollationScan` for the scATAC record. Layout is `[na][bc][aln × na]` with a
 /// fixed per-alignment stride (see [`AtacSeqReadRecord::nbytes_aln`]) and **no
 /// UMI**; the collation key is the barcode. Fully fixed, so pass 2 relocates
-/// records forward with no re-scan (`fixed_header_stride`/`key_from_header`).
+/// records forward with no re-scan (`fixed_layout`).
 impl CollationScan for crate::record::AtacSeqReadRecord {
     type Ctx = crate::record::AtacSeqRecordContext;
     fn scan<R: Read + Seek>(r: &mut R, ctx: &Self::Ctx) -> anyhow::Result<(u128, usize)> {
@@ -512,16 +515,15 @@ impl CollationScan for crate::record::AtacSeqReadRecord {
         Ok((key, len))
     }
 
-    fn fixed_header_stride(ctx: &Self::Ctx) -> Option<(usize, usize)> {
-        let hdr = 4 + ctx.bct.bytes_for_type();
-        let stride =
-            <crate::record::AtacSeqReadRecord as crate::record::KnownSize>::nbytes_aln(ctx);
-        Some((hdr, stride))
-    }
-
-    fn key_from_header(hdr: &[u8], ctx: &Self::Ctx) -> u128 {
-        // hdr = [na:u32][bc:bct]; the barcode begins at offset 4.
-        u128::from(le_u64(&hdr[4..4 + ctx.bct.bytes_for_type()]))
+    fn fixed_layout(ctx: &Self::Ctx) -> Option<FixedLayout<Self::Ctx>> {
+        Some(FixedLayout {
+            read_header_bytes: 4 + ctx.bct.bytes_for_type(),
+            aln_stride: <crate::record::AtacSeqReadRecord as crate::record::KnownSize>::nbytes_aln(
+                ctx,
+            ),
+            // hdr = [na:u32][bc:bct]; the barcode begins at offset 4.
+            key_from_header: |hdr, ctx| u128::from(le_u64(&hdr[4..4 + ctx.bct.bytes_for_type()])),
+        })
     }
 }
 
@@ -576,15 +578,16 @@ where
     // so its distinct-cell count is also `<= u32::MAX` — enforced by the
     // `u32::try_from(cells.len())` check in `accumulate_cell`, which errors rather
     // than wrapping if that ever failed to hold.
-    let fixed = S::fixed_header_stride(ctx);
+    let fixed = S::fixed_layout(ctx);
     let mut recs: Vec<u32> = Vec::new();
-    if let Some((hdr_bytes, stride)) = fixed {
+    if let Some(fx) = &fixed {
+        let (hdr_bytes, stride) = (fx.read_header_bytes, fx.aln_stride);
         recs.reserve(num_records);
         let mut scratch = vec![0u8; hdr_bytes];
         for i in 0..num_records {
             reader.read_exact(&mut scratch)?;
             let na = u32::from_le_bytes(scratch[0..4].try_into().unwrap()) as usize;
-            let key = S::key_from_header(&scratch, ctx);
+            let key = (fx.key_from_header)(&scratch, ctx);
             let len = hdr_bytes + na * stride;
             reader.seek_relative((len - hdr_bytes) as i64)?;
             let len =
@@ -613,6 +616,8 @@ where
     // With no codec, build straight into `out` (no second full-bucket buffer);
     // otherwise stage in `tmp` and compress chunk-by-chunk into `out`. Either way
     // peak memory is ~one bucket.
+    // Pass 2 only needs the (header, stride) arithmetic, not the key extractor.
+    let fixed_stride = fixed.as_ref().map(|fx| (fx.read_header_bytes, fx.aln_stride));
     if codec == ChunkCodec::None {
         let out_start = out.len();
         out.resize(out_start + total, 0);
@@ -621,7 +626,7 @@ where
             base,
             num_records,
             ctx,
-            fixed,
+            fixed_stride,
             &recs,
             &cells,
             &index,
@@ -635,7 +640,7 @@ where
             base,
             num_records,
             ctx,
-            fixed,
+            fixed_stride,
             &recs,
             &cells,
             &index,
@@ -688,7 +693,14 @@ where
     const CHUNK_HEADER: usize = 8;
     let mut off = 0usize;
     for c in cells {
-        let nbytes = (CHUNK_HEADER + c.payload_bytes) as u32;
+        // A per-cell chunk's on-disk size is a u32; a cell whose gathered payload
+        // exceeds 4 GiB cannot be represented and would silently wrap. Fail loudly.
+        let nbytes = u32::try_from(CHUNK_HEADER + c.payload_bytes).map_err(|_| {
+            anyhow::anyhow!(
+                "collated chunk is {} bytes, exceeding the u32 chunk-size limit",
+                CHUNK_HEADER + c.payload_bytes
+            )
+        })?;
         dst[off..off + 4].copy_from_slice(&nbytes.to_le_bytes());
         dst[off + 4..off + 8].copy_from_slice(&c.nrec.to_le_bytes());
         off += CHUNK_HEADER + c.payload_bytes;
