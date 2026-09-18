@@ -115,6 +115,21 @@ impl RadHeader {
                     "RAD prelude carries the magic but a reserved/legacy major version {major}; file is malformed"
                 );
             }
+            // Length-prefixed prelude extension block: `[ext_len:u32][ext_len bytes]`.
+            // Empty today; it exists so a future *minor* can add file-level metadata
+            // that older readers skip wholesale rather than desyncing. Read and
+            // discard whatever it holds.
+            let mut ext_len_buf = [0u8; 4];
+            reader
+                .read_exact(&mut ext_len_buf)
+                .context("could not read prelude extension length")?;
+            let ext_len = u32::from_le_bytes(ext_len_buf) as usize;
+            if ext_len > 0 {
+                let mut skip = vec![0u8; ext_len];
+                reader
+                    .read_exact(&mut skip)
+                    .context("could not read prelude extension block")?;
+            }
             Self::read_fields(reader, major, minor)
         } else {
             let mut chained = std::io::Cursor::new(magic).chain(reader);
@@ -196,9 +211,9 @@ impl RadHeader {
     pub fn get_size(&self) -> usize {
         let mut tot_size = 0usize;
         // versioned headers (major >= first-versioned) are prefixed by the magic
-        // + [major:u8][minor:u8]
+        // + [major:u8][minor:u8] + the [ext_len:u32] extension block (empty today).
         if self.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR {
-            tot_size += constants::RAD_MAGIC.len() + 2;
+            tot_size += constants::RAD_MAGIC.len() + 2 + std::mem::size_of::<u32>();
         }
         tot_size += std::mem::size_of_val(&self.is_paired) + std::mem::size_of_val(&self.ref_count);
         // each name takes 2 bytes for the length, plus the actual
@@ -246,10 +261,13 @@ impl RadHeader {
         // it's not contained in the SAM header.  Think about if
         // and how to address that.
         // Versioned files (major >= first-versioned) get the magic + [major][minor]
-        // prefix; legacy headers (major 0) write exactly as before.
+        // prefix, then an empty length-prefixed extension block ([ext_len:u32] = 0)
+        // reserved for future minor-version file-level metadata; legacy headers
+        // (major 0) write exactly as before.
         if self.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR {
             w.write_all(&constants::RAD_MAGIC)?;
             w.write_all(&[self.major_version, self.minor_version])?;
+            w.write_all(&0u32.to_le_bytes())?;
         }
 
         w.write_all(&self.is_paired.to_le_bytes())?;
@@ -481,7 +499,11 @@ mod tests {
         assert_eq!(lr.ref_names, l.ref_names);
 
         // a versioned file is byte-longer than the legacy one by exactly the prefix
-        assert_eq!(vb.len() - lb.len(), crate::constants::RAD_MAGIC.len() + 2);
+        // (magic + [major][minor] + [ext_len:u32])
+        assert_eq!(
+            vb.len() - lb.len(),
+            crate::constants::RAD_MAGIC.len() + 2 + std::mem::size_of::<u32>()
+        );
     }
 
     /// A writer can produce a versioned prelude *from scratch* (magic + version +
@@ -545,6 +567,7 @@ mod tests {
             let mut b = Vec::new();
             b.extend_from_slice(&crate::constants::RAD_MAGIC);
             b.extend_from_slice(&[major, minor]);
+            b.extend_from_slice(&0u32.to_le_bytes()); // ext_len = 0
             b.push(0); // is_paired
             b.extend_from_slice(&0u64.to_le_bytes()); // ref_count = 0
             b.extend_from_slice(&0u64.to_le_bytes()); // num_chunks = 0

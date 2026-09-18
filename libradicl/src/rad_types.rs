@@ -86,50 +86,72 @@ impl TagRole {
         }
     }
 
-    /// Serialize the role: one code byte, plus `[level][len]` for `Barcode` and
-    /// `[len]` for `Umi`.
-    fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
-        writer
-            .write_all(&[self.code()])
-            .context("could not write tag role")?;
+    /// The role's parameter payload (everything after the `[code][plen]` prefix).
+    fn payload(&self) -> Vec<u8> {
         match self {
-            TagRole::Barcode { level, len } => writer
-                .write_all(&[*level, *len])
-                .context("could not write barcode role level/len")?,
-            TagRole::Umi { len } => writer
-                .write_all(&[*len])
-                .context("could not write umi role len")?,
-            _ => {}
+            TagRole::Barcode { level, len } => vec![*level, *len],
+            TagRole::Umi { len } => vec![*len],
+            TagRole::None | TagRole::Reference | TagRole::Orientation => Vec::new(),
         }
+    }
+
+    /// Serialize the role as `[code:u8][plen:u8][payload]` — uniform for every
+    /// role, including `None` (`[0][0]`). The explicit `plen` is what makes the
+    /// format forward-compatible within a major version: a reader skips an unknown
+    /// role code (from a newer *minor*) by `plen`, and reads a known role whose
+    /// payload *grew* in a newer minor by taking the fields it knows and advancing
+    /// to `plen`. Neither desyncs the descriptor stream. Payloads are capped at
+    /// 255 bytes (`u8` plen); no role approaches that.
+    fn write<W: Write>(&self, writer: &mut W) -> anyhow::Result<()> {
+        let payload = self.payload();
+        let plen = u8::try_from(payload.len())
+            .map_err(|_| anyhow::anyhow!("tag role payload exceeds 255 bytes"))?;
+        writer
+            .write_all(&[self.code(), plen])
+            .context("could not write tag role header")?;
+        writer
+            .write_all(&payload)
+            .context("could not write tag role payload")?;
         Ok(())
     }
 
-    /// Read a role. An unknown code (e.g. from a newer *minor* version) decodes to
-    /// [`TagRole::None`]; only `Barcode`/`Umi` carry parameters, and any future
-    /// parameter-bearing role must be a *major* bump (rejected by the too-new
-    /// guard), so a param-less unknown code never desyncs the stream.
+    /// Read a role written as `[code][plen][payload]`. A known code parses its
+    /// fields from the payload; an unknown code (newer minor) decodes to
+    /// [`TagRole::None`]. Either way the reader advances exactly `plen` payload
+    /// bytes, so the descriptor stream never desyncs. A known code whose declared
+    /// `plen` is shorter than its fields require is a malformed/too-old-for-this
+    /// payload and errors.
     fn read<R: Read>(reader: &mut R) -> anyhow::Result<Self> {
-        let mut b = [0u8; 1];
+        let mut hdr = [0u8; 2];
         reader
-            .read_exact(&mut b)
-            .context("could not read tag role")?;
-        Ok(match b[0] {
+            .read_exact(&mut hdr)
+            .context("could not read tag role header")?;
+        let (code, plen) = (hdr[0], hdr[1] as usize);
+        let mut payload = vec![0u8; plen];
+        reader
+            .read_exact(&mut payload)
+            .context("could not read tag role payload")?;
+        // A known role reads the fields it understands from the front of the
+        // payload; extra trailing bytes (a future minor's additions) are ignored.
+        let need = |n: usize| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                payload.len() >= n,
+                "tag role code {code} payload is {} bytes, need at least {n}",
+                payload.len()
+            );
+            Ok(())
+        };
+        Ok(match code {
             1 => {
-                let mut ll = [0u8; 2];
-                reader
-                    .read_exact(&mut ll)
-                    .context("could not read barcode role level/len")?;
+                need(2)?;
                 TagRole::Barcode {
-                    level: ll[0],
-                    len: ll[1],
+                    level: payload[0],
+                    len: payload[1],
                 }
             }
             2 => {
-                let mut l = [0u8; 1];
-                reader
-                    .read_exact(&mut l)
-                    .context("could not read umi role len")?;
-                TagRole::Umi { len: l[0] }
+                need(1)?;
+                TagRole::Umi { len: payload[0] }
             }
             3 => TagRole::Reference,
             4 => TagRole::Orientation,
@@ -2458,6 +2480,54 @@ mod tests {
     /// Per-tag roles round-trip only in versioned files: at spec major >= 2 the
     /// role (incl. a Barcode level) survives write→read; at major 0 no role byte
     /// is written and reading yields `TagRole::None`.
+    #[test]
+    fn tag_role_wire_bytes_are_stable() {
+        // Freeze the on-disk role encoding [code][plen][payload] so accidental wire
+        // drift is caught. If you change these bytes you are changing the RAD format.
+        let cases: [(TagRole, &[u8]); 5] = [
+            (TagRole::None, &[0, 0]),
+            (TagRole::Barcode { level: 1, len: 16 }, &[1, 2, 1, 16]),
+            (TagRole::Umi { len: 12 }, &[2, 1, 12]),
+            (TagRole::Reference, &[3, 0]),
+            (TagRole::Orientation, &[4, 0]),
+        ];
+        for (role, bytes) in cases {
+            let mut buf = Vec::new();
+            role.write(&mut buf).unwrap();
+            assert_eq!(buf, bytes, "wire drift for {role:?}");
+            assert_eq!(TagRole::read(&mut std::io::Cursor::new(&buf)).unwrap(), role);
+        }
+    }
+
+    #[test]
+    fn tag_role_wire_is_forward_compatible() {
+        use std::io::Cursor;
+        // An unknown role code (from a newer minor) with a payload decodes to None
+        // and is skipped by plen; a real role written after it still reads — no
+        // desync.
+        let mut b = vec![200u8, 3, 0xAA, 0xBB, 0xCC];
+        TagRole::Barcode { level: 0, len: 8 }.write(&mut b).unwrap();
+        let mut c = Cursor::new(&b);
+        assert_eq!(TagRole::read(&mut c).unwrap(), TagRole::None);
+        assert_eq!(
+            TagRole::read(&mut c).unwrap(),
+            TagRole::Barcode { level: 0, len: 8 }
+        );
+
+        // A known role whose payload GREW in a future minor: extra trailing bytes
+        // are ignored and the reader advances the whole plen.
+        let grown = vec![1u8, 4, 2, 20, 0xDE, 0xAD];
+        let mut c = Cursor::new(&grown);
+        assert_eq!(
+            TagRole::read(&mut c).unwrap(),
+            TagRole::Barcode { level: 2, len: 20 }
+        );
+        assert_eq!(c.position(), grown.len() as u64);
+
+        // A known role with a too-short payload is malformed -> error.
+        assert!(TagRole::read(&mut Cursor::new(vec![1u8, 1, 5])).is_err());
+    }
+
     #[test]
     fn tag_role_roundtrips_only_when_versioned() {
         for role in [

@@ -94,12 +94,13 @@ impl<W: Write + Seek> RadFileWriter<W> {
             .iter()
             .map(|n| 2u64 + n.len() as u64)
             .sum();
-        // A versioned prelude writes the magic + [major][minor] prefix ahead of the
-        // header, so the num_chunks field sits that many bytes further in. Missing
-        // this backpatches num_chunks into the ref-name region (see #64).
+        // A versioned prelude writes the magic + [major][minor] + [ext_len:u32]
+        // extension block ahead of the header, so the num_chunks field sits that
+        // many bytes further in. Missing this backpatches num_chunks into the
+        // ref-name region (see #64). Keep in sync with `RadHeader::write`.
         let version_prefix: u64 = if prelude.hdr.major_version >= constants::RAD_FIRST_VERSIONED_MAJOR
         {
-            constants::RAD_MAGIC.len() as u64 + 2
+            constants::RAD_MAGIC.len() as u64 + 2 + std::mem::size_of::<u32>() as u64
         } else {
             0
         };
