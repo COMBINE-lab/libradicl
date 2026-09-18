@@ -500,7 +500,7 @@ where
     // lock so the index stays in file order. The gather's fast `CollationScan`
     // handles any barcode/umi width, so no fixed-layout special-case is needed.
     let mut out = Vec::new();
-    let chunks = crate::collate_generic::collate_bucket::<AlevinFryReadRecordT<u64>, _>(
+    let chunks = crate::bucket_gather::collate_bucket::<AlevinFryReadRecordT<u64>, _>(
         reader,
         num_records as usize,
         context,

@@ -841,7 +841,7 @@ where
     // cell) group key directly for any barcode/umi layout, so the fast
     // `u32`/`u32` path and every other layout share one code path here.
     let mut out = Vec::new();
-    let chunks = crate::collate_generic::collate_bucket::<MultiBarcodeReadRecord, _>(
+    let chunks = crate::bucket_gather::collate_bucket::<MultiBarcodeReadRecord, _>(
         reader,
         num_records as usize,
         context,

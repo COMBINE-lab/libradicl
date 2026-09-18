@@ -107,7 +107,7 @@ impl Hasher for U64Hasher {
 /// A `HashMap` keyed on a `u128` with the fixed, non-cryptographic
 /// [`U128BuildHasher`].
 ///
-/// The generic collation gather ([`crate::collate_generic::collate_bucket`]) keys
+/// The generic collation gather ([`crate::bucket_gather::collate_bucket`]) keys
 /// its per-cell accounting map on a `u128` collation key (wide enough for a `u128`
 /// barcode or a composite sample+cell key), touched once per record over the whole
 /// bucket. Like [`U64Map`] it wants the fast fixed hasher, not the randomized one.

@@ -2835,7 +2835,7 @@ impl MultiBarcodeRecordContext {
     }
 
     /// Build a multi-barcode context from the read tags' declared roles, mirroring
-    /// [`crate::collate_generic::CollationKeySpec::from_roles`]: the barcode levels
+    /// [`crate::bucket_gather::CollationKeySpec::from_roles`]: the barcode levels
     /// come from [`TagRole::Barcode`] (ordered outer→inner by `level`) and the UMI
     /// from [`TagRole::Umi`], with no reliance on the `b0`/`b1`/`u` name bridge.
     ///
