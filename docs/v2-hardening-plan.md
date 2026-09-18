@@ -58,7 +58,13 @@ addition beyond the review. Fable refs in (parens).
   stamped file); **multi → strict error** (already the case). Encode this in the
   constructors.
 
-## P1 — before merge
+## P1 — before merge   ✅ DONE (except P1-7's SpecVersion/#[non_exhaustive], moved to P2)
+
+Status: P1-1..P1-6, P1-8..P1-11 landed. P1-7 split: `TagDesc::new`/`with_role`
+added now; the `SpecVersion` enum (C4) and `#[non_exhaustive]` on `TagDesc` (C6
+breaking half) are folded into P2 release prep, where all struct literals get
+converted once alongside the rename (landing them now churns ~20 sites twice).
+
 
 - **P1-1 [FIX] (D5)** `get_record_type_from_prelude -> anyhow::Result` (drop the 8
   panics); move the role-based multi check *after* the long-read/pos/ATAC checks;
