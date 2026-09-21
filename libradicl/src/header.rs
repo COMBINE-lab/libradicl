@@ -19,7 +19,6 @@ use libradicl::rad_types::{
     RadIntId, RadType, TagDesc, TagMap, TagSection, TagSectionLabel, TagValue,
 };
 use libradicl::record::RecordContext;
-use noodles::sam;
 use scroll::Pread;
 use std::cmp::{Eq, PartialEq};
 use std::io::{Read, Write};
@@ -232,28 +231,32 @@ impl RadHeader {
         Ok(rh)
     }
 
-    /// Create and return a [RadHeader] from the provided BAM/SAM header
-    /// (represented by the noodles [sam::Header] `header`).  
-    /// **Note**: The returned [RadHeader] will *not* have a value for the `num_chunks`
-    /// field, which will remain set at 0, nor will it set a meaningful value for the
-    /// `is_paried` flag, since the SAM/BAM header itself doesn't encode this information.
-    pub fn from_bam_header(header: &sam::Header) -> RadHeader {
-        let mut rh = RadHeader {
+    /// Create and return a [RadHeader] from an ordered list of reference names
+    /// (e.g. the reference sequences of a BAM/SAM header, in order).
+    ///
+    /// This is deliberately data-only: libradicl does not depend on a BAM/SAM
+    /// parser, so the caller extracts the reference names from whatever header
+    /// representation it holds (e.g. `noodles`) and passes them in. The names are
+    /// consumed in iteration order and define the reference ids (`ref_count` is
+    /// their number).
+    ///
+    /// **Note**: The returned [RadHeader] will *not* have a value for the
+    /// `num_chunks` field (remains 0), nor a meaningful `is_paired` flag, since a
+    /// SAM/BAM header does not encode that information; it is a [`SpecVersion::Legacy`]
+    /// header.
+    pub fn from_ref_names<I, S>(names: I) -> RadHeader
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let ref_names: Vec<String> = names.into_iter().map(Into::into).collect();
+        RadHeader {
             version: SpecVersion::Legacy,
             is_paired: 0,
-            ref_count: 0,
-            ref_names: vec![],
+            ref_count: ref_names.len() as u64,
+            ref_names,
             num_chunks: 0,
-        };
-
-        let ref_seqs = header.reference_sequences();
-        rh.ref_count = ref_seqs.len() as u64;
-        // we know how many names we will read in.
-        rh.ref_names.reserve_exact(rh.ref_count as usize);
-        for (k, _v) in ref_seqs.iter() {
-            rh.ref_names.push(k.to_string());
         }
-        rh
     }
 
     /// Returns the size, in bytes, that this [RadHeader] will take
