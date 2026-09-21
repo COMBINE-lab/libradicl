@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.21.0](https://github.com/COMBINE-lab/libradicl/compare/v0.20.0...v0.21.0) (2026-09-21)
+
+
+### Features
+
+* Role-aware bulk & scATAC record readers ([#64](https://github.com/COMBINE-lab/libradicl/issues/64)) ([aa7c33a](https://github.com/COMBINE-lab/libradicl/commit/aa7c33a105e8f5d773442215f2dbc2f25db7a423))
+
+### Refactor
+
+* Drop the noodles dependency; RadHeader::from_ref_names ([8918d73](https://github.com/COMBINE-lab/libradicl/commit/8918d730147b6b168132374459b7bfbe3c5f0974))
+
 ## [0.20.0](https://github.com/COMBINE-lab/libradicl/compare/v0.19.1...v0.20.0) (2026-09-18)
 
 
