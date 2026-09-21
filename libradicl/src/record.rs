@@ -873,15 +873,77 @@ impl RecordContext for PiscemBulkRecordContext {
         rt: &TagSection,
         _at: &TagSection,
     ) -> anyhow::Result<Self> {
+        // Name bridge (error rather than panic so a caller falling back from
+        // roles gets a clean failure).
         let frag_map_t = rt
             .get_tag_type("frag_map_type")
-            .expect("psicem bulk record context requires a \"frag_map_type\" read-level tag");
+            .context("piscem bulk record context requires a \"frag_map_type\" read-level tag")?;
         if let RadType::Int(x) = frag_map_t {
             Ok(Self { frag_map_t: x })
         } else {
             bail!(
-                "piscem bulk record context requries that \"frag_map_type\" tag is of type RadType::Int"
+                "piscem bulk record context requires that the \"frag_map_type\" tag is of type RadType::Int"
             );
+        }
+    }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
+    }
+}
+
+impl PiscemBulkRecordContext {
+    /// Build the context from the read tags' declared roles (#64): the single
+    /// read-level tag carrying the [`crate::rad_types::TagRole::MappingType`] role
+    /// supplies the fragment-mapping-type integer width, with no reliance on the
+    /// `frag_map_type` name bridge. A piscem bulk record has exactly one read tag
+    /// (the fragment mapping type) and no barcode/UMI, so this keys on that role.
+    ///
+    /// Returns `Ok(None)` when no read tag declares the role (an un-annotated /
+    /// legacy layout) so the caller can fall back to the name bridge; errors on an
+    /// ambiguous role set or a non-integer role tag.
+    pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
+        use crate::rad_types::TagRole;
+        let mts: Vec<_> = rt
+            .tags
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t.role, TagRole::MappingType))
+            .collect();
+        match mts.as_slice() {
+            // No MappingType role → not role-annotated; let the caller fall back.
+            [] => Ok(None),
+            [(idx, t)] => {
+                let RadType::Int(x) = t.typeid else {
+                    bail!(
+                        "bulk fragment-mapping-type role tag `{}` is not a fixed-width integer",
+                        t.name
+                    );
+                };
+                // The piscem bulk record reader consumes the read header positionally
+                // as `[na][frag_map_type]`, so it must be the sole read tag at index 0.
+                // Otherwise a role-annotated file with a different physical layout would
+                // be silently misread (mirrors the single/multi role readers).
+                anyhow::ensure!(
+                    *idx == 0 && rt.tags.len() == 1,
+                    "piscem bulk role layout must be exactly [MappingType] with no other read \
+                     tags (mapping-type at index {idx}, {} read tags); the record reader is \
+                     positional",
+                    rt.tags.len()
+                );
+                Ok(Some(Self { frag_map_t: x }))
+            }
+            _ => bail!(
+                "piscem bulk record expects exactly one MappingType-role read tag, found {}",
+                mts.len()
+            ),
         }
     }
 }
@@ -1995,11 +2057,68 @@ impl RecordContext for AtacSeqRecordContext {
             bail!("atac-reader record context requires that barcode tags are of type RadType::Int");
         }
     }
+
+    fn get_context_prefer_roles(
+        ft: &TagSection,
+        rt: &TagSection,
+        at: &TagSection,
+    ) -> anyhow::Result<Self> {
+        match Self::from_roles(rt)? {
+            Some(ctx) => Ok(ctx),
+            None => Self::get_context_from_tag_section(ft, rt, at),
+        }
+    }
 }
 
 impl AtacSeqRecordContext {
     pub fn from_bct(bct: RadIntId) -> Self {
         Self { bct }
+    }
+
+    /// Build the context from the read tags' declared roles (#64): the single
+    /// read-level tag carrying the [`crate::rad_types::TagRole::Barcode`] role
+    /// supplies the barcode integer width, with no reliance on the `barcode`/`b`
+    /// name bridge. A scATAC record has exactly one barcode and no UMI, so this
+    /// keys on that lone Barcode role.
+    ///
+    /// Returns `Ok(None)` when no read tag declares the role (an un-annotated /
+    /// legacy layout, e.g. from C++ piscem) so the caller can fall back to the
+    /// name bridge; errors on more than one Barcode role or a non-integer role tag.
+    pub fn from_roles(rt: &TagSection) -> anyhow::Result<Option<Self>> {
+        use crate::rad_types::TagRole;
+        let bcs: Vec<_> = rt
+            .tags
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t.role, TagRole::Barcode { .. }))
+            .collect();
+        match bcs.as_slice() {
+            // No barcode role → not role-annotated; let the caller fall back.
+            [] => Ok(None),
+            [(idx, t)] => {
+                let RadType::Int(x) = t.typeid else {
+                    bail!(
+                        "atac barcode-role read tag `{}` is not a fixed-width integer",
+                        t.name
+                    );
+                };
+                // The scATAC record reader consumes the read header positionally as
+                // `[na][bc]`, so the barcode must be the sole read tag at index 0.
+                // Otherwise a role-annotated file with a different physical layout
+                // would be silently misread (mirrors the single/multi role readers).
+                anyhow::ensure!(
+                    *idx == 0 && rt.tags.len() == 1,
+                    "scATAC role layout must be exactly [Barcode] with no other read tags \
+                     (barcode at index {idx}, {} read tags); the record reader is positional",
+                    rt.tags.len()
+                );
+                Ok(Some(Self { bct: x }))
+            }
+            _ => bail!(
+                "scATAC record expects exactly one Barcode-role read tag, found {}",
+                bcs.len()
+            ),
+        }
     }
 }
 
@@ -3805,6 +3924,109 @@ mod tests {
             RadIntId::U32,
         ));
         assert!(AlevinFryRecordContext::get_context_prefer_roles(&ft, &no_umi, &at).is_err());
+    }
+
+    #[test]
+    fn bulk_context_prefers_mapping_type_role_and_falls_back() {
+        use crate::rad_types::TagRole;
+        use crate::record::{PiscemBulkRecordContext, RecordContext};
+
+        let tag = |name: &str, role: TagRole, int: RadIntId| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(int),
+        };
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        // Role present on a non-conventional name -> read via the role.
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(tag("fmt", TagRole::MappingType, RadIntId::U8));
+        let ctx = PiscemBulkRecordContext::get_context_prefer_roles(&ft, &rt, &at).unwrap();
+        assert_eq!(ctx.frag_map_t, RadIntId::U8);
+
+        // Legacy: named `frag_map_type`, no role -> falls back to the name bridge.
+        let mut legacy = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        legacy.add_tag_desc(tag("frag_map_type", TagRole::None, RadIntId::U8));
+        let ctx = PiscemBulkRecordContext::get_context_prefer_roles(&ft, &legacy, &at).unwrap();
+        assert_eq!(ctx.frag_map_t, RadIntId::U8);
+
+        // Two MappingType roles is ambiguous -> error.
+        let mut two = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        two.add_tag_desc(tag("a", TagRole::MappingType, RadIntId::U8));
+        two.add_tag_desc(tag("b", TagRole::MappingType, RadIntId::U8));
+        assert!(PiscemBulkRecordContext::from_roles(&two).is_err());
+
+        // Role tag not the sole read tag at index 0 -> error (positional reader).
+        let mut extra = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        extra.add_tag_desc(tag("pad", TagRole::None, RadIntId::U32));
+        extra.add_tag_desc(tag("fmt", TagRole::MappingType, RadIntId::U8));
+        assert!(PiscemBulkRecordContext::from_roles(&extra).is_err());
+
+        // No role and no `frag_map_type` name -> the bridge errors (no silent success).
+        let mut empty = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        empty.add_tag_desc(tag("other", TagRole::None, RadIntId::U8));
+        assert!(PiscemBulkRecordContext::get_context_prefer_roles(&ft, &empty, &at).is_err());
+    }
+
+    #[test]
+    fn atac_context_prefers_barcode_role_and_falls_back() {
+        use crate::rad_types::TagRole;
+        use crate::record::{AtacSeqRecordContext, RecordContext};
+
+        let tag = |name: &str, role: TagRole, int: RadIntId| TagDesc {
+            role,
+            name: name.to_string(),
+            typeid: RadType::Int(int),
+        };
+        let ft = TagSection::new_with_label(TagSectionLabel::FileTags);
+        let at = TagSection::new_with_label(TagSectionLabel::AlignmentTags);
+
+        // Role present on a non-conventional name -> read via the role.
+        let mut rt = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rt.add_tag_desc(tag(
+            "cell",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
+        let ctx = AtacSeqRecordContext::get_context_prefer_roles(&ft, &rt, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U32);
+
+        // Legacy C++ name `barcode`, no role -> falls back to the name bridge.
+        let mut cpp = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        cpp.add_tag_desc(tag("barcode", TagRole::None, RadIntId::U32));
+        let ctx = AtacSeqRecordContext::get_context_prefer_roles(&ft, &cpp, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U32);
+
+        // Legacy piscem-rs name `b`, no role -> falls back too.
+        let mut rs = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        rs.add_tag_desc(tag("b", TagRole::None, RadIntId::U64));
+        let ctx = AtacSeqRecordContext::get_context_prefer_roles(&ft, &rs, &at).unwrap();
+        assert_eq!(ctx.bct, RadIntId::U64);
+
+        // Two barcode roles is ambiguous -> error.
+        let mut two = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        two.add_tag_desc(tag(
+            "a",
+            TagRole::Barcode { level: 0, len: 8 },
+            RadIntId::U32,
+        ));
+        two.add_tag_desc(tag(
+            "b2",
+            TagRole::Barcode { level: 1, len: 16 },
+            RadIntId::U32,
+        ));
+        assert!(AtacSeqRecordContext::from_roles(&two).is_err());
+
+        // Barcode role not the sole read tag at index 0 -> error (positional reader).
+        let mut extra = TagSection::new_with_label(TagSectionLabel::ReadTags);
+        extra.add_tag_desc(tag("pad", TagRole::None, RadIntId::U32));
+        extra.add_tag_desc(tag(
+            "bc",
+            TagRole::Barcode { level: 0, len: 16 },
+            RadIntId::U32,
+        ));
+        assert!(AtacSeqRecordContext::from_roles(&extra).is_err());
     }
 
     #[test]
