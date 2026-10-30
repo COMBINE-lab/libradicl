@@ -23,6 +23,9 @@
 //! independently (de)compressible, preserving streaming and parallel access.
 //!
 //! `lz4` (codec id 1) is always available through the pure-Rust `lz4_flex`.
+//! With the default `lz4-safe` feature it uses lz4_flex's all-safe-code paths;
+//! without it, lz4_flex's faster unsafe ones (decompression still
+//! bounds-checked, compressed bytes identical).
 //! `zstd` (codec id 2) requires the crate's `zstd` feature; without it a reader
 //! errors clearly on a zstd chunk rather than producing garbage.
 
@@ -220,6 +223,41 @@ mod tests {
         let c = compress_payload(ChunkCodec::Lz4, &data).unwrap();
         let d = decompress_payload(ChunkCodec::Lz4, &c).unwrap();
         assert_eq!(d, data);
+    }
+
+    // Malformed lz4 input must be an error (or decode to garbage), never a
+    // crash, with or without `lz4-safe` (`checked-decode` covers the unsafe
+    // decoder).
+    #[test]
+    fn lz4_malformed_input_is_not_a_crash() {
+        let data: Vec<u8> = (0..10_000u32)
+            .flat_map(|i| (i.wrapping_mul(2_654_435_761) >> 20).to_le_bytes())
+            .collect();
+        let good = compress_payload(ChunkCodec::Lz4, &data).unwrap();
+        // Truncations are always errors.
+        for cut in [5, good.len() / 2, good.len() - 1] {
+            assert!(
+                decompress_payload(ChunkCodec::Lz4, &good[..cut]).is_err(),
+                "cut {cut}"
+            );
+        }
+        // Corrupted bodies may decode or not, but must not crash.
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..2_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let mut bad = good.clone();
+            let i = 4 + (x as usize) % (bad.len() - 4);
+            bad[i] ^= (x >> 32) as u8 | 1;
+            let _ = decompress_payload(ChunkCodec::Lz4, &bad);
+        }
+        // Random bodies behind a small, plausible size prefix.
+        for len in [1usize, 7, 64, 1000] {
+            let mut junk = 4096u32.to_le_bytes().to_vec();
+            junk.extend((0..len).map(|i| (i as u8).wrapping_mul(151).wrapping_add(7)));
+            let _ = decompress_payload(ChunkCodec::Lz4, &junk);
+        }
     }
 
     #[test]

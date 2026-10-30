@@ -147,6 +147,14 @@ reports a clear error on a zstd chunk rather than mis-parsing it.
 libradicl = { version = "0.18", features = ["zstd"] }
 ```
 
+LZ4 uses `lz4_flex`'s all-safe-code implementation by default (the `lz4-safe` feature).
+Turning default features off selects its faster unsafe implementation instead; decompression
+remains bounds-checked, and the compressed bytes are identical either way:
+
+```toml
+libradicl = { version = "0.21", default-features = false }
+```
+
 ## Bounded collation
 
 The `single_collation` and `multi_collation` modules provide bounded-memory,

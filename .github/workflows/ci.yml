@@ -29,8 +29,9 @@ jobs:
         # `zstd` (RAD chunk codec 2) is off by default so the crate stays pure
         # Rust; enabling it pulls in the C zstd-sys. Both configurations ship, so
         # both are built and tested — otherwise the non-default one only breaks
-        # for whoever turns it on.
-        features: ["", "--features zstd"]
+        # for whoever turns it on. `--no-default-features` drops `lz4-safe`,
+        # selecting lz4_flex's unsafe (still bounds-checked) codec paths.
+        features: ["", "--features zstd", "--no-default-features"]
         include:
           - os: ubuntu-22.04
             target_id: linux-x86_64
@@ -42,6 +43,8 @@ jobs:
             features_id: default
           - features: "--features zstd"
             features_id: zstd
+          - features: "--no-default-features"
+            features_id: no-default
     steps:
       - uses: actions/checkout@v4
 
