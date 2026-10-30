@@ -31,7 +31,7 @@ zstd = ["dep:zstd"]
 libradicl-macros = { version = "0.21.0", path = "../libradicl-macros" }
 snap = "1"
 lz4_flex = "0.14"
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14.3", optional = true }
 scroll = "0.13.0"
 num = "0.4.3"
 ahash = "0.8.12"
@@ -56,5 +56,6 @@ crossbeam-channel = "0.5.15"
 crossbeam-utils = "0.8.22"
 
 [dev-dependencies]
-needletail = "0.7.3"
+# Only `bitkmer` is used (in tests); its file-format compression support is not.
+needletail = { version = "0.7.3", default-features = false }
 indicatif = "0.18.4"
