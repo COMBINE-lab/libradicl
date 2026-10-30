@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.21.1](https://github.com/COMBINE-lab/libradicl/compare/v0.21.0...v0.21.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* Bump zstd to 0.14.3 and trim needletail's dev features ([5a9fbf5](https://github.com/COMBINE-lab/libradicl/commit/5a9fbf5069bba3d7bb46b667a3357190cccb2759))
+
+### Build & CI
+
+* Run the macOS leg on macos-15 ([8d4d365](https://github.com/COMBINE-lab/libradicl/commit/8d4d36500db36db82d8ea3f8cd4fd982353e8118))
+
+### Features
+
+* Add `lz4-safe` default feature to opt out of lz4_flex safe code ([d3534b4](https://github.com/COMBINE-lab/libradicl/commit/d3534b4927987248fe7040bd682fd5fa2f5e054c))
+
 ## [0.21.0](https://github.com/COMBINE-lab/libradicl/compare/v0.20.0...v0.21.0) (2026-09-21)
 
 
@@ -214,6 +229,10 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 ## [0.10.0](https://github.com/COMBINE-lab/libradicl/compare/v0.9.0...v0.10.0) (2024-12-06)
 
 
+### Features
+
+* Add atac-seq-support ([8704b54](https://github.com/COMBINE-lab/libradicl/commit/8704b54215d0adef6183631dbf61170254101767))
+
 ### Miscellaneous
 
 * Release 0.10.0 ([c14759b](https://github.com/COMBINE-lab/libradicl/commit/c14759b45bedc0c8e69606d9fd3a6f6670e3183a))
@@ -229,7 +248,6 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 ### Features
 
 * Deprecated some types, made parallel readers more generic ([5dd74da](https://github.com/COMBINE-lab/libradicl/commit/5dd74da16309409ed75287f611d54f2398b85ae5))
-* Add atac-seq-support ([8704b54](https://github.com/COMBINE-lab/libradicl/commit/8704b54215d0adef6183631dbf61170254101767))
 
 ### Miscellaneous
 
@@ -240,6 +258,7 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 
 ### Bug Fixes
 
+* Add new function ([87dbbd1](https://github.com/COMBINE-lab/libradicl/commit/87dbbd15c8a4fec34bbdba549a488effc583bc78))
 * Add functions for compatibility with alevin-fry changes ([a9df1fa](https://github.com/COMBINE-lab/libradicl/commit/a9df1fa6815cb84d8a350bc72b4212bae47e3d5e))
 
 ### Miscellaneous
@@ -252,7 +271,6 @@ generated from commit messages by [git-cliff](https://git-cliff.org).
 ### Bug Fixes
 
 * Umi type tag is u not b ([67f3e28](https://github.com/COMBINE-lab/libradicl/commit/67f3e280f91571417c895dfece83c30605d2106f))
-* Add new function ([87dbbd1](https://github.com/COMBINE-lab/libradicl/commit/87dbbd15c8a4fec34bbdba549a488effc583bc78))
 
 ### Miscellaneous
 
