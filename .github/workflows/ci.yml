@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-14]
+        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-15]
         # `zstd` (RAD chunk codec 2) is off by default so the crate stays pure
         # Rust; enabling it pulls in the C zstd-sys. Both configurations ship, so
         # both are built and tested — otherwise the non-default one only breaks
@@ -36,7 +36,7 @@ jobs:
             target_id: linux-x86_64
           - os: ubuntu-24.04-arm
             target_id: linux-aarch64
-          - os: macos-14
+          - os: macos-15
             target_id: macos-arm64
           - features: ""
             features_id: default
