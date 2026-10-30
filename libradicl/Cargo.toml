@@ -20,7 +20,15 @@ keywords = [
 categories = ["command-line-utilities", "science"]
 
 [features]
-default = []
+default = ["lz4-safe"]
+# Use lz4_flex's all-safe-code compression and decompression (its default).
+# Disabling it (`default-features = false`) selects lz4_flex's faster unsafe
+# implementations; decompression stays bounds-checked (`checked-decode`), so a
+# malformed chunk is still an error rather than an out-of-bounds access. Both
+# produce identical compressed bytes, so this never changes RAD files. Cargo
+# features are additive: if anything else in the dependency graph enables
+# lz4_flex's safe features, the safe implementations are used.
+lz4-safe = ["lz4_flex/safe-encode", "lz4_flex/safe-decode"]
 # Enables zstd (codec id 2) for RAD chunk compression. Off by default so the
 # crate stays pure-Rust (lz4, codec id 1, is always available via lz4_flex);
 # zstd pulls in the C zstd-sys. Readers built without this feature can still
@@ -30,7 +38,10 @@ zstd = ["dep:zstd"]
 [dependencies]
 libradicl-macros = { version = "0.21.0", path = "../libradicl-macros" }
 snap = "1"
-lz4_flex = "0.14"
+lz4_flex = { version = "0.14", default-features = false, features = [
+  "std",
+  "checked-decode",
+] }
 zstd = { version = "0.14.3", optional = true }
 scroll = "0.13.0"
 num = "0.4.3"
