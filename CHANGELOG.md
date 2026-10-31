@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [conventional commits](https://www.conventionalcommits.org); entries are
 generated from commit messages by [git-cliff](https://git-cliff.org).
 
+## [0.21.2](https://github.com/COMBINE-lab/libradicl/compare/v0.21.1...v0.21.2) (2026-10-31)
+
+
+### Features
+
+* Expose a MetaChunk's raw bytes (`as_bytes`, `raw_chunks`) ([0cf15d5](https://github.com/COMBINE-lab/libradicl/commit/0cf15d5ee55c272b9d74ff64956190067521b6d2))
+
 ## [0.21.1](https://github.com/COMBINE-lab/libradicl/compare/v0.21.0...v0.21.1) (2026-10-30)
 
 
