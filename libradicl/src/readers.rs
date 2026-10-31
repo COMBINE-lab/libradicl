@@ -225,7 +225,68 @@ where
     pub fn first_chunk_index(&self) -> usize {
         self.first_chunk_index
     }
+
+    /// The bytes of this [MetaChunk]'s chunks, back to back and uncompressed:
+    /// each is an 8-byte header (`nbytes: u32`, counting the header itself,
+    /// then `nrec: u32`) followed by its records. For callers that decode the
+    /// records in place rather than through [MetaChunk::iter], which builds an
+    /// owned record (with its own vectors) for every read.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.chunk_blob[..self.num_bytes as usize]
+    }
+
+    /// Iterate over the chunks of this [MetaChunk] without decoding them; see
+    /// [MetaChunk::as_bytes].
+    pub fn raw_chunks(&self) -> RawChunkIter<'_> {
+        RawChunkIter {
+            remaining: self.num_sub_chunks,
+            data: self.as_bytes(),
+        }
+    }
 }
+
+/// One chunk of a [MetaChunk], undecoded: see [MetaChunk::raw_chunks].
+#[derive(Clone, Copy, Debug)]
+pub struct RawChunk<'a> {
+    /// the number of records in the chunk
+    pub num_records: u32,
+    /// the chunk's records, in their on-disk encoding (without the chunk header)
+    pub records: &'a [u8],
+}
+
+/// An iterator over the chunks of a [MetaChunk], yielding each as a
+/// [RawChunk]; see [MetaChunk::raw_chunks].
+pub struct RawChunkIter<'a> {
+    remaining: usize,
+    data: &'a [u8],
+}
+
+impl<'a> Iterator for RawChunkIter<'a> {
+    type Item = RawChunk<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        // The reader wrote each header itself, after checking that a chunk is at
+        // least as long as its header and that all of it was read.
+        let nbytes = u32::from_le_bytes(self.data[0..4].try_into().expect("4 bytes")) as usize;
+        let num_records = u32::from_le_bytes(self.data[4..8].try_into().expect("4 bytes"));
+        let (chunk, rest) = self.data.split_at(nbytes);
+        self.data = rest;
+        Some(RawChunk {
+            num_records,
+            records: &chunk[8..],
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for RawChunkIter<'_> {}
 
 /// This free function is used within the [ParallelRadReader] and [ParallelChunkReader] to
 /// fill a work queue with [MetaChunk]s from the current file position until the end of the
@@ -1629,6 +1690,47 @@ mod tests {
                 "process_parallel with {nworkers} worker(s) did not visit every record"
             );
         }
+    }
+
+    /// `raw_chunks` must hand back exactly the chunks `iter` decodes: each one,
+    /// re-framed with its header and decoded, equals the chunk `iter` yields,
+    /// and `as_bytes` covers the meta-chunk's bytes and nothing past them.
+    #[test]
+    fn raw_chunks_match_decoded_chunks() {
+        use crate::record::AlevinFryReadRecord;
+        use std::sync::Mutex;
+
+        const NCHUNKS: usize = 64;
+        let bytes = test_rad_stream(NCHUNKS);
+        let n = std::num::NonZeroUsize::new(2).unwrap();
+        let mut reader = ParallelRadReader::<AlevinFryReadRecord, _>::new(
+            std::io::BufReader::new(Cursor::new(bytes)),
+            n,
+        );
+        let chunks_seen = Mutex::new(0usize);
+        reader
+            .process_parallel(n, |meta_chunk| {
+                assert_eq!(meta_chunk.as_bytes().len(), meta_chunk.num_bytes() as usize);
+                let raw: Vec<_> = meta_chunk.raw_chunks().collect();
+                assert_eq!(raw.len(), meta_chunk.iter().len());
+                let nrec: u32 = raw.iter().map(|r| r.num_records).sum();
+                assert_eq!(nrec, meta_chunk.num_records());
+                let ctx = meta_chunk.record_context.clone();
+                for (r, decoded) in raw.iter().zip(meta_chunk.iter()) {
+                    let mut framed = Vec::with_capacity(r.records.len() + 8);
+                    framed.extend_from_slice(&((r.records.len() + 8) as u32).to_le_bytes());
+                    framed.extend_from_slice(&r.num_records.to_le_bytes());
+                    framed.extend_from_slice(r.records);
+                    let again = crate::chunk::Chunk::<AlevinFryReadRecord>::from_bytes(
+                        &mut Cursor::new(&framed[..]),
+                        &ctx,
+                    );
+                    assert_eq!(again.reads, decoded.reads);
+                }
+                *chunks_seen.lock().unwrap() += raw.len();
+            })
+            .unwrap();
+        assert_eq!(*chunks_seen.lock().unwrap(), NCHUNKS);
     }
 
     /// A producer that stops early must still release its consumers.
